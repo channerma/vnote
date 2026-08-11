@@ -30,7 +30,8 @@ rather hack on the code, install from a clone instead:
 ```bash
 uv sync                       # creates .venv with deps
 uv pip install -e .           # installs the `vnote` command into the venv
-uv pip install -e '.[claude]' # optional: Anthropic SDK for `--backend claude`
+uv pip install -e '.[claude]' # optional: Anthropic SDK for `--backend claude` (the
+                              # metered API; `--backend claude-code` needs nothing)
 uv pip install -e '.[flow]'   # optional: flow-mode client (pynput, tray)
 ```
 
@@ -50,9 +51,19 @@ PulseAudio bridge via `parec` — `sudo apt install -y pulseaudio-utils`. `pw-re
 
 ## First run & setup
 
-The first time you run `vnote` interactively it asks two questions — which cleanup
-backend (local Ollama vs. cloud Claude) and, for Ollama, which model size (pre-selected
-from your detected GPU memory). Your choice is saved to `~/.config/vnote/config.json`.
+The first time you run `vnote` interactively it asks which cleanup backend to use and,
+for Ollama, which model size (pre-selected from your detected GPU memory). Your choice is
+saved to `~/.config/vnote/config.json`.
+
+The backend menu offers three options, and pre-selects **Claude Code** when that CLI is on
+your PATH (Ollama otherwise, so a machine without it is never steered somewhere it can't
+go):
+
+| Backend | Auth | Notes |
+|---|---|---|
+| `claude-code` | your Claude **subscription** | Best quality, no API key, nothing to download. Needs the [Claude Code CLI](https://claude.com/product/claude-code); run `claude` once to sign in. |
+| `ollama` | none | Private, offline, free. One-time model download. |
+| `claude` | `ANTHROPIC_API_KEY` | Same models, **billed per token**. Needs the `[claude]` extra. |
 
 - Delete that file to run setup again, or `vnote --setup` to re-run it explicitly.
 - Override any choice with a flag or a `VNOTE_*` environment variable.
@@ -81,7 +92,7 @@ vnote memo.m4a             # process an existing audio file
 | `--edit` | editorial cleanup — reorganize into headings/lists (**default**) |
 | `--summary` | condensed rewrite |
 | `--raw` | transcript only, no LLM |
-| `--backend {ollama,claude}` | choose the cleanup backend (Claude needs the `[claude]` extra + key) |
+| `--backend {ollama,claude-code,claude}` | cleanup backend — see [First run & setup](#first-run--setup) |
 | `--model NAME` | override the cleanup model name |
 | `--language CODE` | force transcription language (e.g. `en`); default: auto-detect |
 | `--no-clipboard` | don't touch the clipboard |
@@ -100,8 +111,8 @@ vnote memo.m4a             # process an existing audio file
 `--redo` is handy for trying a different cleanup intensity without re-transcribing (the
 slow part) — e.g. `vnote --redo voice-notes/2026-07-06-1432-… --summary`.
 
-**No GPU?** `--backend claude` runs cleanup in the cloud; transcription falls back to CPU
-automatically — slower, but it works.
+**No GPU?** `--backend claude-code` runs cleanup through your Claude subscription and needs
+no local model at all; transcription falls back to CPU automatically — slower, but it works.
 
 ---
 
@@ -157,7 +168,7 @@ vnote-flow                           # hotkey loop (default: ctrl+shift+space)
 | `--vad` | auto-stop after a pause — no second key press |
 | `--vad-silence S` | seconds of silence that end an utterance (default `1.0`) |
 | `--clean [MODE]` | LLM cleanup before pasting; bare = `dictation` (light). Also `light`/`edit`/`summary` |
-| `--backend {ollama,claude}` | cleanup backend for `--clean` |
+| `--backend {ollama,claude-code,claude}` | cleanup backend for `--clean` (runs daemon-side) |
 | `--model NAME` | override the cleanup model for `--clean` |
 | `--tone TEXT` | free-text tone hint for `--clean` (see [Tone](#tone--per-app-tone)) |
 | `--language CODE` | force transcription language |
@@ -174,6 +185,13 @@ the simplest way to smoke-test the daemon connection.
 
 Point `VNOTE_DICTATION_MODEL` at a small model (e.g. `llama3.2:3b`) to keep `--clean`
 fast.
+
+**Backend choice matters more in flow mode than for notes.** You are waiting on the paste,
+so latency is felt directly: a small local model returns in about a second, while
+`--backend claude-code` spends several seconds per utterance (it launches the CLI each
+time). Claude Code is the better pick for notes; a small Ollama model is usually the
+better pick for dictation. `--backend` is per-run, so you can mix — a saved default of
+`claude-code` with `vnote-flow --clean --backend ollama` for typing.
 
 ---
 
@@ -364,9 +382,10 @@ directory is auto-loaded (see `.env.example`).
 |---|---|
 | `VNOTE_DIR` | `./voice-notes` |
 | `VNOTE_WHISPER_MODEL` | `large-v3-turbo` |
-| `VNOTE_BACKEND` | `ollama` |
+| `VNOTE_BACKEND` | `ollama` (`ollama` \| `claude-code` \| `claude`) |
 | `VNOTE_OLLAMA_MODEL` | `qwen2.5:14b-instruct` |
-| `VNOTE_CLAUDE_MODEL` | `claude-sonnet-4-6` |
+| `VNOTE_CLAUDE_CODE_BIN` | `claude` (path to the Claude Code CLI; `--backend claude-code`) |
+| `VNOTE_CLAUDE_MODEL` | `claude-sonnet-5` (`--backend claude` only) |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` |
 | `VNOTE_DAEMON_HOST` | `127.0.0.1` |
 | `VNOTE_DAEMON_PORT` | `8760` |
@@ -382,7 +401,7 @@ directory is auto-loaded (see `.env.example`).
 | `VNOTE_HISTORY_CLEAN` | on (vnote-flow: `0` = omit cleaned text) |
 | `VNOTE_DICTATION_MODEL` | the `ollama_model` (small/fast model for `--clean`) |
 | `VNOTE_VOCAB` | `~/.config/vnote/vocab.txt` (hotwords + corrections) |
-| `ANTHROPIC_API_KEY` | — (required for `--backend claude`) |
+| `ANTHROPIC_API_KEY` | — (required for `--backend claude`; **not** for `claude-code`) |
 
 ---
 

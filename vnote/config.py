@@ -80,7 +80,11 @@ CHANNELS = 1
 
 # --- LLM cleanup ---
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
-CLAUDE_MODEL = os.environ.get("VNOTE_CLAUDE_MODEL", "claude-sonnet-4-6")
+# Metered-API backend (`--backend claude`) only.
+CLAUDE_MODEL = os.environ.get("VNOTE_CLAUDE_MODEL", "claude-sonnet-5")
+# Subscription backend (`--backend claude-code`): the CLI to shell out to. The
+# model is deliberately not pinned here — Claude Code uses the user's own choice.
+CLAUDE_CODE_BIN = os.environ.get("VNOTE_CLAUDE_CODE_BIN", "claude")
 
 # --- warm daemon (`vnote --serve`) ---
 DAEMON_HOST = os.environ.get("VNOTE_DAEMON_HOST", "127.0.0.1")

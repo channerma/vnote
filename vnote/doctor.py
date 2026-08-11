@@ -83,14 +83,27 @@ def _check_backend(backend: str) -> tuple[str, str]:
         if model in names or any(n == model or n.startswith(model + ":") for n in names):
             return OK, f"Ollama up; model `{model}` pulled"
         return WARN, f"Ollama up, but model `{model}` not pulled — `ollama pull {model}`"
-    # claude
+    if backend == "claude-code":
+        from .cleanup import claude_code_bin
+
+        exe = claude_code_bin()
+        if exe is None:
+            return BAD, (
+                f"claude-code backend selected but the Claude Code CLI "
+                f"({config.CLAUDE_CODE_BIN!r}) is not on PATH"
+            )
+        return OK, f"claude-code backend: CLI at {exe} (uses your Claude subscription)"
+    # claude (metered API)
     try:
         import anthropic  # noqa: F401
     except ImportError:
         return BAD, "claude backend selected but `anthropic` not installed — `uv pip install -e '.[claude]'`"
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        return BAD, "claude backend selected but ANTHROPIC_API_KEY is not set (see .env.example)"
-    return OK, "claude backend: `anthropic` installed and ANTHROPIC_API_KEY set"
+        return WARN, (
+            "claude backend selected but ANTHROPIC_API_KEY is not set — the SDK will "
+            "fall back to an `ant auth login` profile if you have one (see .env.example)"
+        )
+    return OK, f"claude backend: `anthropic` installed, key set, model {config.CLAUDE_MODEL}"
 
 
 def run(backend: str) -> int:

@@ -36,8 +36,11 @@ uv tool install git+https://github.com/greenwoodms06/vnote   # puts `vnote` on y
 
 You also need:
 
-- **[Ollama](https://ollama.com)** for local cleanup — `ollama pull qwen2.5:14b-instruct`
-  (default; ~10 GB VRAM — lighter options exist). Or skip it with `--backend claude` (cloud).
+- **A cleanup backend** — one of:
+  - **[Claude Code](https://claude.com/product/claude-code)** — best quality, uses your
+    Claude subscription, no API key. Nothing to download.
+  - **[Ollama](https://ollama.com)** — local, offline, free: `ollama pull qwen2.5:14b-instruct`
+    (~10 GB VRAM; lighter options exist).
 - On **WSL**, the recorder: `sudo apt install -y pulseaudio-utils`.
 
 The first transcription downloads the Whisper model (~1.6 GB). Then run `vnote --doctor`
@@ -60,8 +63,17 @@ grammar and fillers, `--summary` to condense, or `--raw` for the bare transcript
 You can dictate formatting as you talk — *"make that a bulleted list"*, *"scratch that"*,
 *"put a heading here"* — and the cleanup follows along.
 
-First run asks two quick questions (cleanup backend, and model size for Ollama) and
-saves your choice. See the [User Guide](docs/USER_GUIDE.md) for every flag.
+First run asks which cleanup backend to use (and, for Ollama, which model size) and saves
+your choice — re-run it any time with `vnote --setup`. It suggests Claude Code when that
+CLI is installed, Ollama otherwise. Override per run with `--backend`:
+
+```bash
+vnote --backend claude-code   # your Claude subscription (no API key)
+vnote --backend ollama        # local and offline
+vnote --backend claude        # Anthropic API, billed per token
+```
+
+See the [User Guide](docs/USER_GUIDE.md) for every flag.
 
 ## Quickstart — Flow (dictate into any app)
 

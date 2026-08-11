@@ -1,5 +1,10 @@
 """One-time interactive setup: pick a cleanup backend (and Ollama model).
 
+Three backends are offered. Claude Code is the suggested default *when its CLI is
+actually installed* — it is the best cleanup available without an API key — and
+Ollama is the fallback suggestion otherwise, so a fresh machine is never steered
+toward something it can't run.
+
 Runs only on an interactive terminal, only when nothing has been chosen yet, and
 never when the choice is already forced by ``$VNOTE_BACKEND`` or ``--backend``.
 The result is written to the config file (see ``config.config_file()``); delete
@@ -21,6 +26,13 @@ _OLLAMA_TIERS = [
     ("qwen2.5:7b-instruct", 6, "solid quality — modest GPU (~6 GB VRAM)"),
     ("llama3.2:3b", 3, "fastest, lightest — small GPU or CPU (~3 GB)"),
 ]
+
+
+def claude_code_available() -> bool:
+    """True if the Claude Code CLI is on PATH (so we can suggest it as the default)."""
+    from .cleanup import claude_code_bin
+
+    return claude_code_bin() is not None
 
 
 def should_run(backend_flag: str | None) -> bool:
@@ -95,18 +107,24 @@ def run(backend_flag: str | None, *, force: bool = False) -> None:
         return
 
     print("\nFirst run — let's pick how vnote cleans up your transcripts.\n")
+    have_cc = claude_code_available()
+    choices = [
+        ("claude-code",
+         "Claude Code — top-quality cleanup on your Claude subscription, no API key"
+         + ("" if have_cc else "   [CLI not found on PATH]")),
+        ("ollama",
+         "Local (Ollama) — private, offline, free (needs a one-time model download)"),
+        ("claude",
+         "Anthropic API — same models, billed per token (needs ANTHROPIC_API_KEY)"),
+    ]
+    # Prefer the subscription when it's actually installed; otherwise local-first.
     backend_idx = _ask(
-        "Cleanup backend:",
-        [
-            "Local (Ollama) — private, offline, runs on your machine (needs a model download)",
-            "Cloud (Claude) — higher-quality cleanup via the Anthropic API (needs ANTHROPIC_API_KEY)",
-        ],
-        default=0,
+        "Cleanup backend:", [label for _, label in choices], default=0 if have_cc else 1
     )
+    backend = choices[backend_idx][0]
 
-    cfg: dict = {}
-    if backend_idx == 0:
-        cfg["backend"] = "ollama"
+    cfg: dict = {"backend": backend}
+    if backend == "ollama":
         vram = _detect_vram_gb()
         if vram is not None:
             print(f"\nDetected ~{vram:.0f} GB GPU memory.")
@@ -120,11 +138,16 @@ def run(backend_flag: str | None, *, force: bool = False) -> None:
         cfg["ollama_model"] = tag
         print(f"\n✓ Using Ollama with {tag}.")
         print(f"  Pull it once if you haven't:  ollama pull {tag}")
+    elif backend == "claude-code":
+        print("\n✓ Using Claude Code — cleanup runs on your Claude subscription.")
+        if not have_cc:
+            print("  Install the CLI first:  https://claude.com/product/claude-code")
+        print("  If it has never signed in here, run `claude` once interactively.")
     else:
-        cfg["backend"] = "claude"
-        print(f"\n✓ Using the Claude backend ({config.CLAUDE_MODEL}).")
+        print(f"\n✓ Using the Anthropic API backend ({config.CLAUDE_MODEL}).")
+        print("  This bills per token — `claude-code` uses your subscription instead.")
         if not os.environ.get("ANTHROPIC_API_KEY"):
-            print("  Note: set ANTHROPIC_API_KEY before your first run (see .env.example).")
+            print("  Set ANTHROPIC_API_KEY before your first run (see .env.example).")
         print("  Install the extra if you haven't:  uv pip install -e '.[claude]'")
 
     config.save_config(cfg)

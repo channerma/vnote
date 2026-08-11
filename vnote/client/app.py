@@ -41,7 +41,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--clean", nargs="?", const="dictation", choices=("dictation", *MODES), default=None,
                    help="LLM-clean before injecting: bare --clean means the fast dictation profile "
                         "(default: raw transcript)")
-    p.add_argument("--backend", choices=("ollama", "claude"), default=None, help="cleanup backend for --clean")
+    p.add_argument("--backend", choices=("ollama", "claude-code", "claude"), default=None,
+                   help="cleanup backend for --clean (runs daemon-side)")
     p.add_argument("--model", help="override the cleanup model for --clean")
     p.add_argument("--tone", default=None,
                    help="tone for --clean output (e.g. 'casual', 'formal'); default: per-app "

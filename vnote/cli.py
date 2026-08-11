@@ -4,7 +4,7 @@
     vnote memo.m4a             process an existing audio file
     vnote --light / --summary  cleanup intensity (default: --edit)
     vnote --raw                transcript only, skip the LLM cleanup
-    vnote --backend claude     use the optional Claude cloud backend instead of Ollama
+    vnote --backend claude-code  clean up with Claude Code (uses your subscription)
     vnote --redo DIR           re-run cleanup on a saved note (skips transcription)
     vnote --promote [TAKE]     turn a dictated flow take into its own note folder
     vnote --serve              keep models warm in a localhost daemon (faster runs)
@@ -41,8 +41,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     mode.add_argument("--edit", action="store_const", const="edit", dest="mode", help="editorial cleanup (default)")
     mode.add_argument("--summary", action="store_const", const="summary", dest="mode", help="condensed rewrite")
     p.add_argument("--raw", action="store_true", help="skip the LLM cleanup; keep only the transcript")
-    p.add_argument("--backend", choices=("ollama", "claude"), default=None,
-                   help="cleanup backend (default: ollama, or your saved first-run choice)")
+    p.add_argument("--backend", choices=("ollama", "claude-code", "claude"), default=None,
+                   help="cleanup backend: ollama (local), claude-code (your Claude "
+                        "subscription), claude (metered API). Default: your saved first-run choice")
     p.add_argument("--model", help="override the cleanup model name")
     p.add_argument("--language", help="force transcription language (e.g. 'en'); default: auto-detect")
     p.add_argument("--no-clipboard", action="store_true", help="do not copy the result to the clipboard")
@@ -88,7 +89,8 @@ def _show_config() -> int:
     print(f"  config file : {cf} {'(exists)' if cf.exists() else '(none yet — run `vnote --setup`)'}")
     print(f"  backend     : {config.backend()}")
     print(f"  ollama_model: {config.ollama_model()}")
-    print(f"  claude_model: {CLAUDE_MODEL}")
+    print(f"  claude_model: {CLAUDE_MODEL} (--backend claude only)")
+    print(f"  claude_code : {config.CLAUDE_CODE_BIN} (--backend claude-code)")
     print(f"  dictation   : {config.dictation_model()} (vnote-flow --clean)")
     print(f"  whisper     : {config.WHISPER_MODEL}")
     print(f"  ollama_host : {config.OLLAMA_HOST}")
@@ -164,6 +166,17 @@ def _resolve_redo(path: Path) -> tuple[str, Path | None]:
     raise FileNotFoundError(f"no such path: {path}")
 
 
+def _resolved_model(backend: str, model: str | None) -> str:
+    """The model name to record in meta.json for a finished cleanup."""
+    if model:
+        return model
+    if backend == "ollama":
+        return config.ollama_model()
+    if backend == "claude-code":
+        return "claude-code (session default)"  # the CLI picks; vnote doesn't pin it
+    return CLAUDE_MODEL
+
+
 def _update_meta(session_dir: Path, mode: str, backend: str, model: str | None) -> None:
     meta_path = session_dir / "meta.json"
     try:
@@ -172,7 +185,7 @@ def _update_meta(session_dir: Path, mode: str, backend: str, model: str | None) 
         return
     meta["cleanup_mode"] = mode
     meta["cleanup_backend"] = backend
-    meta["cleanup_model"] = model or (config.ollama_model() if backend == "ollama" else CLAUDE_MODEL)
+    meta["cleanup_model"] = _resolved_model(backend, model)
     meta["recleaned"] = True
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
@@ -311,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
             title = result.title
             note_body = result.body
             cleanup_backend = backend
-            cleanup_model = args.model or (config.ollama_model() if backend == "ollama" else CLAUDE_MODEL)
+            cleanup_model = _resolved_model(backend, args.model)
             _say(f"  done in {cleanup_s}s.")
 
     # 4. Write session folder.

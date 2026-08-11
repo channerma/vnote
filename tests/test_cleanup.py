@@ -1,8 +1,10 @@
-"""Tests for the transcript-cleanup response parser (pure, no network)."""
+"""Tests for the transcript-cleanup prompts, parser and backend dispatch (no network)."""
+
+import subprocess
 
 import pytest
 
-from vnote import config
+from vnote import cleanup, config
 from vnote.cleanup import _build_user_prompt, _finish, _parse_response, clean
 
 
@@ -84,3 +86,93 @@ def test_dictation_model_resolution_order(tmp_path, monkeypatch):
     assert config.dictation_model() == "qwen2.5:3b-instruct"
     monkeypatch.setenv("VNOTE_DICTATION_MODEL", "llama3.2:3b")
     assert config.dictation_model() == "llama3.2:3b"
+
+
+# --- claude-code backend (subscription CLI; no network, no API key) -----------
+
+
+def test_clean_rejects_unknown_backend_and_names_all_three():
+    with pytest.raises(ValueError, match="unknown backend") as exc:
+        clean("x", backend="bogus")
+    for name in ("ollama", "claude-code", "claude"):
+        assert name in str(exc.value)
+
+
+def test_claude_code_missing_cli_explains_how_to_fix(monkeypatch):
+    monkeypatch.setattr(cleanup, "claude_code_bin", lambda: None)
+    with pytest.raises(RuntimeError, match="Claude Code CLI") as exc:
+        clean("hello", backend="claude-code")
+    assert "VNOTE_CLAUDE_CODE_BIN" in str(exc.value)
+
+
+def _fake_run(recorder, *, stdout="TITLE: T\n---\nbody", returncode=0, stderr=""):
+    def run(cmd, **kwargs):
+        recorder["cmd"] = cmd
+        recorder["input"] = kwargs.get("input")
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+
+    return run
+
+
+def test_claude_code_disables_tools_and_pipes_prompt_on_stdin(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run(rec))
+
+    result = clean("um so the parser broke", mode="edit", backend="claude-code")
+
+    assert rec["cmd"][:2] == ["/usr/bin/claude", "-p"]
+    # Tools off: a pure text transform needs no filesystem/network access.
+    assert rec["cmd"][rec["cmd"].index("--allowed-tools") + 1] == ""
+    assert "--system-prompt" in rec["cmd"]
+    # No --model unless asked: don't pin the user's subscription to one model.
+    assert "--model" not in rec["cmd"]
+    # Transcript travels on stdin, not argv (argv caps out on long notes).
+    assert "um so the parser broke" in rec["input"]
+    assert not any("um so the parser broke" in part for part in rec["cmd"])
+    assert (result.title, result.body) == ("T", "body")
+
+
+def test_claude_code_passes_model_only_when_given(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run(rec))
+    clean("x", backend="claude-code", model="claude-opus-5")
+    assert rec["cmd"][rec["cmd"].index("--model") + 1] == "claude-opus-5"
+
+
+def test_claude_code_dictation_mode_returns_plain_text(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run(rec, stdout="cleaned words\n"))
+    result = clean("raw words", mode="dictation", backend="claude-code")
+    assert result.body == "cleaned words"  # no TITLE framing parsed in dictation mode
+
+
+def test_claude_code_nonzero_exit_surfaces_stderr(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(
+        cleanup.subprocess, "run", _fake_run(rec, returncode=1, stdout="", stderr="not logged in")
+    )
+    with pytest.raises(RuntimeError, match="not logged in"):
+        clean("x", backend="claude-code")
+
+
+def test_claude_code_empty_output_is_an_error(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run(rec, stdout="   \n"))
+    with pytest.raises(RuntimeError, match="empty response"):
+        clean("x", backend="claude-code")
+
+
+def test_claude_code_timeout_is_reported(monkeypatch):
+    monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
+
+    def boom(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 600)
+
+    monkeypatch.setattr(cleanup.subprocess, "run", boom)
+    with pytest.raises(RuntimeError, match="timed out"):
+        clean("x", backend="claude-code")

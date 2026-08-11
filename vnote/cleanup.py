@@ -1,20 +1,25 @@
 """LLM cleanup: turn a raw transcript into a tidy, well-organized note.
 
-Pluggable backends: ``ollama`` (local, default) and ``claude`` (optional cloud
-backend — needs the ``claude`` extra and ``ANTHROPIC_API_KEY``).
+Pluggable backends, all sharing one prompt and one response parser:
+
+- ``ollama``      local, offline, no account (the zero-setup default).
+- ``claude-code`` the Claude Code CLI — uses your Claude subscription, no API key.
+- ``claude``      the Anthropic API — needs the ``claude`` extra and a metered
+                  ``ANTHROPIC_API_KEY``.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from .config import CLAUDE_MODEL, OLLAMA_HOST, dictation_model, ollama_model
+from .config import CLAUDE_CODE_BIN, CLAUDE_MODEL, OLLAMA_HOST, dictation_model, ollama_model
 
 # --- prompt construction -----------------------------------------------------
 
@@ -128,9 +133,15 @@ def clean(
     if backend == "ollama":
         default = dictation_model() if mode == "dictation" else ollama_model()
         return _clean_ollama(transcript, mode, model or default, tone)
+    if backend == "claude-code":
+        # No default model: let the Claude Code CLI use whatever the user's own
+        # setup selects, so vnote never pins their subscription to one model.
+        return _clean_claude_code(transcript, mode, model, tone)
     if backend == "claude":
         return _clean_claude(transcript, mode, model or CLAUDE_MODEL, tone)
-    raise ValueError(f"unknown backend: {backend!r} (expected 'ollama' or 'claude')")
+    raise ValueError(
+        f"unknown backend: {backend!r} (expected 'ollama', 'claude-code' or 'claude')"
+    )
 
 
 # --- Ollama ---
@@ -201,7 +212,62 @@ def _clean_ollama(transcript: str, mode: str, model: str, tone: str | None = Non
     return _finish(content, transcript, mode)
 
 
-# --- Claude (optional cloud backend) ---
+# --- Claude Code CLI (subscription, no API key) ---
+
+_CLAUDE_CODE_TIMEOUT_S = 600
+
+
+def claude_code_bin() -> str | None:
+    """Path to the Claude Code executable, or None if it isn't installed."""
+    return shutil.which(CLAUDE_CODE_BIN)
+
+
+def _clean_claude_code(
+    transcript: str, mode: str, model: str | None = None, tone: str | None = None
+) -> CleanResult:
+    """Clean up via the Claude Code CLI — bills your subscription, not an API key.
+
+    Tools are disabled: this is a pure text transform, so the model needs no
+    filesystem, shell or network access. The prompt goes in on stdin rather than
+    argv, which would cap out on a long transcript.
+    """
+    exe = claude_code_bin()
+    if exe is None:
+        raise RuntimeError(
+            f"The claude-code backend needs the Claude Code CLI on PATH (looked for {CLAUDE_CODE_BIN!r}).\n"
+            "    Install it:              https://claude.com/product/claude-code\n"
+            "    Or point vnote at it:    VNOTE_CLAUDE_CODE_BIN=/path/to/claude\n"
+            "    Or use the local backend:  --backend ollama"
+        )
+
+    cmd = [exe, "-p", "--allowed-tools", "", "--system-prompt", _system_for(mode)]
+    if model:
+        cmd += ["--model", model]
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=_build_user_prompt(transcript, mode, tone),
+            capture_output=True,
+            text=True,
+            timeout=_CLAUDE_CODE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Claude Code timed out after {_CLAUDE_CODE_TIMEOUT_S}s") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Could not run Claude Code ({exe}): {exc}") from exc
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:500] or f"exit {proc.returncode}"
+        raise RuntimeError(
+            f"Claude Code failed: {detail}\n"
+            "    If it needs sign-in, run `claude` once interactively first."
+        )
+    if not proc.stdout.strip():
+        raise RuntimeError("empty response from Claude Code")
+    return _finish(proc.stdout, transcript, mode)
+
+
+# --- Claude (optional metered API backend) ---
 
 
 def _clean_claude(transcript: str, mode: str, model: str, tone: str | None = None) -> CleanResult:
@@ -209,6 +275,10 @@ def _clean_claude(transcript: str, mode: str, model: str, tone: str | None = Non
 
     Reuses the same system prompt, user prompt and response parser as the local
     backend so the two produce the same TITLE/--- output shape.
+
+    No sampling parameters are sent: `temperature`/`top_p`/`top_k` are rejected
+    with a 400 on current models (Sonnet 5, Opus 5, Opus 4.8/4.7), so passing one
+    would pin this backend to an older generation.
     """
     try:
         import anthropic
@@ -231,7 +301,6 @@ def _clean_claude(transcript: str, mode: str, model: str, tone: str | None = Non
         resp = client.messages.create(
             model=model,
             max_tokens=8192,
-            temperature=0.3,
             system=_system_for(mode),
             messages=[{"role": "user", "content": _build_user_prompt(transcript, mode, tone)}],
         )

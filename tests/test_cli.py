@@ -1,5 +1,6 @@
 """Tests for argument parsing (no audio, no models touched)."""
 
+from vnote import cli, config
 from vnote.cli import _parse_args
 
 
@@ -54,3 +55,14 @@ def test_promote_flag_error_exits_nonzero(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(output, "NOTES_DIR", tmp_path)
     assert cli.main(["--promote"]) == 1
     assert "error:" in capsys.readouterr().err
+
+
+def test_resolved_model_per_backend(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("VNOTE_OLLAMA_MODEL", raising=False)
+    # An explicit --model always wins.
+    assert cli._resolved_model("claude-code", "claude-opus-5") == "claude-opus-5"
+    assert cli._resolved_model("ollama", None) == config.ollama_model()
+    assert cli._resolved_model("claude", None) == config.CLAUDE_MODEL
+    # claude-code is deliberately unpinned — the CLI picks the model.
+    assert "claude-code" in cli._resolved_model("claude-code", None)

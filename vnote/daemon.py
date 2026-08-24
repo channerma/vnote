@@ -123,7 +123,7 @@ class StreamSession:
     def append(self, pcm_chunk: bytes) -> str:
         """Send new audio; returns the latest partial transcript ('' until the first pass).
 
-        Blocks while the daemon runs a partial pass — call from a pump thread.
+        Returns immediately: the daemon transcribes on its own worker and the partial lags a little.
         """
         req = urllib.request.Request(
             f"{_base()}/stream/append?sid={quote(self.sid)}",

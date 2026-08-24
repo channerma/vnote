@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from vnote import cleanup, config, daemon, server, transcribe
+from vnote import cleanup, config, daemon, output, server, transcribe
+from vnote.audio import BYTES_PER_S as server_BYTES_PER_S
 from vnote.cleanup import CleanResult
 
 _seen: dict = {}  # what the fake pipeline functions were called with, per test
@@ -34,10 +35,25 @@ def _fake_revise(note_text, instructions, backend="ollama", model=None):
     return CleanResult(title="Revised", body="Shorter body.")
 
 
+def _fake_spans(pcm: bytes) -> list[tuple[float, float]]:
+    """Stand-in for vad.speech_spans: nonzero samples are speech (so onnxruntime stays out)."""
+    spoken = len(pcm.rstrip(b"\x00"))
+    return [(0.0, ((spoken + 1) // 2 * 2) / server_BYTES_PER_S)] if spoken else []
+
+
+def _drop_live_sessions() -> None:
+    for sess in list(server._registry.sessions.values()):
+        sess.close(keep_audio=False)  # worker threads must never outlive a test
+    server._registry.sessions.clear()
+
+
 @pytest.fixture
-def live_server(monkeypatch):
+def live_server(monkeypatch, tmp_path):
     _seen.clear()
-    server._sessions.clear()
+    _drop_live_sessions()
+    server._registry.ttl_s = server._STREAM_TTL_S
+    monkeypatch.setattr(server._registry, "vad", _fake_spans)
+    monkeypatch.setattr(output, "NOTES_DIR", tmp_path)  # nothing a test does may touch the real notes folder
     monkeypatch.setattr(transcribe, "transcribe", _fake_transcribe)
     monkeypatch.setattr(cleanup, "clean", _fake_clean)
     monkeypatch.setattr(cleanup, "revise", _fake_revise)  # the other half of Phase 9's cleanup
@@ -47,6 +63,7 @@ def live_server(monkeypatch):
     yield httpd
     httpd.shutdown()
     httpd.server_close()
+    _drop_live_sessions()
 
 
 def test_health(live_server):
@@ -102,6 +119,15 @@ def test_unknown_path_is_404(live_server):
 
 
 # --- streaming sessions --------------------------------------------------------
+#
+# The live model is asynchronous now: /stream/append stores the audio and returns
+# at once, and a per-session worker fills in the text. So every assertion about a
+# partial polls to a deadline instead of expecting the answer in the reply.
+
+import time  # noqa: E402
+
+SPEECH_SAMPLE = b"\x01\x00"  # _fake_spans reads nonzero samples as speech
+SILENCE_SAMPLE = b"\x00\x00"
 
 
 def _wav_frames(wav: bytes) -> int:
@@ -112,20 +138,151 @@ def _wav_frames(wav: bytes) -> int:
         return w.getnframes()
 
 
+def _poll(fn, timeout: float = 5.0):
+    """Wait for fn() to return something truthy — the live worker is a real thread."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = fn()
+        if value:
+            return value
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out after {timeout}s waiting for the live worker")
+        time.sleep(0.02)
+
+
+def _stream_state(sid: str) -> dict:
+    """The session's full snapshot, read by appending nothing."""
+    status, _, body = _request("POST", f"/stream/append?sid={sid}", b"",
+                               {"Content-Type": "application/octet-stream"})
+    assert status == 200, body
+    return _json.loads(body)
+
+
 def test_stream_round_trip_with_partials(live_server):
     sess = daemon.StreamSession(language="en")
-    quarter_s = b"\x01\x00" * 4_000  # 0.25 s of PCM
-    assert sess.append(quarter_s) == ""  # below the 0.5 s partial threshold
-    assert sess.append(quarter_s) == "fake transcript"  # threshold crossed -> partial pass
-    assert _wav_frames(_seen["bytes"]) == 8_000  # partial saw the full 0.5 s buffer
+    half_s = SPEECH_SAMPLE * 8_000  # 0.5 s of speech — the smallest tail worth a pass
+    assert sess.append(half_s) == ""  # the request returns before the worker has run
+    assert _poll(lambda: sess.append(b"")) == "fake transcript"
+    assert _wav_frames(_seen["bytes"]) == 8_000  # the pass saw the *tail*, not a growing buffer
     assert _seen["language"] == "en"
+
+    sess.append(SILENCE_SAMPLE * 24_000)  # 1.5 s of silence closes the segment
+    committed = _poll(lambda: _stream_state(sess.sid)["committed"])
+    assert [seg["text"] for seg in committed] == ["fake transcript"]
+    state = _stream_state(sess.sid)
+    assert state["tail"] == "" and state["partial"] == "fake transcript"
+    assert state["seconds"] == 2.0
 
     text, _meta = sess.finish()
     assert text == "fake transcript"
-    assert _wav_frames(_seen["bytes"]) == 8_000  # final saw everything appended
+    assert _wav_frames(_seen["bytes"]) == 32_000  # the final pass saw everything appended
 
     with pytest.raises(RuntimeError, match="unknown stream session"):  # finish() drops the session
-        sess.append(quarter_s)
+        sess.append(half_s)
+
+
+def test_stream_finish_reports_the_live_transcript(live_server):
+    sess = daemon.StreamSession(language="en")
+    sess.append(SPEECH_SAMPLE * 8_000)
+    _poll(lambda: sess.append(b""))
+    status, _, body = _request("POST", f"/stream/finish?sid={sess.sid}", b"")
+    assert status == 200, body
+    data = _json.loads(body)
+    assert data["transcript"] == "fake transcript" and data["meta"]["device"] == "fake"
+    assert data["live_transcript"] == "fake transcript"  # what the page already had on screen
+
+
+def test_stream_finish_writes_the_note_from_the_daemon_held_audio(notes_dir):
+    sess = daemon.StreamSession(language="en")
+    sess.append(SPEECH_SAMPLE * 8_000)
+    _poll(lambda: sess.append(b""))
+    status, _, body = _request(
+        "POST", f"/stream/finish?sid={sess.sid}&note=1&mode=summary&backend=ollama", b"")
+    assert status == 200, body
+    data = _json.loads(body)
+    assert server._SESSION_RE.fullmatch(data["name"])
+    assert data["note"] == "# Fake Title\n\nFake body.\n" and data["transcript"] == "fake transcript"
+    assert data["live_transcript"] == "fake transcript"
+    assert data["meta"]["source"] == "web-live" and data["meta"]["cleanup_mode"] == "summary"
+    assert data["meta"]["versions"]  # the note folder starts its version history like any other
+
+    folder = notes_dir / data["name"]
+    assert _wav_frames((folder / "audio.wav").read_bytes()) == 8_000  # no second upload on stop
+    assert (folder / "note.md").exists() and (folder / "transcript.txt").exists()
+    assert not _seen["path"].exists()  # the temp WAV is gone; the folder holds its own copy
+    assert sess.sid not in server._registry.sessions
+
+
+def test_stream_finish_rejects_a_bad_mode(live_server):
+    # A rejected Stop must not take the recording with it: the options are validated
+    # while the session is still alive, so the user can fix the mode and stop again.
+    sess = daemon.StreamSession()
+    sess.append(SPEECH_SAMPLE * 8_000)
+    status, _, body = _request("POST", f"/stream/finish?sid={sess.sid}&note=1&mode=nope", b"")
+    assert status == 400 and b"bad mode" in body
+
+    live = server._registry.sessions.get(sess.sid)
+    assert live is not None and live.pcm_path().read_bytes() == SPEECH_SAMPLE * 8_000
+    status, _, body = _request(
+        "POST", f"/stream/finish?sid={sess.sid}&note=1&mode=summary&backend=ollama", b"")
+    assert status == 200, body  # the retry gets the note, from the same audio
+
+
+def test_a_second_finish_is_404(live_server):
+    sess = daemon.StreamSession()
+    sess.append(SPEECH_SAMPLE * 8_000)
+    status, _, body = _request("POST", f"/stream/finish?sid={sess.sid}", b"")
+    assert status == 200, body
+    status, _, body = _request("POST", f"/stream/finish?sid={sess.sid}", b"")
+    assert status == 404 and b"unknown stream session" in body  # a double Stop is not a 500
+
+
+def test_stream_finish_keeps_the_audio_when_transcription_fails(notes_dir, monkeypatch):
+    def broken(audio_path, language=None):
+        raise RuntimeError("CUDA device lost")
+
+    sess = daemon.StreamSession()
+    live = server._registry.sessions[sess.sid]
+    sess.append(SPEECH_SAMPLE * 16_000)  # 1 s
+    monkeypatch.setattr(transcribe, "transcribe", broken)
+    status, _, body = _request("POST", f"/stream/finish?sid={sess.sid}", b"")
+    assert status == 500
+    data = _json.loads(body)
+    assert "CUDA device lost" in data["error"]
+    kept = Path(data["audio_kept"])
+    assert kept.parent == notes_dir / "failed"
+    assert _wav_frames(kept.read_bytes()) == 16_000  # the whole recording, not just the last tail
+    assert not live.pcm_path().exists()  # the spill became that WAV; it was not simply deleted
+    assert not server._infer_lock.locked()
+
+
+def test_stream_finish_keeps_the_audio_when_the_transcript_is_empty(notes_dir, monkeypatch):
+    def silent(audio_path, language=None):
+        return "", {}
+
+    sess = daemon.StreamSession()
+    live = server._registry.sessions[sess.sid]
+    sess.append(SPEECH_SAMPLE * 16_000)
+    monkeypatch.setattr(transcribe, "transcribe", silent)
+    status, _, body = _request(
+        "POST", f"/stream/finish?sid={sess.sid}&note=1&mode=summary&backend=ollama", b"")
+    assert status == 400
+    data = _json.loads(body)
+    assert "no speech" in data["error"]  # ... but "no speech detected" is the model's opinion, not proof
+    kept = Path(data["audio_kept"])
+    assert kept.parent == notes_dir / "failed" and _wav_frames(kept.read_bytes()) == 16_000
+    assert not live.pcm_path().exists()
+    assert [p.name for p in notes_dir.iterdir()] == ["failed"]  # no half-written note folder
+
+
+def test_stream_start_normalises_the_language(live_server):
+    def language_of(sess) -> str | None:
+        return server._registry.sessions[sess.sid].language
+
+    assert language_of(daemon.StreamSession(language="auto")) is None
+    assert language_of(daemon.StreamSession(language="")) is None
+    assert language_of(daemon.StreamSession()) is None
+    assert language_of(daemon.StreamSession(language="fr")) == "fr"
 
 
 def test_stream_finish_without_audio_is_an_error(live_server):
@@ -143,7 +300,7 @@ def test_stream_unknown_sid_is_404(live_server):
 
 def test_stream_sessions_expire(live_server):
     sess = daemon.StreamSession()
-    server._sessions[sess.sid].last_seen -= server._STREAM_TTL_S + 1
+    server._registry.sessions[sess.sid].last_seen -= server._STREAM_TTL_S + 1
     daemon.StreamSession()  # any /stream/start sweeps expired sessions
     with pytest.raises(RuntimeError, match="unknown stream session"):
         sess.append(b"\x00\x00")
@@ -153,10 +310,39 @@ def test_stream_expired_sid_404s_without_a_new_start(live_server):
     # The TTL is enforced on the touch itself — a crashed client's buffer must
     # not linger until some future /stream/start happens to sweep it.
     sess = daemon.StreamSession()
-    server._sessions[sess.sid].last_seen -= server._STREAM_TTL_S + 1
+    server._registry.sessions[sess.sid].last_seen -= server._STREAM_TTL_S + 1
     with pytest.raises(RuntimeError, match="unknown stream session"):
         sess.append(b"\x00\x00")
-    assert sess.sid not in server._sessions  # buffer freed, not just refused
+    assert sess.sid not in server._registry.sessions  # buffer freed, not just refused
+
+
+def test_an_abandoned_session_keeps_its_audio(notes_dir):
+    # The daemon owns the audio: a browser that never came back must not take the
+    # recording with it, so an expiring session spills its PCM into failed/.
+    sess = daemon.StreamSession()
+    sess.append(SPEECH_SAMPLE * 16_000)  # 1 s
+    live = server._registry.sessions[sess.sid]
+    live.last_seen -= server._STREAM_TTL_S + 1
+    server._registry.sweep()
+
+    kept = sorted((notes_dir / "failed").glob("live-*.wav"))
+    assert len(kept) == 1 and _wav_frames(kept[0].read_bytes()) == 16_000
+    assert sess.sid not in server._registry.sessions
+    assert not live.pcm_path().exists()  # the temp spill is gone; the WAV is the copy
+
+
+def test_two_abandoned_sessions_do_not_overwrite_each_other(notes_dir):
+    # One sweep saves both inside the same second, so the second-resolution stamp
+    # alone would leave one recording only. The session id keeps the names apart.
+    first, second = daemon.StreamSession(), daemon.StreamSession()
+    for sess in (first, second):
+        sess.append(SPEECH_SAMPLE * 16_000)
+        server._registry.sessions[sess.sid].last_seen -= server._STREAM_TTL_S + 1
+    server._registry.sweep()
+
+    kept = sorted((notes_dir / "failed").glob("live-*.wav"))
+    assert len(kept) == 2
+    assert {_wav_frames(p.read_bytes()) for p in kept} == {16_000}
 
 
 # --- the web UI: static files, notes, /api/note, settings, vocab ------------------
@@ -164,8 +350,6 @@ def test_stream_expired_sid_404s_without_a_new_start(live_server):
 import json as _json  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
-
-from vnote import output  # noqa: E402
 
 
 def _url(path: str) -> str:
@@ -667,23 +851,24 @@ def test_revise_endpoint_mirrors_clean(live_server):
 def test_stream_ping_keeps_a_paused_session_alive(live_server):
     assert server._STREAM_TTL_S == 1800.0  # a pause has to survive; 120 s did not
     sess = daemon.StreamSession()
-    server._sessions[sess.sid].last_seen -= 200  # far past the old 120 s TTL
-    aged = server._sessions[sess.sid].last_seen
+    live = server._registry.sessions[sess.sid]
+    live.last_seen -= 200  # far past the old 120 s TTL
+    aged = live.last_seen
     status, data = _send_json("POST", f"/stream/ping?sid={sess.sid}", {})
     assert status == 200 and data == {"ok": True}
-    assert server._sessions[sess.sid].last_seen > aged  # the ping is what moved the clock
+    assert live.last_seen > aged  # the ping is what moved the clock
     assert sess.append(b"\x00\x00") == ""  # still usable after the pause
 
     # A nearly-expired session survives the next sweep *because* of the ping; one that
     # was not pinged does not (/stream/start sweeps before it hands out a new sid).
     doomed = daemon.StreamSession()
-    server._sessions[sess.sid].last_seen -= server._STREAM_TTL_S - 10  # ~1790 s old
-    server._sessions[doomed.sid].last_seen -= server._STREAM_TTL_S + 1
+    live.last_seen -= server._STREAM_TTL_S - 10  # ~1790 s old
+    server._registry.sessions[doomed.sid].last_seen -= server._STREAM_TTL_S + 1
     status, _ = _send_json("POST", f"/stream/ping?sid={sess.sid}", {})
     assert status == 200
     daemon.StreamSession()  # starting a session sweeps the expired ones
-    assert sess.sid in server._sessions
-    assert doomed.sid not in server._sessions
+    assert sess.sid in server._registry.sessions
+    assert doomed.sid not in server._registry.sessions
 
     status, data = _send_json("POST", "/stream/ping?sid=nope", {})
     assert status == 404 and "unknown stream session" in data["error"]
@@ -727,3 +912,18 @@ def test_opening_a_pre_versions_note_migrates_it(notes_dir):
     assert status == 200 and v1["text"] == "# Legacy\n\nold text\n"
     status, data = _send_json("POST", "/api/notes/2026-08-10-0900-legacy/restore", {"n": 1})
     assert status == 200 and data["version"] == 2
+
+
+def test_stream_cancel_drops_the_session_and_its_audio(live_server):
+    sess = daemon.StreamSession()
+    sess.append(b"\x01\x00" * 16000)
+    spill = server._registry.sessions[sess.sid].pcm_path()
+    assert spill.exists()
+    status, _, body = _request("POST", f"/stream/cancel?sid={sess.sid}")
+    assert status == 200 and _json.loads(body) == {"cancelled": True}
+    assert sess.sid not in server._registry.sessions
+    assert not spill.exists()  # cancelled = dropped, nothing kept under failed/
+    failed = output.NOTES_DIR / "failed"
+    assert not failed.exists() or not any(failed.iterdir())
+    status, _, _ = _request("POST", f"/stream/cancel?sid={sess.sid}")
+    assert status == 404

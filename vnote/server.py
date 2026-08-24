@@ -23,14 +23,13 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__, config, output, versions
+from . import __version__, config, output, stream, versions
 from .audio import BYTES_PER_S, wav_bytes
 
 _infer_lock = threading.Lock()
@@ -65,48 +64,73 @@ def _transcribe_pcm(pcm: bytes, language: str | None) -> tuple[str, dict]:
 
 # --- streaming sessions ------------------------------------------------------
 #
-# Chunked HTTP instead of WebSockets (stdlib has none): the client POSTs raw
-# PCM chunks into a session; every >=0.5 s of new audio triggers a synchronous
-# re-transcription of the whole buffer whose text is returned as the partial.
-# Partials are best-effort; only /stream/finish must not fail.
+# Chunked HTTP instead of WebSockets (stdlib has none): the client POSTs raw PCM
+# chunks into a session. The incremental model lives in stream.py — committed
+# segments plus an uncommitted tail, transcribed on a per-session worker so the
+# request never waits on the GPU. Partials are best-effort; only /stream/finish
+# must not fail.
 
-_MIN_NEW_PCM = BYTES_PER_S // 2  # re-transcribe after >=0.5 s of new audio
 _STREAM_TTL_S = 1800.0  # drop sessions this long after their last touch — a long pause must survive
 #                        (30 min; /stream/ping keeps a paused session alive without sending audio)
-
-_sessions: dict[str, _StreamSession] = {}
-_sessions_lock = threading.Lock()
+_MIN_KEEP_PCM = BYTES_PER_S // 2  # an abandoned session shorter than this is not worth saving
 
 
-class _StreamSession:
-    def __init__(self, language: str | None) -> None:
-        self.language = language
-        self.buf = bytearray()
-        self.partial = ""
-        self.last_seen = time.monotonic()
-        self._transcribed = 0  # buffer length at the last partial pass
+def _speech_spans(pcm: bytes) -> list[tuple[float, float]]:
+    """VAD for the live worker; the import drags in onnxruntime, so it stays lazy."""
+    from . import vad
 
-    def append(self, chunk: bytes) -> str:
-        self.buf += chunk
-        self.last_seen = time.monotonic()
-        if len(self.buf) - self._transcribed >= _MIN_NEW_PCM:
-            snapshot = bytes(self.buf)
+    return vad.speech_spans(pcm)
+
+
+def _keep_live_audio(pcm: bytes, sid: str) -> Path | None:
+    """Park a live recording in ``failed/`` as a WAV — the daemon holds the only copy.
+
+    The session id is in the name because a batch sweep can save several sessions
+    inside the same second, and a one-second stamp alone would overwrite them.
+    """
+    try:
+        dest_dir = _notes_dir() / "failed"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"live-{datetime.now():%Y%m%d-%H%M%S}-{sid[:8]}.wav"
+        dest.write_bytes(wav_bytes(pcm))
+        return dest
+    except OSError:
+        return None
+
+
+def _save_abandoned(session: stream.LiveSession) -> None:
+    """A session that expired mid-recording still holds the only copy of that audio."""
+    try:
+        pcm = session.pcm_path().read_bytes()
+        if len(pcm) < _MIN_KEEP_PCM:
+            return
+        dest = _keep_live_audio(pcm, session.sid)
+        if dest is not None:
+            print(f"  live session {session.sid} expired; its audio is in {dest}", flush=True)
+    except Exception:  # noqa: BLE001 - the sweep must never fail on a broken temp file
+        pass
+
+
+def _sweep_stale_spills() -> None:
+    """Drop ``vnote-live-*.pcm`` files a previous daemon left behind when it was killed."""
+    cutoff = time.time() - 3600.0
+    removed = 0
+    try:
+        for path in Path(tempfile.gettempdir()).glob("vnote-live-*.pcm"):
             try:
-                self.partial, _ = _transcribe_pcm(snapshot, self.language)
-                self._transcribed = len(snapshot)
-            except Exception:  # noqa: BLE001 - partials are best-effort
-                pass
-        return self.partial
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    except OSError:  # an unreadable temp dir is not worth a failed start
+        return
+    if removed:
+        print(f"  removed {removed} stale live-recording spill file(s)", flush=True)
 
-    def finish(self) -> tuple[str, dict]:
-        return _transcribe_pcm(bytes(self.buf), self.language)
 
-
-def _sweep_sessions() -> None:
-    cutoff = time.monotonic() - _STREAM_TTL_S
-    with _sessions_lock:
-        for sid in [s for s, sess in _sessions.items() if sess.last_seen < cutoff]:
-            del _sessions[sid]
+_registry = stream.Registry(ttl_s=_STREAM_TTL_S, transcribe_pcm=_transcribe_pcm,
+                            vad=_speech_spans, on_expire=_save_abandoned)
 
 
 # --- the web UI: static files + note folders ---------------------------------
@@ -270,6 +294,60 @@ _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 def _one(query: dict[str, list[str]], key: str, default: str | None = None) -> str | None:
     values = query.get(key)
     return values[0] if values and values[0] != "" else default
+
+
+def _note_options(query: dict[str, list[str]]) -> tuple[str, str, str | None, bool]:
+    """``(mode, backend, model, raw)`` from the query params /api/note and /stream/finish share."""
+    raw = (_one(query, "raw") or "0").lower() in ("1", "true", "yes")
+    if raw:  # no LLM runs, so a bad saved default mode/backend must not block a raw recording
+        mode, backend = "edit", config.BUILTIN_BACKEND
+    else:
+        mode = _one(query, "mode") or config.default_mode()
+        if mode not in config.MODES:
+            raise _BadRequest(f"bad mode: {mode!r} (one of {', '.join(config.MODES)})")
+        backend = _one(query, "backend") or config.backend()
+        if backend not in config.setting("backend").choices:
+            raise _BadRequest(f"bad backend: {backend!r}")
+    return mode, backend, _one(query, "model"), raw
+
+
+def _note_from_audio(tmp: Path, *, mode: str, backend: str, model: str | None, language: str | None,
+                     raw: bool, source: str, extra: dict) -> tuple[int, dict]:
+    """``tmp`` (an audio file we own) → a finished note folder → ``(status, payload)``.
+
+    Shared by /api/note and /stream/finish?note=1. The reply is decided here and sent
+    by the caller *after* ``tmp`` is gone: the response releases the client, which may
+    observe (or assert) that the upload was removed. ``tmp`` never survives this call —
+    it is either consumed, moved into ``failed/`` or unlinked.
+    """
+    from . import cleanup, pipeline, transcribe
+
+    def locked_transcribe(path: Path, language: str | None = None):
+        with _infer_lock:  # guards the GPU model only — an LLM round-trip must not block /transcribe
+            return transcribe.transcribe(path, language=language)
+
+    try:
+        try:
+            result = pipeline.make_note(
+                tmp, transcribe_fn=locked_transcribe, clean_fn=cleanup.clean,
+                mode=mode, backend=backend, model=model, language=language, raw=raw, source=source,
+            )
+        except pipeline.EmptyTranscriptError:
+            return 400, {"error": "no speech detected"}
+        except Exception as exc:  # noqa: BLE001 - the upload is the only copy of the recording: keep it
+            kept = _preserve_upload(tmp)
+            return 500, {"error": f"{type(exc).__name__}: {exc}", "audio_kept": str(kept) if kept else None}
+        return 200, {
+            "name": result.session_dir.name,
+            "title": result.title,
+            "note": result.note_text,
+            "transcript": result.transcript,
+            "meta": result.meta,
+            "cleanup_error": result.cleanup_error,
+            **extra,
+        }
+    finally:
+        tmp.unlink(missing_ok=True)  # the session folder (or failed/) holds its own copy now
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -487,17 +565,7 @@ class _Handler(BaseHTTPRequestHandler):
         fmt = (_one(query, "format") or "webm").lower()
         if not _FORMAT_RE.fullmatch(fmt):
             return self._send(400, {"error": f"bad format: {fmt!r}"})
-        raw = (_one(query, "raw") or "0").lower() in ("1", "true", "yes")
-        if raw:  # no LLM runs, so a bad saved default mode/backend must not block a raw recording
-            mode, backend = "edit", config.BUILTIN_BACKEND
-        else:
-            mode = _one(query, "mode") or config.default_mode()
-            if mode not in config.MODES:
-                return self._send(400, {"error": f"bad mode: {mode!r} (one of {', '.join(config.MODES)})"})
-            backend = _one(query, "backend") or config.backend()
-            if backend not in config.setting("backend").choices:
-                return self._send(400, {"error": f"bad backend: {backend!r}"})
-        model = _one(query, "model")
+        mode, backend, model, raw = _note_options(query)
         language = _one(query, "language") or config.language()
         if language and language.lower() == "auto":  # the page's way to override a saved language
             language = None
@@ -507,36 +575,11 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(self.rfile.read(n))
-            from . import cleanup, pipeline, transcribe
-
-            def locked_transcribe(path: Path, language: str | None = None):
-                with _infer_lock:  # guards the GPU model only — an LLM round-trip must not block /transcribe
-                    return transcribe.transcribe(path, language=language)
-
-            # Decide the reply here, send it AFTER the temp file is gone: the response
-            # releases the client, which may observe (or assert) that the upload was removed.
-            try:
-                result = pipeline.make_note(
-                    tmp, transcribe_fn=locked_transcribe, clean_fn=cleanup.clean,
-                    mode=mode, backend=backend, model=model, language=language, raw=raw, source="web",
-                )
-            except pipeline.EmptyTranscriptError:
-                reply = (400, {"error": "no speech detected"})
-            except Exception as exc:  # noqa: BLE001 - the upload is the only copy of the recording: keep it
-                kept = _preserve_upload(tmp)
-                reply = (500, {"error": f"{type(exc).__name__}: {exc}", "audio_kept": str(kept) if kept else None})
-            else:
-                reply = (200, {
-                    "name": result.session_dir.name,
-                    "title": result.title,
-                    "note": result.note_text,
-                    "transcript": result.transcript,
-                    "meta": result.meta,
-                    "cleanup_error": result.cleanup_error,
-                })
-        finally:
-            tmp.unlink(missing_ok=True)  # the session folder (or failed/) holds its own copy now
-        self._send(*reply)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        self._send(*_note_from_audio(tmp, mode=mode, backend=backend, model=model, language=language,
+                                     raw=raw, source="web", extra={}))
 
     def _api_save_note(self, name: str) -> None:
         """PUT the note text the user edited in the page — a new version (op ``edit``)."""
@@ -614,16 +657,73 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "transcript is empty"})
         self._send(200, {"title": result.title, "note": result.note_text, "version": result.version})
 
-    def _stream_session(self, url) -> tuple[str, _StreamSession] | None:
+    def _stream_session(self, url) -> tuple[str, stream.LiveSession] | None:
         """Look up ?sid=...; sends the 404 itself when the session is unknown/expired."""
-        _sweep_sessions()  # enforce the TTL on every touch, not only /stream/start
         sid = (parse_qs(url.query).get("sid") or [""])[0]
-        with _sessions_lock:
-            sess = _sessions.get(sid)
+        sess = _registry.get(sid)  # sweeps first: the TTL is enforced on every touch
         if sess is None:
             self._send(404, {"error": f"unknown stream session: {sid!r}"})
             return None
         return sid, sess
+
+    def _stream_finish(self, url) -> None:
+        """End a live session: the daemon-held PCM is the audio, live text the fallback.
+
+        Stop is the one request that must never lose a recording, so the order is:
+        validate everything *while the session is still alive* (a 400 leaves it running
+        and the user can just press Stop again), then take it out of the registry, then
+        keep the audio — in the note folder on success, in ``failed/`` on anything else.
+        """
+        found = self._stream_session(url)
+        if found is None:
+            return
+        sid, sess = found
+        query = parse_qs(url.query)
+        want_note = (_one(query, "note") or "0").lower() in ("1", "true", "yes")
+        mode = backend = model = None
+        raw = False
+        if want_note:
+            mode, backend, model, raw = _note_options(query)  # a bad mode/backend: 400, session intact
+        language = _one(query, "language") or sess.language or config.language()
+        if language and language.lower() == "auto":
+            language = None
+        if _registry.pop(sid) is None:  # a second Stop (or the TTL sweep) got here first
+            return self._send(404, {"error": f"unknown stream session: {sid!r}"})
+        pcm_path = sess.close(keep_audio=True)
+        live = sess.live_transcript()  # after close(): the worker's last commit is in it
+        pcm = pcm_path.read_bytes() if pcm_path is not None else b""
+        if not pcm:
+            if pcm_path is not None:
+                pcm_path.unlink(missing_ok=True)
+            return self._send(400, {"error": "no audio received"})
+        try:
+            if want_note:
+                fd, name = tempfile.mkstemp(prefix="vnote-live-", suffix=".wav")
+                tmp = Path(name)
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(wav_bytes(pcm))
+                except Exception:
+                    tmp.unlink(missing_ok=True)
+                    raise
+                status, payload = _note_from_audio(tmp, mode=mode, backend=backend, model=model,
+                                                   language=language, raw=raw, source="web-live",
+                                                   extra={"live_transcript": live})
+            else:
+                text, meta = _transcribe_pcm(pcm, language)
+                status, payload = 200, {"transcript": text, "meta": meta, "live_transcript": live}
+        except Exception as exc:  # noqa: BLE001 - the recording outlives every failure below
+            status, payload = 500, {"error": f"{type(exc).__name__}: {exc}", "live_transcript": live}
+        if status == 200:
+            pcm_path.unlink(missing_ok=True)  # the note folder (or the client) has the audio now
+        else:
+            kept = payload.get("audio_kept") or _keep_live_audio(pcm, sid)
+            if kept:
+                payload["audio_kept"] = str(kept)
+                pcm_path.unlink(missing_ok=True)  # failed/ holds the copy
+            else:  # nothing could be written there: the spill *is* the recording, so leave it
+                payload["audio_kept"] = str(pcm_path)
+        self._send(status, payload)
 
     def do_POST(self) -> None:
         if self._cross_site():
@@ -678,34 +778,31 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, {"title": result.title, "body": result.body})
             elif url.path == "/stream/start":
                 data = self._read_json()
-                _sweep_sessions()
-                sid = uuid.uuid4().hex
-                with _sessions_lock:
-                    _sessions[sid] = _StreamSession(data.get("language"))
-                self._send(200, {"session_id": sid})
+                language = str(data.get("language") or "").strip()
+                if not language or language.lower() == "auto":  # same rule as finish and /api/note
+                    language = None
+                self._send(200, {"session_id": _registry.start(language).sid})
             elif url.path == "/stream/ping":
                 found = self._stream_session(url)
                 if found is None:
                     return
-                found[1].last_seen = time.monotonic()  # a paused recorder keeps its session alive
+                found[1].ping()  # a paused recorder keeps its session alive
                 self._send(200, {"ok": True})
             elif url.path == "/stream/append":
                 found = self._stream_session(url)
                 if found is None:
                     return
                 n = self._body_len()
-                self._send(200, {"partial": found[1].append(self.rfile.read(n) if n else b"")})
+                self._send(200, found[1].append(self.rfile.read(n) if n else b""))
+            elif url.path == "/stream/cancel":
+                sid = (parse_qs(url.query).get("sid") or [""])[0]
+                sess = _registry.pop(sid)
+                if sess is None:
+                    return self._send(404, {"error": f"unknown stream session: {sid!r}"})
+                sess.close(keep_audio=False)  # the user backed out: drop the session and its audio
+                self._send(200, {"cancelled": True})
             elif url.path == "/stream/finish":
-                found = self._stream_session(url)
-                if found is None:
-                    return
-                sid, sess = found
-                with _sessions_lock:
-                    _sessions.pop(sid, None)
-                if not sess.buf:
-                    return self._send(400, {"error": "no audio received"})
-                text, meta = sess.finish()
-                self._send(200, {"transcript": text, "meta": meta})
+                self._stream_finish(url)
             else:
                 self._send(404, {"error": "not found"})
         except _BadRequest as exc:
@@ -755,6 +852,7 @@ def serve(open_browser: bool = False) -> int:
         return 1
     _started = time.monotonic()
     url = f"http://{host}:{port}"
+    _sweep_stale_spills()  # a killed daemon leaves its live spills behind; nobody else will
     print(f"vnote daemon — warming {config.WHISPER_MODEL} ...", flush=True)
     device = _warm()
     print(f"  warm on {device}; web UI + API at {url}  (Ctrl-C to stop)", flush=True)

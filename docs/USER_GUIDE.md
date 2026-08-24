@@ -105,8 +105,19 @@ vnote --serve               # same, without launching a browser — open the URL
 4. The result appears with a **Copy** button (Markdown), a warning if cleanup failed and
    you're looking at the raw transcript, and an **open in Notes** shortcut.
 
-The recording is saved as `audio.webm` (Chrome / Edge / Firefox) or `audio.mp4` (Safari)
-in the note folder, alongside `transcript.txt`, `note.md` and `meta.json`.
+**Live transcript** (the "Live transcript" toggle, on by default where the browser supports
+it): the words appear as you speak. Settled text stays put — you can select and copy it
+mid-sentence, while paused, and while the daemon is processing after Stop — and the last
+few words render dimmer while they may still change. In live mode the browser streams raw
+audio to the daemon, which keeps it; on Stop the daemon transcribes the whole recording in
+one pass (the live text is a preview — the final transcript reads better across pauses)
+and writes the note, so there is nothing to upload and a browser crash mid-recording loses
+nothing: an abandoned live session is saved as `voice-notes/failed/live-<stamp>.wav`
+after 30 minutes. Live recordings are saved as `audio.wav`.
+
+With live transcript off, the recording is saved as `audio.webm` (Chrome / Edge / Firefox)
+or `audio.mp4` (Safari) and uploaded on Stop. Either way the note folder holds the audio,
+`transcript.txt`, `note.md` and `meta.json`.
 
 ### Notes
 
@@ -312,7 +323,12 @@ What the page talks to; handy for scripts too. JSON unless noted; errors are non
 | `POST /transcribe` | JSON `{audio_path, language?}` (shared filesystem) or the audio as an `application/octet-stream` body with `?format=` → `{transcript, meta}` |
 | `POST /clean` | `{transcript, mode?, backend?, model?, tone?, instructions?}` → `{title, body}` |
 | `POST /revise` | `{note, instructions, backend?, model?}` → `{title, body}` |
-| `POST /stream/start` · `/stream/append?sid=` · `/stream/ping?sid=` · `/stream/finish?sid=` | live partials: raw s16le 16 kHz mono PCM chunks in, text out; `ping` keeps a paused session alive (sessions expire 30 min after the last touch) |
+| `POST /stream/start` | `{language?}` → `{session_id}` — opens a live session; the daemon keeps the audio |
+| `POST /stream/append?sid=` | body = raw s16le 16 kHz mono PCM → `{partial, committed, tail, seconds}`, at once: a per-session worker transcribes the uncommitted tail and commits it at a silence boundary (or after 30 s), so the request never waits on the GPU |
+| `POST /stream/ping?sid=` | `{ok: true}` — keeps a paused session alive (sessions expire 30 min after the last touch; an abandoned one's audio lands in `failed/live-*.wav`) |
+| `POST /stream/cancel?sid=` | drop a live session and its audio (the user backed out) → `{cancelled: true}` |
+| `POST /stream/finish?sid=` | → `{transcript, meta, live_transcript}` — one full pass over the whole recording (authoritative), with the live text alongside for comparison |
+| `POST /stream/finish?sid=&note=1&mode=…&backend=…&model=…&language=…&raw=0` | the daemon-held audio → a finished note folder: the `/api/note` payload plus `live_transcript` (no second upload on stop) |
 
 ---
 

@@ -9,7 +9,14 @@
 >
 > **Status:** Phase 1 (API foundations) built 2026-08-24 — versions, edit, revise,
 > instructions (also `vnote --instructions`), reveal, `/stream/ping` + 30-min TTL, and
-> the current page wired to them with the brief's ids. Phases 2–5 not started.
+> the current page wired to them with the brief's ids. Phase 2 (daemon-side incremental
+> streaming: `vnote/stream.py`, VAD commits, per-session worker, PCM spill,
+> `/stream/finish?note=1`, abandoned audio → `failed/live-*.wav`) built the same day;
+> Phase 3 (AudioWorklet capture + live pane in the current page) built. **Design chosen
+> 2026-08-24: exploration 1a — stage + drawer**; the Claude Design handoff (index.html,
+> style.css, HANDOFF.md) is recorded under `docs/design/handoff/`; Phase 4 = rewire
+> `app.js` to it (state via `data-view` / `data-state` / `data-live` / `data-raw` /
+> `data-daemon` attributes, as the handoff specifies). Phase 5 not started.
 
 ## What the Body asked for (after recording a real session in the 0.5.0 page)
 
@@ -104,8 +111,11 @@ Nothing else needs it for short recordings, but every real note (2.5–7 min) do
 **Phase 3 — browser live capture + live pane (medium).** `AudioWorklet` PCM at 16 kHz →
 `/stream/append` · live pane = committed paragraphs (stable DOM) + a re-rendered tail ·
 selection/copy survive updates and pause · stop → finish → note · fallback to
-`MediaRecorder` when live is off or the worklet is unavailable · a `live_transcript`
-setting. Depends on Phase 2 for anything beyond ~1 minute.
+`MediaRecorder` when live is off or the worklet is unavailable · the live toggle is a
+per-browser pick remembered in localStorage with the other picks (not a daemon setting —
+it depends on the browser's `AudioWorklet` support, so it belongs to the page) · the tab
+keeps a safety copy of the PCM so a lost session can still be uploaded as a WAV note.
+Depends on Phase 2 for anything beyond ~1 minute.
 
 **Phase 4 — the new layout from Claude Design (medium; parallel with 2–3).** Sidebar
 (history by day, search later) · stage + drawer · editor with version picker · revise

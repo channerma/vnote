@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>vnote</title>
+<link rel="stylesheet" href="/static/style.css" />
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+
+<!--
+  vnote 0.5.0 — layout 1a (stage + drawer).
+  All ids from the contract appear exactly once. No behaviour lives in this file.
+
+  State is CSS-driven from two attributes app.js sets:
+    <div class="app" data-view="note|settings">
+    <section id="view-note" data-state="idle|recording|paused|processing|note">
+  Optional flags:
+    #view-note[data-live="off"]        hides the live transcript, shows the big timer
+    .app[data-daemon="down"]           read-only banner, transport disabled
+    #note-warning[hidden]              remove hidden to show "cleanup failed"
+    #mic-help[hidden] / #retry[hidden] edge states
+    .note[data-raw="hidden"]           collapses the raw drawer
+-->
+
+<div class="app" data-view="note">
+
+  <aside id="sidebar">
+    <div class="side-head">
+      <span class="brand">vnote</span>
+      <button id="sidebar-toggle" class="icon-btn" type="button" aria-label="Collapse sidebar" title="Collapse sidebar">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
+      </button>
+    </div>
+
+    <div class="side-actions">
+      <button id="new-note" class="btn btn-primary btn-wide" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ico"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        <span>New note</span>
+      </button>
+      <input id="notes-search" type="search" placeholder="Search notes" autocomplete="off" />
+      <!-- stats strip: delete this one div to remove it -->
+      <div class="stats"><span>7 notes this week</span><span>29 min</span></div>
+    </div>
+
+    <div id="notes-list">
+      <div class="day">Today</div>
+
+      <a class="note-row is-active" href="#" aria-current="true">
+        <span class="note-row-title">Auth flow rethink</span>
+        <span class="note-row-meta"><span>14:12</span><span>6:41</span><span class="tag">edit</span></span>
+      </a>
+      <a class="note-row" href="#">
+        <span class="note-row-title">Standup notes — infra</span>
+        <span class="note-row-meta"><span>09:58</span><span>3:02</span><span class="tag">summary</span></span>
+      </a>
+      <a class="note-row" href="#">
+        <span class="note-row-title">renew the domain before friday</span>
+        <span class="note-row-meta"><span>08:41</span><span>0:12</span><span class="tag">dictation</span></span>
+      </a>
+
+      <div class="day">Yesterday</div>
+      <a class="note-row" href="#">
+        <span class="note-row-title">Onboarding copy pass</span>
+        <span class="note-row-meta"><span>17:20</span><span>5:18</span><span class="tag">light</span></span>
+      </a>
+      <a class="note-row" href="#">
+        <span class="note-row-title">Call w/ Marta — pricing</span>
+        <span class="note-row-meta"><span>11:04</span><span>7:03</span><span class="tag">edit</span></span>
+      </a>
+
+      <div class="day">Aug 22</div>
+      <a class="note-row" href="#">
+        <span class="note-row-title">Backup script rewrite</span>
+        <span class="note-row-meta"><span>16:47</span><span>4:29</span><span class="tag">raw</span></span>
+      </a>
+      <a class="note-row" href="#">
+        <span class="note-row-title">Ideas for the changelog</span>
+        <span class="note-row-meta"><span>10:12</span><span>2:51</span><span class="tag">edit</span></span>
+      </a>
+    </div>
+
+    <div id="notes-empty" hidden>
+      <strong>No notes yet</strong>
+      <p>Press New note and talk. Everything stays in <code>~/vnote/notes</code> on this machine.</p>
+    </div>
+
+    <div class="side-foot">
+      <button id="nav-settings" class="link-btn" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ico"><circle cx="12" cy="12" r="3"></circle><circle cx="12" cy="12" r="9"></circle></svg>
+        <span>Settings</span>
+      </button>
+      <div id="daemon-info">vnote 0.5.0 · large-v3-turbo on cuda</div>
+    </div>
+  </aside>
+
+  <main class="stage">
+
+    <section id="view-note" data-state="note" data-live="on">
+
+      <!-- transport / status bar -->
+      <header class="topbar">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="rec-status">New note</span>
+        <span id="timer">02:14</span>
+        <div class="transport">
+          <button id="record" class="btn btn-primary" type="button">
+            <span class="rec-dot" aria-hidden="true"></span><span>Record</span>
+          </button>
+          <button id="pause" class="btn btn-secondary" type="button">Pause</button>
+          <button id="stop" class="btn btn-primary" type="button">Stop</button>
+        </div>
+        <div class="topbar-right">
+          <span id="live-copy-status" class="inline-status" role="status"></span>
+          <button id="live-copy" class="btn btn-secondary btn-sm" type="button">Copy text</button>
+        </div>
+      </header>
+
+      <div class="progress" aria-hidden="true"><span></span></div>
+      <p id="process-status" role="status">Transcribing 6:41 of audio, then cleaning with edit — usually 20–40 s.</p>
+
+      <!-- idle: the invitation and the per-recording picks -->
+      <div class="idle">
+        <h1>Ready when you are.</h1>
+        <p class="lede">2 to 7 minutes of thinking out loud is the sweet spot. <kbd>Space</kbd> pauses and resumes while you record.</p>
+        <hr class="rule" />
+        <div class="picks">
+          <p class="field">
+            <label for="pick-mode">Mode</label>
+            <select id="pick-mode">
+              <option value="light">light — fix fillers and grammar</option>
+              <option value="edit" selected>edit — headings and lists</option>
+              <option value="summary">summary — condense</option>
+              <option value="dictation">dictation — plain text, fast</option>
+              <option value="raw">raw — no LLM</option>
+            </select>
+          </p>
+          <p class="field">
+            <label for="pick-backend">Backend</label>
+            <select id="pick-backend">
+              <option value="ollama" selected>ollama · qwen2.5:14b</option>
+              <option value="claude">claude</option>
+            </select>
+          </p>
+          <p class="field">
+            <label for="pick-language">Language</label>
+            <select id="pick-language">
+              <option value="en" selected>en</option>
+              <option value="">auto</option>
+            </select>
+          </p>
+          <label class="check"><input id="live-toggle" type="checkbox" checked /> <span>Show live transcript</span></label>
+        </div>
+        <p class="hint">These apply to this recording only; the defaults come from Settings.</p>
+      </div>
+
+      <!-- edge states -->
+      <div id="mic-help" class="banner" hidden>
+        <strong>The browser will not hand over the microphone.</strong>
+        <p>Either permission was denied for this origin, or the page is not on a secure context. Open <code>http://localhost:8760</code> — not the WSL IP — and allow the mic from the address-bar icon.</p>
+      </div>
+      <div class="banner" id="retry-wrap" hidden>
+        <strong>Upload failed — the recording is still here.</strong>
+        <p>The audio is held in this tab and nothing has been lost. <button id="retry" class="btn btn-primary btn-sm" type="button">Retry upload</button></p>
+      </div>
+
+      <!-- live transcript is the whole stage while recording -->
+      <div id="live">
+        <div class="live-inner">
+          <div class="micro">Live transcript</div>
+          <p class="live-text"><span id="live-committed">Okay, so the auth flow thing — I keep coming back to it. The magic links do work, but the fifteen-minute expiry is just wrong for people who read their mail on a phone. They come back later and it is dead. So there are two options. One is to extend it to sixty minutes and make it single use. The other is to keep fifteen, but if the link is expired you can mint a new one without typing your address again. I think the second one, honestly. It costs a screen, but it removes the dead end,</span> <span id="live-tail">and the dead end is what generates the</span></p>
+        </div>
+        <div class="big-timer" aria-hidden="true">02:14</div>
+      </div>
+
+      <!-- the finished note -->
+      <article class="note" data-raw="shown">
+        <header class="note-head">
+          <div class="note-head-main">
+            <h1 id="note-title" contenteditable="true" spellcheck="false">Auth flow rethink</h1>
+            <div id="note-meta"><span>Today 14:12</span><span>6:41</span><span>edit</span><span>ollama · qwen2.5:14b</span><span>large-v3-turbo · en</span><span>transcribe 11.4s · clean 18.9s</span></div>
+          </div>
+          <div class="note-head-actions">
+            <select id="version-select" aria-label="Version">
+              <option>v3 · revise: “shorter” · 14:32</option>
+              <option>v2 · regenerate: summary · 14:24</option>
+              <option>v1 · original · 14:19</option>
+            </select>
+            <button id="version-restore" class="btn btn-secondary btn-sm" type="button">Restore</button>
+            <button id="note-continue" class="btn btn-pending btn-sm" type="button" disabled title="Coming: appends more audio to this note">
+              <span class="rec-dot" aria-hidden="true"></span><span>Continue recording</span>
+            </button>
+          </div>
+        </header>
+
+        <div id="note-warning" hidden>
+          <strong>Cleanup failed</strong> — this is the raw transcript, unedited. The audio and transcript are saved.
+        </div>
+
+        <div class="note-body">
+          <div class="pane pane-note">
+            <div class="pane-head">
+              <span class="micro">Note · Markdown</span>
+              <span id="note-save-status" class="inline-status" role="status">saved 14:33</span>
+              <span id="note-copy-status" class="inline-status" role="status"></span>
+              <button id="note-save" class="btn btn-primary btn-sm" type="button">Save</button>
+              <button id="note-copy" class="btn btn-secondary btn-sm" type="button">Copy</button>
+            </div>
+            <textarea id="note-editor" spellcheck="false" aria-label="Note, Markdown">## Where we are
+
+Magic links work, but the 15-minute expiry is wrong for anyone who reads mail on a phone and comes back later. Two fixes are on the table:
+
+- Extend to 60 minutes, single use.
+- Keep 15 minutes, but let an expired link mint a fresh one without retyping the address.
+
+## What I actually think
+
+The second one. It costs a screen, but it removes the dead end — and the dead end is what generates support mail.
+
+## Next
+
+- [ ] Write the expired-link screen
+- [ ] Check whether the token table needs another index
+- [ ] Ask Marta whether the pricing copy depends on signup at all</textarea>
+          </div>
+
+          <div class="pane pane-raw">
+            <div class="pane-head">
+              <span class="micro">Raw transcript</span>
+              <button id="note-raw-copy" class="btn btn-secondary btn-sm" type="button">Copy</button>
+              <button id="note-raw-toggle" class="link-btn accent" type="button">Hide</button>
+            </div>
+            <div id="note-raw">okay so um the auth flow thing i keep coming back to it, the magic links do work uh but the fifteen minute expiry is just wrong for people who read their mail on a phone right, they come back later and it's dead. so two options i think, one is extend it to sixty minutes and make it single use, the other one is keep fifteen but if the link is expired you can just get a new one without typing your address again. um i think the second one honestly, it costs a screen but it removes the dead end and the dead end is what generates the support mail so yeah. next steps write the expired link screen, check if the token table needs a new index, and ask marta whether the pricing copy depends on the signup flow at all.</div>
+          </div>
+        </div>
+
+        <footer class="note-foot">
+          <div class="reprocess">
+            <p class="field">
+              <label for="regenerate-mode">Regenerate from raw</label>
+              <select id="regenerate-mode">
+                <option value="light">light</option>
+                <option value="edit">edit</option>
+                <option value="summary" selected>summary</option>
+                <option value="dictation">dictation</option>
+              </select>
+            </p>
+            <button id="regenerate" class="btn btn-secondary" type="button">Regenerate</button>
+            <span class="vrule" aria-hidden="true"></span>
+            <p class="field grow">
+              <label for="revise-instructions">Revise this note</label>
+              <input id="revise-instructions" type="text" placeholder="turn the second half into a checklist" />
+            </p>
+            <button id="revise" class="btn btn-primary" type="button">Revise</button>
+          </div>
+          <div class="artefacts">
+            <audio id="note-audio" controls preload="none"></audio>
+            <code id="note-path">~/vnote/notes/2026-08-24T14-12-03_auth-flow-rethink</code>
+            <button id="note-path-copy" class="btn btn-secondary btn-sm" type="button">Copy path</button>
+            <button id="note-reveal" class="link-btn accent" type="button">Open folder</button>
+          </div>
+        </footer>
+      </article>
+    </section>
+
+    <section id="view-settings">
+      <header class="topbar topbar-plain">
+        <span class="micro">Settings</span>
+        <span id="settings-status" class="inline-status" role="status">saved · restart the daemon for model changes</span>
+        <button id="settings-save" class="btn btn-primary btn-sm" type="button">Save</button>
+      </header>
+
+      <div class="settings-scroll">
+        <table class="settings">
+          <thead>
+            <tr><th>Setting</th><th>What it does</th><th>Value</th><th>Source</th></tr>
+          </thead>
+          <tbody id="settings-table">
+            <tr>
+              <td><strong>Cleanup mode</strong><code>VNOTE_CLEAN_MODE</code></td>
+              <td>Default mode for a new recording. light fixes fillers · edit reorganizes · summary condenses · dictation stays plain · raw skips the LLM.</td>
+              <td><select><option>edit</option></select></td>
+              <td><span class="badge">file</span></td>
+            </tr>
+            <tr>
+              <td><strong>Cleanup backend</strong><code>VNOTE_BACKEND</code></td>
+              <td>Which LLM tidies the transcript. ollama keeps everything on this machine; claude uses your subscription and sends the transcript out.</td>
+              <td><select><option>ollama</option></select></td>
+              <td><span class="badge">default</span></td>
+            </tr>
+            <tr>
+              <td><strong>Whisper model</strong><code>VNOTE_MODEL</code></td>
+              <td>Loaded once at start-up and held on the GPU.</td>
+              <td><code>large-v3-turbo</code><span class="why">set VNOTE_MODEL and restart the daemon</span></td>
+              <td><span class="badge badge-env">env</span></td>
+            </tr>
+            <tr>
+              <td><strong>Device</strong><code>VNOTE_DEVICE</code></td>
+              <td>cuda or cpu.</td>
+              <td><code>cuda</code><span class="why">overridden by VNOTE_DEVICE</span></td>
+              <td><span class="badge badge-env">env</span></td>
+            </tr>
+            <tr>
+              <td><strong>Notes folder</strong><code>VNOTE_NOTES_DIR</code></td>
+              <td>Where audio, transcript, note and versions are written — one folder per note.</td>
+              <td><input type="text" value="~/vnote/notes" class="mono" /></td>
+              <td><span class="badge">file</span></td>
+            </tr>
+            <tr>
+              <td><strong>Language</strong><code>VNOTE_LANGUAGE</code></td>
+              <td>Forces a transcription language. Empty means auto-detect per recording.</td>
+              <td><input type="text" value="en" class="mono" /></td>
+              <td><span class="badge">default</span></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <hr class="rule" />
+
+        <div class="vocab-block">
+          <div class="vocab-head">
+            <h2>Vocabulary</h2>
+            <span id="vocab-status" class="inline-status" role="status">saved 14:02 · 6 entries</span>
+            <button id="vocab-save" class="btn btn-secondary btn-sm" type="button">Save vocabulary</button>
+          </div>
+          <p class="hint">One entry per line. A bare word biases transcription toward it. <code>wrong -&gt; right</code> replaces it afterwards, so it fixes what the model insists on hearing.</p>
+          <textarea id="vocab" spellcheck="false" aria-label="Vocabulary">faster-whisper
+Ollama
+qwen2.5
+v note -> vnote
+we sler -> Wispr
+mag iclink -> magic link</textarea>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+</body>
+</html>

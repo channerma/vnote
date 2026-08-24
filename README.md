@@ -54,8 +54,10 @@ setup and names anything missing. (On WSL, **CLI** mic recording additionally ne
 vnote --serve --open        # loads the models once, opens http://127.0.0.1:8760
 ```
 
-- **Record** → talk → **Pause** / **Resume** (or Space) → **Stop**. Pick the cleanup mode
-  (light / edit / summary / dictation / raw) and the backend per recording.
+- **Record** → talk → **Pause** / **Resume** (or Space) → **Stop**. With **Live transcript**
+  on, the words appear as you speak and stay copyable — while paused, and while the note is
+  being cleaned up after Stop. Pick the cleanup mode (light / edit / summary / dictation /
+  raw) and the backend per recording.
 - The note appears with a **Copy** button; it is also saved under `voice-notes/`.
 - **Notes**: every note you've made, newest first — play the audio, copy, **edit** the
   Markdown, regenerate in another mode or **revise** it with an instruction ("make it

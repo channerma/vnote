@@ -41,6 +41,10 @@
         <span>Language</span>
         <input type="text" id="pick-language" placeholder="auto" autocomplete="off" spellcheck="false">
       </label>
+      <label class="pick pick-toggle">
+        <input type="checkbox" id="live-toggle">
+        <span>Live transcript</span>
+      </label>
     </div>
 
     <div class="recorder">
@@ -53,6 +57,20 @@
     <p id="rec-status" class="status">ready</p>
     <button type="button" id="retry" hidden>Retry upload</button>
     <p class="hint">Space pauses and resumes while recording (unless you are typing in a field).</p>
+
+    <div id="live" class="card live" hidden>
+      <div class="live-pane">
+        <div id="live-committed" class="live-committed"></div><span id="live-tail" class="live-tail"></span>
+      </div>
+      <p class="hint">
+        A preview, transcribed in pieces as you talk. On Stop the whole recording is
+        transcribed again in one pass — that pass, not this text, becomes the note.
+      </p>
+      <div class="row">
+        <button type="button" id="live-copy">Copy live text</button>
+        <span id="live-copy-status" class="status inline"></span>
+      </div>
+    </div>
 
     <div id="result" class="card" hidden>
       <h2 id="result-title"></h2>

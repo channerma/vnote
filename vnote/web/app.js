@@ -9,14 +9,21 @@
  *     #daemon-info                            one line from /health
  *
  *   Record view
- *     #record #pause #stop      transport buttons (#pause label: Pause/Resume)
+ *     #record #pause #stop      transport buttons (#pause label: Pause/Resume,
+ *                               #stop label: Stop/Cancel while starting)
  *     #timer                    "0:00" of recorded time (frozen while paused)
  *     #rec-status               ready / recording / paused / processing / error
  *     #retry                    re-send the last recording after a failed upload
- *                               (hidden otherwise)
+ *                               (hidden otherwise, and during a recording)
  *     #pick-mode                select: light edit summary dictation raw
  *     #pick-backend             select, filled from the `backend` setting
  *     #pick-language            text input, placeholder "auto"
+ *     #live-toggle              checkbox: stream PCM and show the transcript live
+ *     #live                     container, hidden unless a live recording is
+ *                               running or has just finished
+ *     #live-committed           the settled text (one <p> per paragraph)
+ *     #live-tail                <span>: the still-changing tail
+ *     #live-copy #live-copy-status
  *     #result                   container, hidden until a note exists
  *     #result-title #result-text (readonly textarea) #result-warning
  *     #copy #copy-status #result-open
@@ -82,8 +89,15 @@ async function api(url, options) {
     try { data = await res.json(); } catch (e) { data = null; }
   }
   if (!res.ok) {
-    if (data && data.error) throw new Error(data.error);
-    throw new Error('HTTP ' + res.status + ' ' + (res.statusText || ''));
+    var err;
+    if (data && data.error) {
+      err = new Error(data.error);
+      err.data = data;   // extra fields travel with the message (e.g. audio_kept)
+    } else {
+      err = new Error('HTTP ' + res.status + ' ' + (res.statusText || ''));
+    }
+    err.status = res.status;   // callers that treat 404 as terminal look at this
+    throw err;
   }
   if (data === null) throw new Error('unexpected non-JSON response from ' + url);
   return data;
@@ -242,7 +256,8 @@ function savePicks() {
   lsSet(LS_PICKS, JSON.stringify({
     mode: $('pick-mode').value,
     backend: $('pick-backend').value,
-    language: $('pick-language').value
+    language: $('pick-language').value,
+    live: $('live-toggle').checked
   }));
 }
 
@@ -340,13 +355,55 @@ var MIME_CANDIDATES = [
 var recorder = null;
 var recStream = null;
 var recChunks = [];
-var recStarting = false;
-var lastUpload = null;   // {blob, format} of a recording whose upload failed — for Retry
+var recStarting = false;   // covers the whole start: getUserMedia, /stream/start, the worklet
+var recCancelled = false;  // Stop pressed while still starting
+/* What #retry would send: {blob, format} from the MediaRecorder path, or {pcm:
+ * [Uint8Array, …]} — the live path's safety copy, turned into a WAV on the click.
+ * null means there is nothing to retry and the button stays hidden. */
+var lastUpload = null;
 var recMime = '';
 var recElapsedMs = 0;      // accumulated recorded time (excludes pauses)
 var recSegmentStart = 0;   // performance.now() of the current running segment
 var recTicker = null;
 var lastNoteName = null;
+
+/* Live capture: `live` is the running session (see startLive), null otherwise.
+ * The rendered text outlives it so the pane stays copyable after Stop. */
+var live = null;
+var liveAvailable = false;
+var liveParas = [];      // the paragraphs currently in #live-committed
+var liveTail = '';       // the text currently in #live-tail
+var liveFallbackReason = '';   // why this take is on MediaRecorder instead ('' = it isn't)
+
+var LIVE_SAMPLE_RATE = 16000;         // what the worklet sends, and the Retry WAV's rate
+var LIVE_PARAGRAPH_SILENCE_S = 2.0;   // stream.py:_PARAGRAPH_SILENCE_S
+var LIVE_MIN_REQUEST_MS = 950;        // at most ~1 append/second
+var LIVE_PING_MS = 30000;             // keepalive while paused
+var LIVE_FLUSH_WAIT_MS = 300;         // how long Stop waits for the worklet's last batch
+var LIVE_FIRST_PCM_MS = 3000;         // no PCM by then: say so, but keep recording
+var LIVE_BACKOFF_MS = 1000;           // first pause after 3 failed appends (doubles, capped)
+var LIVE_BACKOFF_MAX_MS = 8000;
+var LIVE_STOP_TIMEOUT_MS = 10000;     // a final append that hangs must not hang Stop
+var LIVE_MAX_BODY_BYTES = LIVE_SAMPLE_RATE * 2 * 30;   // 30 s of s16le mono per request
+
+function liveSupported() {
+  return typeof window.AudioWorklet !== 'undefined' && typeof window.AudioContext !== 'undefined';
+}
+
+/* The toggle is a pick like the others (remembered in localStorage), except that a
+ * browser without AudioWorklet pins it off. Default on where it works. */
+function initLiveToggle() {
+  var el = $('live-toggle');
+  liveAvailable = liveSupported();
+  if (!liveAvailable) {
+    el.checked = false;
+    el.disabled = true;
+    el.title = 'not supported in this browser';
+    return;
+  }
+  var picks = readPicks();
+  el.checked = (picks && typeof picks.live === 'boolean') ? picks.live : true;
+}
 
 function pickMimeType() {
   if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return '';
@@ -368,9 +425,21 @@ function formatFromMime(mime) {
   return 'webm';
 }
 
+/* True while audio is actually being captured (either path) — the timer's clock. */
+function capturing() {
+  if (live) return live.state === 'recording';
+  return !!recorder && recorder.state === 'recording';
+}
+
+/* True while a recording exists at all, running or paused. */
+function capturePaused() {
+  if (live) return live.state === 'paused';
+  return !!recorder && recorder.state === 'paused';
+}
+
 function recordedMs() {
   var ms = recElapsedMs;
-  if (recorder && recorder.state === 'recording') ms += performance.now() - recSegmentStart;
+  if (capturing()) ms += performance.now() - recSegmentStart;
   return ms;
 }
 
@@ -388,19 +457,29 @@ function stopTicker() {
   recTicker = null;
 }
 
+/* States: ready, starting (microphone/session being opened — Stop cancels),
+ * recording, paused, processing. */
 function setTransport(state) {
   var recording = state === 'recording';
   var paused = state === 'paused';
   var busy = state === 'processing';
+  var starting = state === 'starting';
+  var active = recording || paused || busy || starting;
 
-  $('record').disabled = recording || paused || busy || $('record').dataset.blocked === '1';
+  $('record').disabled = active || $('record').dataset.blocked === '1';
   $('pause').disabled = !(recording || paused);
-  $('stop').disabled = !(recording || paused);
+  $('stop').disabled = !(recording || paused || starting);
   $('pause').textContent = paused ? '▶ Resume' : '⏸ Pause';
+  $('stop').textContent = starting ? '■ Cancel' : '■ Stop';
+
+  // Retrying mid-take would upload one recording while another runs.
+  $('retry').hidden = !lastUpload || active;
+  $('retry').disabled = $('retry').hidden;
 
   ['pick-mode', 'pick-backend', 'pick-language'].forEach(function (id) {
-    $(id).disabled = recording || paused || busy;
+    $(id).disabled = active;
   });
+  $('live-toggle').disabled = active || !liveAvailable;
 
   document.body.classList.toggle('is-recording', recording);
   document.body.classList.toggle('is-paused', paused);
@@ -416,6 +495,23 @@ function releaseStream() {
   recStream = null;
 }
 
+function noMediaRecorder() {
+  releaseStream();
+  $('rec-status').textContent = 'this browser has no MediaRecorder — recording is not possible';
+  setTransport('ready');
+}
+
+/* Stop pressed during the start: give the microphone back and stay ready. */
+function startCancelled() {
+  if (!recCancelled) return false;
+  recCancelled = false;
+  recStarting = false;
+  releaseStream();
+  $('rec-status').textContent = 'ready';
+  setTransport('ready');
+  return true;
+}
+
 async function startRecording() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     $('rec-status').textContent =
@@ -423,14 +519,18 @@ async function startRecording() {
       'http://localhost:8760 or http://127.0.0.1:8760';
     return;
   }
-  if (typeof MediaRecorder === 'undefined') {
+  var wantLive = liveAvailable && $('live-toggle').checked;
+  if (!wantLive && typeof MediaRecorder === 'undefined') {
     $('rec-status').textContent = 'this browser has no MediaRecorder — recording is not possible';
     return;
   }
 
-  if (recorder || recStream || recStarting) return;  // a second click must not start a second recorder
+  // a second click must not start a second recorder — nor a second live session
+  if (recorder || recStream || recStarting || live) return;
   recStarting = true;
-  $('record').disabled = true;
+  recCancelled = false;
+  liveFallbackReason = '';
+  setTransport('starting');   // Stop is live from here on: it cancels the start
   $('rec-status').textContent = 'requesting the microphone…';
   try {
     recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -440,8 +540,26 @@ async function startRecording() {
     setTransport('ready');
     return;
   }
-  recStarting = false;
+  if (startCancelled()) return;
 
+  resetLivePane(wantLive);
+  if (wantLive) {
+    var started = await startLive();
+    recStarting = false;
+    if (started) {
+      if (recCancelled) { recCancelled = false; cancelLive(); }
+      return;
+    }
+    resetLivePane(false);      // this take has no live text: don't show an empty pane
+    if (startCancelled()) return;
+    if (typeof MediaRecorder === 'undefined') return noMediaRecorder();
+    // startLive() left the reason in liveFallbackReason; MediaRecorder takes over
+  }
+  recStarting = false;
+  startMediaRecorder();
+}
+
+function startMediaRecorder() {
   var mime = pickMimeType();
   try {
     recorder = mime ? new MediaRecorder(recStream, { mimeType: mime })
@@ -493,10 +611,19 @@ async function startRecording() {
   paintTimer();
   startTicker();
   setTransport('recording');
-  $('rec-status').textContent = 'recording';
+  $('rec-status').textContent = recordingStatus();
+}
+
+/* Don't paper over a live-transcript failure: while a fallback take runs, the
+ * status line keeps saying why the live pane is missing. */
+function recordingStatus() {
+  return liveFallbackReason
+    ? 'recording — live transcript unavailable (' + liveFallbackReason + ')'
+    : 'recording';
 }
 
 function togglePause() {
+  if (live) return toggleLivePause();
   if (!recorder) return;
   if (recorder.state === 'recording') {
     recElapsedMs += performance.now() - recSegmentStart;
@@ -510,11 +637,17 @@ function togglePause() {
     try { recorder.resume(); } catch (e) { /* unsupported */ }
     startTicker();
     setTransport('recording');
-    $('rec-status').textContent = 'recording';
+    $('rec-status').textContent = recordingStatus();
   }
 }
 
 function stopRecording() {
+  if (recStarting) {          // nothing to stop yet: startRecording() unwinds instead
+    recCancelled = true;
+    $('rec-status').textContent = 'cancelling…';
+    return;
+  }
+  if (live) return stopLive();
   if (!recorder) return;
   if (recorder.state === 'recording') recElapsedMs += performance.now() - recSegmentStart;
   stopTicker();
@@ -561,7 +694,6 @@ async function uploadRecording(blob, format) {
   $('rec-status').textContent =
     'processing… transcribing, then cleaning — this can take a minute; no progress is reported';
 
-  $('retry').hidden = true;
   try {
     var data = await api('/api/note' + noteQuery(format), {
       method: 'POST',
@@ -573,11 +705,9 @@ async function uploadRecording(blob, format) {
     $('rec-status').textContent = 'ready';
   } catch (e) {
     lastUpload = { blob: blob, format: format };  // the browser holds the only copy until the daemon has it
-    $('retry').hidden = false;
     $('rec-status').textContent = errText(e) + ' — the recording is still here: Retry upload, or Record to start over';
   } finally {
-    setTransport('ready');
-    if ($('record').dataset.blocked !== '1') $('record').disabled = false;
+    setTransport('ready');   // and with it #retry, from lastUpload
   }
 }
 
@@ -596,6 +726,547 @@ function showResult(data) {
   $('result-open').disabled = !lastNoteName;
   $('result').hidden = false;
   notesLoaded = false;   // the list is stale now
+}
+
+/* ---------------------------------------------------------- live transcript
+ *
+ * The optional path: an AudioWorklet turns the microphone into s16le 16 kHz PCM,
+ * an uploader loop POSTs it to /stream/append (one request in flight, at most one
+ * a second, coalescing whatever queued meanwhile) and every reply repaints the
+ * pane. Stop is /stream/finish?note=1: the daemon transcribes what it has.
+ *
+ * This tab keeps every PCM chunk of the take as well (`session.all`, ~1.9 MB a
+ * minute) so that a daemon that never received the tail — or lost the session, or
+ * failed the finish without keeping the audio — is not the end of the recording:
+ * #retry wraps the safety copy in a WAV header and uploads it as a normal note.
+ */
+
+/* Clear the pane; `visible` keeps it on screen for a live recording. */
+function resetLivePane(visible) {
+  liveParas = [];
+  liveTail = '';
+  $('live-committed').textContent = '';
+  $('live-tail').textContent = '';
+  $('live').hidden = !visible;
+}
+
+/* The scroller around the text; no id of its own. */
+function livePane() { return $('live-committed').parentNode; }
+
+function liveAtBottom() {
+  var pane = livePane();
+  if (!pane || typeof pane.scrollHeight !== 'number') return true;
+  return pane.scrollHeight - pane.scrollTop - pane.clientHeight < 24;
+}
+
+/* The committed segments as paragraphs — the join rule of stream.py's
+ * _committed_text(): a pause of 2 s or more after a segment starts a new one. */
+function committedParagraphs(committed) {
+  var text = '';
+  var gap = '';
+  (committed || []).forEach(function (seg) {
+    if (!seg || !seg.text) return;   // a silence-only segment carries no words
+    if (text) text += gap;
+    text += seg.text;
+    gap = (seg.trailing_silence_s >= LIVE_PARAGRAPH_SILENCE_S) ? '\n\n' : ' ';
+  });
+  return text ? text.split('\n\n') : [];
+}
+
+/* Repaint from an /stream/append reply. Settled paragraphs are stable DOM: only
+ * the ones that actually changed are replaced, so a selection over the text above
+ * them survives every update. */
+function renderLive(data) {
+  $('live').hidden = false;
+  var atBottom = liveAtBottom();
+
+  var paras = committedParagraphs(data && data.committed);
+  var box = $('live-committed');
+  var first = 0;
+  while (first < paras.length && first < liveParas.length && paras[first] === liveParas[first]) {
+    first += 1;
+  }
+  if (first < liveParas.length || paras.length !== liveParas.length) {
+    while (box.children.length > first) box.removeChild(box.lastChild);
+    for (var i = first; i < paras.length; i++) {
+      var p = document.createElement('p');
+      p.textContent = paras[i];
+      box.appendChild(p);
+    }
+  }
+  liveParas = paras;
+
+  var tail = (data && data.tail) ? data.tail : '';
+  if (tail !== liveTail) {
+    liveTail = tail;
+    $('live-tail').textContent = tail;
+  }
+
+  if (atBottom) {
+    var pane = livePane();
+    if (pane && typeof pane.scrollHeight === 'number') pane.scrollTop = pane.scrollHeight;
+  }
+}
+
+function liveText() {
+  var committed = liveParas.join('\n\n');
+  if (!liveTail) return committed;
+  return committed ? committed + ' ' + liveTail : liveTail;
+}
+
+/* Blank language field = auto-detect, as in noteQuery(). */
+function liveLanguage() {
+  var language = $('pick-language').value.trim();
+  return language ? language : null;
+}
+
+function finishQuery(sid) {
+  var mode = $('pick-mode').value;
+  var backend = $('pick-backend').value;
+  var language = $('pick-language').value.trim();
+  var params = ['sid=' + encodeURIComponent(sid), 'note=1'];
+  function add(k, v) {
+    if (v === null || v === undefined || v === '') return;
+    params.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
+  }
+  if (mode === 'raw') {
+    add('raw', '1');           // raw => no LLM, no mode
+  } else {
+    add('mode', mode);
+    add('backend', backend);
+  }
+  add('language', language || 'auto');
+  return '?' + params.join('&');
+}
+
+/* Returns true once PCM is flowing; false means "fall back to MediaRecorder",
+ * with the reason in liveFallbackReason (and in #rec-status meanwhile). */
+function liveUnavailable(reason) {
+  liveFallbackReason = reason;
+  $('rec-status').textContent =
+    'live transcript unavailable — recording without it (' + reason + ')';
+  return false;
+}
+
+/* ctx.suspend()/resume()/close() answer with a promise that can reject (a context
+ * torn down under us). Nothing here can act on that; swallow it so it is not an
+ * unhandled rejection. */
+function audioCall(ctx, name) {
+  try {
+    var p = ctx[name]();
+    if (p && typeof p.catch === 'function') {
+      return p.catch(function () { /* the state stays whatever it was */ });
+    }
+  } catch (e) { /* older browsers throw synchronously */ }
+  return Promise.resolve();
+}
+
+/* `recStream` is already open. */
+async function startLive() {
+  var sid;
+  try {
+    var started = await postJSON('/stream/start', { language: liveLanguage() });
+    sid = started && started.session_id;
+    if (!sid) throw new Error('no session id');
+  } catch (e) {
+    return liveUnavailable(errText(e));
+  }
+
+  var ctx = null;
+  try {
+    ctx = new AudioContext({ sampleRate: 16000 });
+  } catch (e) {
+    try { ctx = new AudioContext(); } catch (e2) { ctx = null; }   // the worklet resamples anyway
+  }
+  var session = null;
+  try {
+    if (!ctx) throw new Error('no AudioContext');
+    await ctx.audioWorklet.addModule('/static/pcm-worklet.js');
+    var src = ctx.createMediaStreamSource(recStream);
+    var node = new AudioWorkletNode(ctx, 'pcm-capture');
+    // Chrome only pulls a worklet that reaches the destination; a muted gain keeps
+    // the loop turning without playing the microphone back.
+    var gain = ctx.createGain();
+    gain.gain.value = 0;
+    src.connect(node);
+    node.connect(gain);
+    gain.connect(ctx.destination);
+
+    // An autoplay-blocked context is suspended: no PCM would ever arrive.
+    if (ctx.state !== 'running') await audioCall(ctx, 'resume');
+    if (ctx.state !== 'running') {
+      throw new Error('the audio context stayed ' + (ctx.state || 'unusable'));
+    }
+
+    session = {
+      sid: sid, ctx: ctx, src: src, node: node, gain: gain,
+      state: 'recording',
+      queue: [], all: [], sending: false, inflight: null, lastSend: performance.now(),
+      seconds: 0,                      // audio the daemon has acknowledged
+      failures: 0, warned: false, retryAt: 0,
+      gotPcm: false, silentWarned: false, watchdog: null,
+      stopping: false, flushWaiter: null,
+      pumpTimer: null, pingTimer: null
+    };
+    node.port.onmessage = function (ev) { onLivePcm(session, ev.data); };
+  } catch (e) {
+    if (ctx) audioCall(ctx, 'close');
+    cancelSession(sid);
+    return liveUnavailable(errText(e));
+  }
+
+  live = session;
+  session.pumpTimer = window.setInterval(function () { pumpLive(session); }, 200);
+  session.watchdog = window.setTimeout(function () { liveNoAudio(session); }, LIVE_FIRST_PCM_MS);
+  recElapsedMs = 0;
+  recSegmentStart = performance.now();
+  paintTimer();
+  startTicker();
+  setTransport('recording');
+  $('rec-status').textContent = 'recording';
+  return true;
+}
+
+/* Nothing from the worklet after a few seconds: the take is running, but say so
+ * — a muted or misrouted input is otherwise invisible until Stop. */
+function liveNoAudio(session) {
+  session.watchdog = null;
+  if (live !== session || session.gotPcm || session.stopping) return;
+  session.silentWarned = true;
+  $('rec-status').textContent = 'live transcript: no audio is arriving from the microphone';
+}
+
+/* Best effort: drop a session we started but whose audio we no longer want.
+ * /stream/cancel forgets the session and its audio; a 404 means it is gone. */
+function cancelSession(sid) {
+  api('/stream/cancel?sid=' + encodeURIComponent(sid), { method: 'POST' })
+    .catch(function () { /* it expires on its own */ });
+}
+
+/* Stop arrived while starting: unwind without asking for a note. */
+function cancelLive() {
+  var session = live;
+  live = null;
+  teardownLive(session);
+  cancelSession(session.sid);
+  releaseStream();
+  stopTicker();
+  recElapsedMs = 0;
+  paintTimer();
+  resetLivePane(false);
+  $('rec-status').textContent = 'ready';
+  setTransport('ready');
+}
+
+/* A message from the worklet: a bare ArrayBuffer is a batch, {type: 'flush'} is
+ * the answer to our flush (and only that resolves Stop's waiter — a batch that
+ * crosses the flush must not pass for the reply). Either can carry audio. */
+function onLivePcm(session, data) {
+  var isFlush = !!(data && data.type === 'flush');
+  var buffer = isFlush ? data.buffer : data;
+  if (buffer && buffer.byteLength) {
+    var chunk = new Uint8Array(buffer);
+    session.queue.push(chunk);
+    session.all.push(chunk);            // the safety copy; takeLiveQueue() copies out
+    if (!session.gotPcm) {
+      session.gotPcm = true;
+      if (session.silentWarned) {       // audio after all: take the warning back
+        session.silentWarned = false;
+        if (live === session && !session.stopping) {
+          $('rec-status').textContent = session.state === 'paused' ? 'paused' : 'recording';
+        }
+      }
+    }
+  }
+  if (isFlush && session.flushWaiter) session.flushWaiter();
+  if (live === session) pumpLive(session);
+}
+
+/* Everything queued, as one body — but at most `limit` bytes (one chunk always
+ * goes, however big): after an outage the backlog rides out over several
+ * requests instead of one unbounded body. */
+function takeLiveQueue(session, limit) {
+  var take = 0;
+  var total = 0;
+  while (take < session.queue.length) {
+    var len = session.queue[take].length;
+    if (take > 0 && limit && total + len > limit) break;
+    total += len;
+    take += 1;
+  }
+  var out = new Uint8Array(total);
+  var at = 0;
+  for (var i = 0; i < take; i++) {
+    out.set(session.queue[i], at);
+    at += session.queue[i].length;
+  }
+  session.queue = session.queue.slice(take);
+  return out;
+}
+
+function appendLive(session, body, signal) {
+  var options = {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: body
+  };
+  if (signal) options.signal = signal;
+  return api('/stream/append?sid=' + encodeURIComponent(session.sid), options);
+}
+
+/* The daemon has forgotten this session (it restarted, or half an hour of pings
+ * failed): appending more is pointless and finish would 404 too. End the take
+ * here — the tab's copy of the audio is what Retry sends. */
+function liveSessionLost(session, e) {
+  if (session.state === 'recording') recElapsedMs += performance.now() - recSegmentStart;
+  session.stopping = true;
+  session.state = 'lost';
+  live = null;
+  stopTicker();
+  paintTimer();
+  teardownLive(session);
+  releaseStream();
+  lastUpload = { pcm: session.all };
+  $('rec-status').textContent =
+    'the daemon lost this live session (' + errText(e) + ') — ' +
+    'Retry uploads the recording it has kept in this tab';
+  setTransport('ready');
+}
+
+/* One request at a time, at most one a second; a failed body goes back to the
+ * front of the queue and rides along with the next attempt, with a growing pause
+ * once the failures start piling up. */
+function pumpLive(session) {
+  if (live !== session || session.sending || session.stopping) return;
+  if (!session.queue.length) return;
+  if (performance.now() - session.lastSend < LIVE_MIN_REQUEST_MS) return;
+  if (session.retryAt && performance.now() < session.retryAt) return;
+
+  var body = takeLiveQueue(session, LIVE_MAX_BODY_BYTES);
+  session.sending = true;
+  session.lastSend = performance.now();
+  session.inflight = (async function () {
+    try {
+      var data = await appendLive(session, body);
+      if (live !== session) return;
+      session.failures = 0;
+      session.retryAt = 0;
+      if (data && typeof data.seconds === 'number') session.seconds = data.seconds;
+      renderLive(data);
+      if (session.warned) {
+        session.warned = false;
+        $('rec-status').textContent = session.state === 'paused' ? 'paused' : 'recording';
+      }
+    } catch (e) {
+      if (live !== session) return;
+      session.queue.unshift(body);        // keep the audio: the next tick retries it
+      if (e && e.status === 404 && !session.stopping) return liveSessionLost(session, e);
+      session.failures += 1;
+      if (session.failures >= 3) {
+        var backoff = LIVE_BACKOFF_MS * Math.pow(2, session.failures - 3);
+        session.retryAt = performance.now() + Math.min(backoff, LIVE_BACKOFF_MAX_MS);
+        if (!session.warned) {
+          session.warned = true;
+          $('rec-status').textContent =
+            'still recording — the live transcript stopped updating (' + errText(e) + ')';
+        }
+      }
+    } finally {
+      session.sending = false;
+    }
+  }());
+}
+
+function startLivePing(session) {
+  if (session.pingTimer) return;
+  session.pingTimer = window.setInterval(function () {
+    api('/stream/ping?sid=' + encodeURIComponent(session.sid), { method: 'POST' })
+      .catch(function () { /* the next append reports it */ });
+  }, LIVE_PING_MS);
+}
+
+function stopLivePing(session) {
+  if (session.pingTimer) window.clearInterval(session.pingTimer);
+  session.pingTimer = null;
+}
+
+function toggleLivePause() {
+  var session = live;
+  if (!session || session.stopping) return;
+  if (session.state === 'recording') {
+    recElapsedMs += performance.now() - recSegmentStart;
+    session.state = 'paused';
+    audioCall(session.ctx, 'suspend');   // nothing arrives either way
+    stopTicker();
+    paintTimer();
+    startLivePing(session);              // a long pause must not expire the session
+    setTransport('paused');
+    $('rec-status').textContent = 'paused';
+  } else if (session.state === 'paused') {
+    recSegmentStart = performance.now();
+    session.state = 'recording';
+    audioCall(session.ctx, 'resume');    // the worklet picks up on its own
+    stopLivePing(session);
+    startTicker();
+    setTransport('recording');
+    $('rec-status').textContent = 'recording';
+  }
+}
+
+/* Ask the worklet for its last partial batch; give up after 300 ms. */
+function flushWorklet(session) {
+  return new Promise(function (resolve) {
+    var done = false;
+    function finish() {
+      if (done) return;
+      done = true;
+      session.flushWaiter = null;
+      window.clearTimeout(timer);
+      resolve();
+    }
+    var timer = window.setTimeout(finish, LIVE_FLUSH_WAIT_MS);
+    session.flushWaiter = finish;
+    try {
+      session.node.port.postMessage({ type: 'flush' });
+    } catch (e) {
+      finish();
+    }
+  });
+}
+
+function teardownLive(session) {
+  if (session.pumpTimer) window.clearInterval(session.pumpTimer);
+  session.pumpTimer = null;
+  if (session.watchdog) window.clearTimeout(session.watchdog);
+  session.watchdog = null;
+  stopLivePing(session);
+  try { session.node.port.onmessage = null; } catch (e) { /* ignore */ }
+  [session.src, session.node, session.gain].forEach(function (n) {
+    try { n.disconnect(); } catch (e) { /* already gone */ }
+  });
+  audioCall(session.ctx, 'close');
+}
+
+/* An abort signal that fires after `ms`, with the manual fallback for browsers
+ * without AbortSignal.timeout. `cancel()` drops the timer once the request is
+ * done; there is nothing to cancel on the native path. */
+function timeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+    try {
+      return { signal: AbortSignal.timeout(ms), cancel: function () { /* self-clearing */ } };
+    } catch (e) { /* fall through to the manual one */ }
+  }
+  if (typeof AbortController === 'undefined') {
+    return { signal: null, cancel: function () { /* no way to time out */ } };
+  }
+  var ac = new AbortController();
+  var timer = window.setTimeout(function () { ac.abort(); }, ms);
+  return { signal: ac.signal, cancel: function () { window.clearTimeout(timer); } };
+}
+
+/* The live path's safety copy as a WAV: a 44-byte RIFF/WAVE header (PCM, mono,
+ * 16 kHz, 16-bit) in front of the s16le chunks the worklet sent. */
+function wavFromPcm(chunks) {
+  var i;
+  var total = 0;
+  for (i = 0; i < chunks.length; i++) total += chunks[i].length;
+  var out = new Uint8Array(44 + total);
+  var view = new DataView(out.buffer);
+  function tag(at, s) {
+    for (var j = 0; j < s.length; j++) out[at + j] = s.charCodeAt(j);
+  }
+  tag(0, 'RIFF');
+  view.setUint32(4, 36 + total, true);          // file size after this field
+  tag(8, 'WAVE');
+  tag(12, 'fmt ');
+  view.setUint32(16, 16, true);                 // fmt chunk size
+  view.setUint16(20, 1, true);                  // PCM, uncompressed
+  view.setUint16(22, 1, true);                  // channels
+  view.setUint32(24, LIVE_SAMPLE_RATE, true);
+  view.setUint32(28, LIVE_SAMPLE_RATE * 2, true);   // byte rate
+  view.setUint16(32, 2, true);                  // block align
+  view.setUint16(34, 16, true);                 // bits per sample
+  tag(36, 'data');
+  view.setUint32(40, total, true);
+  var at = 44;
+  for (i = 0; i < chunks.length; i++) {
+    out.set(chunks[i], at);
+    at += chunks[i].length;
+  }
+  return new Blob([out], { type: 'audio/wav' });
+}
+
+async function stopLive() {
+  var session = live;
+  if (!session || session.stopping) return;
+  if (session.state === 'recording') recElapsedMs += performance.now() - recSegmentStart;
+  session.stopping = true;
+  session.state = 'stopping';
+  stopTicker();
+  paintTimer();
+  stopLivePing(session);
+  setTransport('processing');
+  $('rec-status').textContent = 'finishing the recording…';
+
+  await flushWorklet(session);
+  if (session.inflight) { try { await session.inflight; } catch (e) { /* reported already */ } }
+
+  // The tail: two tries, each with a network timeout so Stop cannot hang.
+  var unsent = null;
+  var rest = takeLiveQueue(session);
+  if (rest.length) {
+    for (var attempt = 0; attempt < 2; attempt++) {
+      var t = timeoutSignal(LIVE_STOP_TIMEOUT_MS);
+      try {
+        var reply = await appendLive(session, rest, t.signal);
+        if (reply && typeof reply.seconds === 'number') session.seconds = reply.seconds;
+        renderLive(reply);
+        unsent = null;
+        break;
+      } catch (e) {
+        unsent = e;
+      } finally {
+        t.cancel();
+      }
+    }
+  }
+
+  teardownLive(session);
+  releaseStream();
+  live = null;
+
+  // Finishing now would transcribe a recording that is missing its end — say so
+  // instead, and leave Retry pointing at the copy this tab kept.
+  if (unsent) {
+    var missing = Math.max(0, Math.round(recordedMs() / 1000 - (session.seconds || 0)));
+    lastUpload = { pcm: session.all };
+    $('rec-status').textContent =
+      'the daemon did not receive the last ' + missing + ' s (' + errText(unsent) + ') — ' +
+      'Retry uploads the recording this tab kept';
+    setTransport('ready');
+    return;
+  }
+
+  $('rec-status').textContent =
+    'processing… transcribing the whole recording in one pass, then cleaning — ' +
+    'the live text below is copyable meanwhile';
+  try {
+    var data = await api('/stream/finish' + finishQuery(session.sid), { method: 'POST' });
+    lastUpload = null;
+    showResult(data);
+    $('rec-status').textContent = 'ready';
+  } catch (e) {
+    var kept = (e && e.data) ? e.data.audio_kept : null;
+    if (kept) {
+      $('rec-status').textContent = errText(e) + ' — the daemon kept the audio: ' + kept;
+    } else {
+      lastUpload = { pcm: session.all };   // this tab holds the only copy left
+      $('rec-status').textContent =
+        errText(e) + ' — Retry uploads the recording this tab kept';
+    }
+  } finally {
+    setTransport('ready');
+  }
 }
 
 /* -------------------------------------------------------------------- notes */
@@ -1282,15 +1953,20 @@ function wire() {
   $('pause').addEventListener('click', function (ev) { ev.currentTarget.blur(); togglePause(); });
   $('stop').addEventListener('click', function (ev) { ev.currentTarget.blur(); stopRecording(); });
   $('retry').addEventListener('click', function () {
-    if (lastUpload) uploadRecording(lastUpload.blob, lastUpload.format);
+    if (!lastUpload) return;
+    if (lastUpload.pcm) return uploadRecording(wavFromPcm(lastUpload.pcm), 'wav');
+    uploadRecording(lastUpload.blob, lastUpload.format);
   });
 
-  ['pick-mode', 'pick-backend', 'pick-language'].forEach(function (id) {
+  ['pick-mode', 'pick-backend', 'pick-language', 'live-toggle'].forEach(function (id) {
     $(id).addEventListener('change', savePicks);
   });
 
   $('copy').addEventListener('click', function () {
     copyText($('result-text').value, $('copy-status'));
+  });
+  $('live-copy').addEventListener('click', function () {
+    copyText(liveText(), $('live-copy-status'));
   });
   $('note-copy').addEventListener('click', function () {
     var token = noteToken();
@@ -1342,9 +2018,10 @@ function wire() {
   $('settings-save').addEventListener('click', saveSettings);
   $('vocab-save').addEventListener('click', saveVocab);
 
-  // Closing the tab with unsaved editor text asks first.
+  // Closing the tab with unsaved editor text — or during a live take, whose audio
+  // only this tab and the daemon's half-finished session hold — asks first.
   window.addEventListener('beforeunload', function (ev) {
-    if (!isDirty()) return;
+    if (!isDirty() && live === null) return;
     ev.preventDefault();
     ev.returnValue = '';
   });
@@ -1354,8 +2031,7 @@ function wire() {
     if (ev.code !== 'Space' && ev.key !== ' ') return;
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     if (typingInAField(document.activeElement)) return;
-    if (!recorder) return;
-    if (recorder.state !== 'recording' && recorder.state !== 'paused') return;
+    if (!capturing() && !capturePaused()) return;
     ev.preventDefault();
     togglePause();
   });
@@ -1363,6 +2039,7 @@ function wire() {
 
 function init() {
   wire();
+  initLiveToggle();
   setTransport('ready');
   updateProcessState();   // nothing is open yet: save/regenerate/revise stay off
   paintTimer();

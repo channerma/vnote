@@ -175,6 +175,20 @@ textarea {
 .inline-pick { flex-direction: row; align-items: center; flex: 0 1 auto; }
 .inline-pick > span { text-transform: none; letter-spacing: 0; }
 
+.pick-toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.45rem;
+  flex: 0 1 auto;
+  align-self: flex-end;
+  padding-bottom: 0.45rem;
+  cursor: pointer;
+}
+.pick-toggle > input { width: auto; }
+.pick-toggle > span { text-transform: none; letter-spacing: 0; font-size: 0.9rem;
+                      color: var(--ink); }
+.pick-toggle > input:disabled + span { color: var(--ink-soft); cursor: default; }
+
 .recorder {
   display: flex;
   flex-wrap: wrap;
@@ -209,6 +223,35 @@ button.big:disabled { background: var(--panel); color: var(--ink); border-color:
 .is-paused #pause { border-color: var(--pause); color: var(--pause); }
 
 .is-processing #rec-status { color: var(--ink-soft); font-style: italic; }
+
+/* --- live transcript ---------------------------------------------------- */
+
+.live .hint { margin-top: 0.6rem; }
+.live .row { margin-bottom: 0; }
+
+.live-pane {
+  max-height: 22rem;
+  overflow: auto;
+  overflow-wrap: break-word;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.75rem 0.9rem;
+  max-width: 42rem;          /* ~70-80 characters */
+}
+
+.live-committed { display: block; }
+.live-committed p { margin: 0 0 0.75rem; }
+.live-committed p:last-child { margin-bottom: 0; }
+
+/* Still being transcribed: dimmer and italic, on its own line under the settled
+ * text (a separate node, so repainting it never disturbs a selection above). */
+.live-tail {
+  display: block;
+  color: var(--ink-soft);
+  font-style: italic;
+}
+.live-committed:not(:empty) + .live-tail:not(:empty) { margin-top: 0.75rem; }
 
 /* --- notes -------------------------------------------------------------- */
 
@@ -325,6 +368,8 @@ button.big:disabled { background: var(--panel); color: var(--ink); border-color:
   .tabs { gap: 0; }
   .tab { flex: 1; padding: 0.5rem 0.4rem; text-align: center; }
   .picks { flex-direction: column; gap: 0.75rem; }
+  /* the column drops the row's baseline: line the toggle up with the labels */
+  .pick-toggle { align-self: flex-start; padding-bottom: 0; }
   .recorder { gap: 0.5rem; }
   button.big { flex: 1 1 100%; }
   .timer { margin-left: 0; }

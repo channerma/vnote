@@ -10,7 +10,7 @@ Two ways in:
 
 - **Web UI** (recommended) — `vnote --serve --open` opens a page in your browser: record
   (pause and resume as you think), get the cleaned note with a **Copy** button, browse and
-  play everything you've recorded, re-clean a note in another mode, change settings.
+  play everything you've recorded, edit a note or regenerate / revise it, change settings.
 - **CLI** — `vnote` records from the mic (Space pauses, Enter stops) or takes an audio file,
   and drops the note on your clipboard. Everything the web UI does is a flag here too.
 
@@ -57,9 +57,11 @@ vnote --serve --open        # loads the models once, opens http://127.0.0.1:8760
 - **Record** → talk → **Pause** / **Resume** (or Space) → **Stop**. Pick the cleanup mode
   (light / edit / summary / dictation / raw) and the backend per recording.
 - The note appears with a **Copy** button; it is also saved under `voice-notes/`.
-- **Notes**: every note you've made, newest first — play the audio, copy, re-clean in another
-  mode. **Settings**: every setting with a description, saved to `~/.config/vnote/config.json`
-  (the CLI reads the same file), plus your custom vocabulary.
+- **Notes**: every note you've made, newest first — play the audio, copy, **edit** the
+  Markdown, regenerate in another mode or **revise** it with an instruction ("make it
+  shorter"); every change is a version you can restore. **Settings**: every setting with a
+  description, saved to `~/.config/vnote/config.json` (the CLI reads the same file), plus
+  your custom vocabulary.
 - **WSL2:** run the daemon in WSL and open the page in your Windows browser — `localhost` just
   works. Leave the daemon running (a systemd unit for Linux is in the
   [User Guide](docs/USER_GUIDE.md#warm-daemon)).
@@ -102,6 +104,7 @@ Each note is a folder `voice-notes/YYYY-MM-DD-HHMM-<slug>/`:
 | `transcript.txt` | raw Whisper output |
 | `note.md` | the cleaned note — the thing you keep |
 | `meta.json` | model, durations, language, timestamps |
+| `versions/note-<n>.md` | every version of the note (the current one included) — edits, regenerations, revisions — restorable from the web UI |
 
 ## Learn more
 

@@ -111,9 +111,20 @@ in the note folder, alongside `transcript.txt`, `note.md` and `meta.json`.
 ### Notes
 
 Every note folder under `voice-notes/`, newest first — title, date, duration, mode. Open
-one to read the note, play the audio (seeking works), **Copy** it, unfold the raw
-transcript, or **Re-clean** it in another mode — the same thing as `vnote --redo`, and it
-rewrites `note.md` in place (`meta.json` records `recleaned: true`).
+one to:
+
+- **Read and edit** the processed note (it's Markdown in a plain editor) and **Save** —
+  every save is a new version.
+- **Play** the audio (seeking works), **Copy** the note, unfold the raw transcript.
+- **Regenerate** it from the raw transcript in another mode — the same thing as
+  `vnote --redo` — optionally with an instruction; or **Revise** the current note with an
+  instruction ("make it shorter", "turn the second half into a checklist").
+- Pick an older **version** from the dropdown to read it, and **Restore** it (which is
+  itself a new version — nothing is ever destroyed). On disk: `versions/note-<n>.md` and
+  a `versions` list in `meta.json` recording when, which operation, mode, backend and
+  instruction produced each one.
+- **Open folder** (best-effort: Explorer from WSL, `xdg-open` on Linux, `open` on macOS),
+  with the path shown and copyable as the fallback.
 
 ### Settings
 
@@ -157,6 +168,7 @@ script) it's Enter-only.
 | `--raw` | transcript only, no LLM |
 | `--backend {ollama,claude-code,claude}` | cleanup backend — see [First run & setup](#first-run--setup) |
 | `--model NAME` | override the cleanup model name |
+| `--instructions TEXT` | extra instructions for the cleanup ("bullet points only"); also with `--redo` |
 | `--language CODE` | force transcription language (e.g. `en`); default: the saved `language` setting, else auto-detect |
 | `--no-clipboard` | don't touch the clipboard |
 | `--stdout` | also print the note to stdout (for piping) |
@@ -172,7 +184,9 @@ script) it's Enter-only.
 
 The mode with no flag is the `default_mode` setting (`edit` unless you changed it).
 `--redo` is handy for trying a different cleanup intensity without re-transcribing (the
-slow part) — e.g. `vnote --redo voice-notes/2026-08-24-1033-… --summary`.
+slow part) — e.g. `vnote --redo voice-notes/2026-08-24-1033-… --summary`. Every re-run
+(and every edit or revision in the web UI) is kept as a version — see
+[Web UI → Notes](#notes).
 
 **No GPU?** `--backend claude-code` runs cleanup through your Claude subscription and needs
 no local model at all; transcription falls back to CPU automatically — slower, but it works.
@@ -286,13 +300,19 @@ What the page talks to; handy for scripts too. JSON unless noted; errors are non
 | `GET /api/settings` · `PUT /api/settings` | the settings list ↔ `{key: value, …}` (editable keys only; 400 with a reason otherwise) |
 | `GET /api/vocab` · `PUT /api/vocab` | `{"text": …}` ↔ the vocabulary file |
 | `GET /api/notes` | newest-first `{"notes": [{name, title, created, duration_s, mode, backend, has_audio, has_note}]}` |
-| `GET /api/notes/<name>` | the same fields plus `meta`, `note`, `transcript`, `audio_url` |
+| `GET /api/notes/<name>` | the same fields plus `meta`, `note`, `transcript`, `audio_url`, `path`, `versions` |
 | `GET /api/notes/<name>/audio` | the audio file (`Range` supported) |
 | `POST /api/note?format=webm&mode=…&backend=…&language=…&raw=0` | body = audio bytes → a finished note: `{name, title, note, transcript, meta, cleanup_error}` |
-| `POST /api/notes/<name>/reclean` | `{mode, backend?, model?}` → `{title, note}` |
+| `POST /api/notes/<name>/reclean` | `{mode, backend?, model?, instructions?}` → `{title, note, version}` — regenerate from the transcript |
+| `POST /api/notes/<name>/revise` | `{instructions, backend?, model?}` → `{title, note, version}` — apply an instruction to the current note |
+| `PUT /api/notes/<name>/note` | `{"text": …}` → `{version, title, note}` — save a manual edit |
+| `GET /api/notes/<name>/versions/<n>` | `{n, text, created, op, mode, backend, model, instructions, restored_from}` |
+| `POST /api/notes/<name>/restore` | `{"n": …}` → `{title, note, version}` — restores that version as a new one |
+| `POST /api/notes/<name>/reveal` | open the folder in the OS file manager (best-effort) → `{opened, path}` |
 | `POST /transcribe` | JSON `{audio_path, language?}` (shared filesystem) or the audio as an `application/octet-stream` body with `?format=` → `{transcript, meta}` |
-| `POST /clean` | `{transcript, mode?, backend?, model?, tone?}` → `{title, body}` |
-| `POST /stream/start` · `/stream/append?sid=` · `/stream/finish?sid=` | live partials: raw s16le 16 kHz mono PCM chunks in, text out |
+| `POST /clean` | `{transcript, mode?, backend?, model?, tone?, instructions?}` → `{title, body}` |
+| `POST /revise` | `{note, instructions, backend?, model?}` → `{title, body}` |
+| `POST /stream/start` · `/stream/append?sid=` · `/stream/ping?sid=` · `/stream/finish?sid=` | live partials: raw s16le 16 kHz mono PCM chunks in, text out; `ping` keeps a paused session alive (sessions expire 30 min after the last touch) |
 
 ---
 

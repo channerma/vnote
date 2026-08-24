@@ -239,6 +239,33 @@ button.big:disabled { background: var(--panel); color: var(--ink); border-color:
 #note-audio { width: 100%; margin-bottom: 0.75rem; }
 #note-audio[hidden] { display: none; }
 
+.grow { flex: 1 1 18rem; }
+
+.reprocess {
+  margin-top: 1rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.5rem;
+}
+.reprocess .status { margin: 0.25rem 0 0; }
+
+#note-editor.viewing-old {
+  background: var(--code-bg);
+  border-style: dashed;
+}
+
+.folder { align-items: baseline; }
+.path {
+  flex: 1 1 20rem;
+  min-width: 0;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.5rem;
+  color: var(--ink-soft);
+  word-break: break-all;
+  user-select: all;
+}
+
 #note-transcript { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: 0.75rem; }
 #note-transcript summary { cursor: pointer; color: var(--ink-soft); }
 #note-transcript pre {

@@ -6,9 +6,10 @@ inference is serialized behind a lock (one GPU; CTranslate2 models aren't
 guaranteed concurrency-safe).
 
 Routes: ``GET /`` and ``/static/*`` serve the page in ``vnote/web/``; ``/api/*``
-is what that page talks to (docs/planning/PHASE8.md has the contract);
-``/transcribe``, ``/clean`` and ``/stream/*`` are the per-step endpoints the
-CLI uses when a daemon is up.
+is what that page talks to (docs/planning/PHASE8.md has the contract, PHASE9.md
+the editing/revise/versions/reveal additions);
+``/transcribe``, ``/clean``, ``/revise`` and ``/stream/*`` are the per-step
+endpoints the CLI uses when a daemon is up.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__, config, output
+from . import __version__, config, output, versions
 from .audio import BYTES_PER_S, wav_bytes
 
 _infer_lock = threading.Lock()
@@ -70,7 +71,8 @@ def _transcribe_pcm(pcm: bytes, language: str | None) -> tuple[str, dict]:
 # Partials are best-effort; only /stream/finish must not fail.
 
 _MIN_NEW_PCM = BYTES_PER_S // 2  # re-transcribe after >=0.5 s of new audio
-_STREAM_TTL_S = 120.0  # drop sessions this long after their last chunk
+_STREAM_TTL_S = 1800.0  # drop sessions this long after their last touch — a long pause must survive
+#                        (30 min; /stream/ping keeps a paused session alive without sending audio)
 
 _sessions: dict[str, _StreamSession] = {}
 _sessions_lock = threading.Lock()
@@ -207,6 +209,10 @@ def _list_notes() -> list[dict]:
 
 
 def _note_detail(session: Path) -> dict:
+    try:
+        versions.ensure_history(session)  # a 0.5.0 folder shows "v1 · original" the first time it is opened
+    except (OSError, ValueError):
+        pass  # best-effort: a broken meta.json or an unwritable folder must not fail the read
     audio = _audio_file(session)
     return {
         **_summary(session),
@@ -214,7 +220,36 @@ def _note_detail(session: Path) -> dict:
         "note": _read_text(session / "note.md"),
         "transcript": _read_text(session / "transcript.txt") or "",
         "audio_url": f"/api/notes/{session.name}/audio" if audio else None,
+        "path": str(session),  # the page shows it (with a Copy button) next to the reveal action
+        "versions": versions.entries(session),
     }
+
+
+def _reveal(path: Path) -> bool:
+    """Open a note's folder in the desktop file manager. Best-effort: never raises, never blocks.
+
+    Under WSL the folder belongs in *Windows* Explorer, reached through its Windows
+    path; explorer.exe returns a meaningless exit code and may outlive us, so it is
+    fired and forgotten (same shape as ``_open_browser``).
+    """
+    quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    try:
+        if _is_wsl():
+            done = subprocess.run(["wslpath", "-w", str(path)], stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=5)
+            winpath = (done.stdout or "").strip()
+            if not winpath:
+                return False
+            subprocess.Popen(["explorer.exe", winpath], **quiet)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)], **quiet)
+        elif os.name == "nt":
+            subprocess.Popen(["explorer", str(path)], **quiet)
+        else:
+            subprocess.Popen(["xdg-open", str(path)], **quiet)
+        return True
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
 
 
 def _preserve_upload(tmp: Path) -> Path | None:
@@ -352,6 +387,22 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"text": _read_text(config.vocab_file()) or ""})
             if path == "/api/notes":
                 return self._send(200, {"notes": _list_notes()})
+            m = re.fullmatch(r"/api/notes/([^/]+)/versions/(\d+)", path)
+            if m:
+                session = _session_path(m.group(1))
+                if session is None:
+                    return self._send(404, {"error": f"no such note: {m.group(1)}"})
+                n = int(m.group(2))
+                try:
+                    versions.ensure_history(session)  # best-effort, exactly as in _note_detail
+                except (OSError, ValueError):
+                    pass
+                try:
+                    text = versions.read(session, n)
+                except ValueError as exc:
+                    return self._send(404, {"error": str(exc)})
+                entry = next((e for e in versions.entries(session) if e.get("n") == n), {})
+                return self._send(200, {**entry, "n": n, "text": text})
             m = re.fullmatch(r"/api/notes/([^/]+)(/audio)?", path)
             if m:
                 session = _session_path(m.group(1))
@@ -380,6 +431,9 @@ class _Handler(BaseHTTPRequestHandler):
                 except ValueError as exc:
                     return self._send(400, {"error": str(exc)})
                 return self._send(200, {"saved": saved})
+            m = re.fullmatch(r"/api/notes/([^/]+)/note", path)
+            if m:
+                return self._api_save_note(m.group(1))
             if path == "/api/vocab":
                 text = self._read_json().get("text")
                 if not isinstance(text, str):
@@ -484,6 +538,60 @@ class _Handler(BaseHTTPRequestHandler):
             tmp.unlink(missing_ok=True)  # the session folder (or failed/) holds its own copy now
         self._send(*reply)
 
+    def _api_save_note(self, name: str) -> None:
+        """PUT the note text the user edited in the page — a new version (op ``edit``)."""
+        session = _session_path(name)
+        if session is None:
+            return self._send(404, {"error": f"no such note: {name}"})
+        text = self._read_json().get("text")
+        if not isinstance(text, str) or not text.strip():
+            return self._send(400, {"error": "body must be {\"text\": \"...\"} with non-empty text"})
+        from . import pipeline
+
+        result = pipeline.save_edit(session, text)
+        self._send(200, {"version": result.version, "title": result.title, "note": result.note_text})
+
+    def _api_revise(self, name: str) -> None:
+        """Rewrite the *current* note per a free-text instruction — a new version (op ``revise``)."""
+        session = _session_path(name)
+        if session is None:
+            return self._send(404, {"error": f"no such note: {name}"})
+        data = self._read_json()
+        backend = data.get("backend") or config.backend()
+        if backend not in config.setting("backend").choices:
+            return self._send(400, {"error": f"bad backend: {backend!r}"})
+        instructions = data.get("instructions")
+        from . import cleanup, pipeline
+
+        try:
+            result = pipeline.revise(session, revise_fn=cleanup.revise,
+                                     instructions=instructions if isinstance(instructions, str) else "",
+                                     backend=backend, model=data.get("model"))
+        except ValueError as exc:  # blank instructions, or the note was never cleaned
+            return self._send(400, {"error": str(exc)})
+        self._send(200, {"title": result.title, "note": result.note_text, "version": result.version})
+
+    def _api_restore(self, name: str) -> None:
+        session = _session_path(name)
+        if session is None:
+            return self._send(404, {"error": f"no such note: {name}"})
+        n = self._read_json().get("n")
+        if not isinstance(n, int) or isinstance(n, bool):
+            return self._send(400, {"error": "body must be {\"n\": <version number>}"})
+        from . import pipeline
+
+        try:
+            result = pipeline.restore(session, n)
+        except ValueError as exc:
+            return self._send(404, {"error": str(exc)})
+        self._send(200, {"title": result.title, "note": result.note_text, "version": result.version})
+
+    def _api_reveal(self, name: str) -> None:
+        session = _session_path(name)
+        if session is None:
+            return self._send(404, {"error": f"no such note: {name}"})
+        self._send(200, {"opened": _reveal(session), "path": str(session)})
+
     def _api_reclean(self, name: str) -> None:
         session = _session_path(name)
         if session is None:
@@ -499,12 +607,12 @@ class _Handler(BaseHTTPRequestHandler):
 
         try:
             result = pipeline.reclean(session, clean_fn=cleanup.clean, mode=mode, backend=backend,
-                                      model=data.get("model"))
+                                      model=data.get("model"), instructions=data.get("instructions"))
         except FileNotFoundError as exc:
             return self._send(404, {"error": str(exc)})
         except pipeline.EmptyTranscriptError:
             return self._send(400, {"error": "transcript is empty"})
-        self._send(200, {"title": result.title, "note": result.note_text})
+        self._send(200, {"title": result.title, "note": result.note_text, "version": result.version})
 
     def _stream_session(self, url) -> tuple[str, _StreamSession] | None:
         """Look up ?sid=...; sends the 404 itself when the session is unknown/expired."""
@@ -522,11 +630,13 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": "cross-site request refused"})
         try:
             url = urlparse(self.path)
-            reclean = re.fullmatch(r"/api/notes/([^/]+)/reclean", url.path)
+            note_route = re.fullmatch(r"/api/notes/([^/]+)/(reclean|revise|restore|reveal)", url.path)
             if url.path == "/api/note":
                 return self._api_note(parse_qs(url.query))
-            elif reclean:
-                return self._api_reclean(reclean.group(1))
+            elif note_route:
+                handler = {"reclean": self._api_reclean, "revise": self._api_revise,
+                           "restore": self._api_restore, "reveal": self._api_reveal}[note_route.group(2)]
+                return handler(note_route.group(1))
             elif url.path == "/transcribe":
                 ctype = (self.headers.get("Content-Type") or "").partition(";")[0].strip().lower()
                 if ctype == "application/octet-stream" or ctype.startswith("audio/"):
@@ -546,6 +656,24 @@ class _Handler(BaseHTTPRequestHandler):
                     backend=data.get("backend", "ollama"),
                     model=data.get("model"),
                     tone=data.get("tone"),
+                    instructions=data.get("instructions"),
+                )
+                self._send(200, {"title": result.title, "body": result.body})
+            elif url.path == "/revise":
+                data = self._read_json()
+                note = data.get("note")
+                instructions = data.get("instructions")
+                if not isinstance(note, str) or not note.strip():
+                    raise _BadRequest("note is empty")
+                if not isinstance(instructions, str) or not instructions.strip():
+                    raise _BadRequest("instructions are empty")
+                from .cleanup import revise
+
+                result = revise(
+                    note,
+                    instructions,
+                    backend=data.get("backend", "ollama"),
+                    model=data.get("model"),
                 )
                 self._send(200, {"title": result.title, "body": result.body})
             elif url.path == "/stream/start":
@@ -555,6 +683,12 @@ class _Handler(BaseHTTPRequestHandler):
                 with _sessions_lock:
                     _sessions[sid] = _StreamSession(data.get("language"))
                 self._send(200, {"session_id": sid})
+            elif url.path == "/stream/ping":
+                found = self._stream_session(url)
+                if found is None:
+                    return
+                found[1].last_seen = time.monotonic()  # a paused recorder keeps its session alive
+                self._send(200, {"ok": True})
             elif url.path == "/stream/append":
                 found = self._stream_session(url)
                 if found is None:

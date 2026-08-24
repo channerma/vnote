@@ -5,7 +5,7 @@ import subprocess
 import pytest
 
 from vnote import cleanup, config
-from vnote.cleanup import _build_user_prompt, _finish, _parse_response, clean
+from vnote.cleanup import _build_user_prompt, _finish, _parse_response, clean, revise
 
 
 def test_parse_full_title_and_body():
@@ -176,3 +176,80 @@ def test_claude_code_timeout_is_reported(monkeypatch):
     monkeypatch.setattr(cleanup.subprocess, "run", boom)
     with pytest.raises(RuntimeError, match="timed out"):
         clean("x", backend="claude-code")
+
+
+# --- free-text instructions on cleanup ---------------------------------------
+
+
+def test_instructions_land_at_the_end_of_the_user_prompt():
+    prompt = _build_user_prompt("x", "edit", instructions="keep the numbers exact")
+    assert prompt.rstrip().endswith("keep the numbers exact")
+    assert "take precedence" in prompt
+
+
+def test_instructions_work_in_dictation_mode_too():
+    prompt = _build_user_prompt("x", "dictation", instructions="british spelling")
+    assert "british spelling" in prompt
+
+
+def test_no_instructions_paragraph_when_none_or_blank():
+    assert "Additional instructions" not in _build_user_prompt("x", "edit")
+    assert "Additional instructions" not in _build_user_prompt("x", "edit", instructions="   ")
+
+
+def test_instructions_reach_the_backend_prompt(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run(rec))
+    clean("raw words", backend="claude-code", instructions="cut the preamble")
+    assert "cut the preamble" in rec["input"]
+
+
+# --- revise (instruction applied to an existing note) -------------------------
+
+
+def test_revise_builds_revise_prompts_and_strips_the_heading(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run(rec))
+
+    result = revise("# My Great Note\n\nFirst line.", "make it shorter", backend="claude-code")
+
+    system = rec["cmd"][rec["cmd"].index("--system-prompt") + 1]
+    assert "revise" in system.lower()
+    assert "INSTRUCTION:\nmake it shorter" in rec["input"]
+    assert "First line." in rec["input"]
+    assert "# My Great Note" not in rec["input"]  # heading stripped; it round-trips as the title
+    assert (result.title, result.body) == ("T", "body")
+
+
+def test_revise_falls_back_to_the_existing_heading_as_title(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run(rec, stdout="just a revised body"))
+
+    result = revise("# Parser Notes\n\nold body", "make it shorter", backend="claude-code")
+    assert result.title == "Parser Notes"
+    assert result.body == "just a revised body"
+
+
+def test_revise_rejects_blank_instruction_and_unknown_backend():
+    with pytest.raises(ValueError):
+        revise("# T\n\nbody", "   ")
+    with pytest.raises(ValueError, match="unknown backend"):
+        revise("# T\n\nbody", "shorter", backend="bogus")
+
+
+def test_revise_ollama_uses_the_note_model_not_the_dictation_model(monkeypatch):
+    rec: dict = {}
+
+    def fake(system, user, model):
+        rec["model"] = model
+        return "TITLE: T\n---\nbody"
+
+    monkeypatch.setattr(cleanup, "_ollama_complete", fake)
+    monkeypatch.setattr(cleanup, "dictation_model", lambda: "tiny:1b")
+    monkeypatch.setattr(cleanup, "ollama_model", lambda: "big:14b")
+
+    assert revise("# T\n\nbody", "shorter").title == "T"
+    assert rec["model"] == "big:14b"

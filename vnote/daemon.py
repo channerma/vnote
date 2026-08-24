@@ -86,9 +86,29 @@ def clean(
     backend: str = "ollama",
     model: str | None = None,
     tone: str | None = None,
+    instructions: str | None = None,
 ) -> CleanResult:
-    payload = {"transcript": transcript, "mode": mode, "backend": backend, "model": model, "tone": tone}
+    payload = {
+        "transcript": transcript,
+        "mode": mode,
+        "backend": backend,
+        "model": model,
+        "tone": tone,
+        "instructions": instructions,
+    }
     d = _post("/clean", payload, timeout=600)
+    return CleanResult(title=d["title"], body=d["body"])
+
+
+def revise(
+    note_text: str,
+    instructions: str,
+    backend: str = "ollama",
+    model: str | None = None,
+) -> CleanResult:
+    """Rework an existing note per a free-text instruction (see cleanup.revise)."""
+    payload = {"note": note_text, "instructions": instructions, "backend": backend, "model": model}
+    d = _post("/revise", payload, timeout=600)
     return CleanResult(title=d["title"], body=d["body"])
 
 

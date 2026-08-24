@@ -8,13 +8,12 @@ lands in the same shape on disk.
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import config, output
+from . import config, output, versions
 
 
 class EmptyTranscriptError(ValueError):
@@ -83,6 +82,7 @@ def make_note(
     rec_duration: float | None = None,
     started: datetime | None = None,
     on_stage=None,
+    instructions: str | None = None,
 ) -> NoteResult:
     """Transcribe ``audio_path``, clean it up (unless ``raw``), write the session folder.
 
@@ -124,7 +124,7 @@ def make_note(
         on_stage("cleaning", backend=backend, mode=mode)
         t0 = time.monotonic()
         try:
-            result = clean_fn(transcript, mode=mode, backend=backend, model=model)
+            result = clean_fn(transcript, mode=mode, backend=backend, model=model, instructions=instructions)
         except Exception as exc:  # noqa: BLE001 - never fatal: an LLM HTTP 500 or timeout keeps the raw transcript
             cleanup_error = str(exc)
             title = _fallback_title(transcript)
@@ -151,6 +151,10 @@ def make_note(
         "title": title,
         **tmeta,
     }
+    if note_body is not None:
+        # An empty history up front, so the commit below appends v1 instead of
+        # taking the note.md write_session just made for a pre-versioning folder.
+        meta["versions"] = []
     written = output.write_session(
         session_dir,
         audio_src=audio_path,
@@ -162,6 +166,12 @@ def make_note(
     )
 
     note_text = transcript if note_body is None else note_markdown(title, note_body, mode)
+    if note_body is not None:  # raw notes (and failed cleanups) have no note.md, so no history
+        _, meta = versions.commit(
+            session_dir, note_text, op="clean", title=title,
+            mode=mode, backend=backend, model=cleanup_model, when=started,
+            instructions=instructions,
+        )
     return NoteResult(
         session_dir=session_dir,
         title=title,
@@ -185,6 +195,7 @@ class RecleanResult:
     title: str
     note_text: str
     transcript: str
+    version: int | None = None  # the version this write created, when it went to a session folder
 
 
 def resolve_redo(path: Path) -> tuple[str, Path | None]:
@@ -206,21 +217,20 @@ def resolve_redo(path: Path) -> tuple[str, Path | None]:
     raise FileNotFoundError(f"no such path: {path}")
 
 
-def _update_meta(session_dir: Path, mode: str, backend: str, model: str | None) -> None:
-    meta_path = session_dir / "meta.json"
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    meta["cleanup_mode"] = mode
-    meta["cleanup_backend"] = backend
-    meta["cleanup_model"] = resolved_model(backend, model)
-    meta["recleaned"] = True
-    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-
-
-def reclean(path: Path, *, clean_fn, mode: str, backend: str, model: str | None = None) -> RecleanResult:
+def reclean(
+    path: Path,
+    *,
+    clean_fn,
+    mode: str,
+    backend: str,
+    model: str | None = None,
+    instructions: str | None = None,
+) -> RecleanResult:
     """Re-run cleanup on a saved note (or a bare transcript file); no transcription.
+
+    The transcript is the input, so this is a *regenerate*: the result becomes a new
+    version of the note (``op: "regenerate"``). ``instructions`` is free text appended
+    to the cleanup prompt ("make it longer").
 
     Missing paths raise FileNotFoundError, an empty transcript raises
     EmptyTranscriptError, and cleanup failures propagate to the caller.
@@ -229,9 +239,91 @@ def reclean(path: Path, *, clean_fn, mode: str, backend: str, model: str | None 
     if not transcript:
         raise EmptyTranscriptError("transcript is empty")
 
-    result = clean_fn(transcript, mode=mode, backend=backend, model=model)
+    result = clean_fn(transcript, mode=mode, backend=backend, model=model, instructions=instructions)
     note_text = note_markdown(result.title, result.body, mode)
+    version: int | None = None
     if session_dir is not None:
-        (session_dir / "note.md").write_text(note_text, encoding="utf-8")
-        _update_meta(session_dir, mode, backend, model)
-    return RecleanResult(session_dir=session_dir, title=result.title, note_text=note_text, transcript=transcript)
+        version, _ = versions.commit(
+            session_dir, note_text, op="regenerate", title=result.title, mode=mode,
+            backend=backend, model=resolved_model(backend, model), instructions=instructions,
+        )
+    return RecleanResult(session_dir=session_dir, title=result.title, note_text=note_text,
+                         transcript=transcript, version=version)
+
+
+# --- edit / revise / restore an existing note --------------------------------
+
+
+def _session_transcript(session_dir: Path) -> str:
+    try:
+        return (session_dir / "transcript.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _committed(session_dir: Path, title: str, version: int, text: str) -> RecleanResult:
+    # ``text`` is what this commit wrote, not a re-read of note.md: a concurrent
+    # commit may already have moved note.md on to a later version.
+    return RecleanResult(
+        session_dir=session_dir,
+        title=title,
+        note_text=text,
+        transcript=_session_transcript(session_dir),
+        version=version,
+    )
+
+
+def save_edit(session_dir: Path, text: str) -> RecleanResult:
+    """Save hand-edited note text as a new version (``op: "edit"``)."""
+    session_dir = Path(session_dir)
+    if not text or not text.strip():
+        raise ValueError("note text is empty")
+    meta = versions.read_meta(session_dir)
+    title = versions.heading_title(text) or meta.get("title") or session_dir.name
+    text = versions.normalized(text)
+    version, _ = versions.commit(session_dir, text, op="edit", title=title)
+    return _committed(session_dir, title, version, text)
+
+
+def revise(
+    session_dir: Path,
+    *,
+    revise_fn,
+    instructions: str,
+    backend: str,
+    model: str | None = None,
+) -> RecleanResult:
+    """Rewrite the *current note* per ``instructions`` — a new version (``op: "revise"``).
+
+    Unlike :func:`reclean`, the input is the note as it stands (edits included), not
+    the transcript. ``revise_fn(note_text, instructions, backend=, model=) -> CleanResult``.
+    """
+    session_dir = Path(session_dir)
+    note_path = session_dir / "note.md"
+    if not note_path.is_file():
+        raise ValueError("no note to revise")
+    if not instructions or not instructions.strip():
+        raise ValueError("instructions are empty")
+    meta = versions.read_meta(session_dir)
+    result = revise_fn(note_path.read_text(encoding="utf-8"), instructions, backend=backend, model=model)
+    note_text = versions.normalized(note_markdown(result.title, result.body,
+                                                  mode=meta.get("cleanup_mode") or "edit"))
+    version, _ = versions.commit(
+        session_dir, note_text, op="revise", title=result.title, mode=meta.get("cleanup_mode"),
+        backend=backend, model=resolved_model(backend, model), instructions=instructions,
+    )
+    return _committed(session_dir, result.title, version, note_text)
+
+
+def restore(session_dir: Path, n: int) -> RecleanResult:
+    """Make version ``n`` current again — itself a new version (``op: "restore"``).
+
+    ValueError when there is no version ``n``.
+    """
+    session_dir = Path(session_dir)
+    versions.ensure_history(session_dir)  # a pre-versions folder gets its v1 before we look for n
+    text = versions.normalized(versions.read(session_dir, n))
+    meta = versions.read_meta(session_dir)
+    title = versions.heading_title(text) or meta.get("title") or session_dir.name
+    version, _ = versions.commit(session_dir, text, op="restore", title=title, restored_from=n)
+    return _committed(session_dir, title, version, text)

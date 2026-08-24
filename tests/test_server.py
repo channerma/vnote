@@ -24,9 +24,14 @@ def _fake_transcribe(audio_path, language=None):
     return "fake transcript", {"language": language or "en", "device": "fake"}
 
 
-def _fake_clean(transcript, mode="edit", backend="ollama", model=None, tone=None):
-    _seen["clean"] = (transcript, mode, backend, model, tone)
+def _fake_clean(transcript, mode="edit", backend="ollama", model=None, tone=None, instructions=None):
+    _seen["clean"] = (transcript, mode, backend, model, tone, instructions)
     return CleanResult(title="Fake Title", body="Fake body.")
+
+
+def _fake_revise(note_text, instructions, backend="ollama", model=None):
+    _seen["revise"] = (note_text, instructions, backend, model)
+    return CleanResult(title="Revised", body="Shorter body.")
 
 
 @pytest.fixture
@@ -35,6 +40,7 @@ def live_server(monkeypatch):
     server._sessions.clear()
     monkeypatch.setattr(transcribe, "transcribe", _fake_transcribe)
     monkeypatch.setattr(cleanup, "clean", _fake_clean)
+    monkeypatch.setattr(cleanup, "revise", _fake_revise)  # the other half of Phase 9's cleanup
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server._Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     monkeypatch.setattr(config, "daemon_addr", lambda: ("127.0.0.1", httpd.server_address[1]))
@@ -87,7 +93,7 @@ def test_transcribe_bytes_mode_bad_format(live_server):
 def test_clean_round_trip(live_server):
     result = daemon.clean("hello", mode="summary", backend="ollama", model="m", tone="formal")
     assert result == CleanResult(title="Fake Title", body="Fake body.")
-    assert _seen["clean"] == ("hello", "summary", "ollama", "m", "formal")
+    assert _seen["clean"] == ("hello", "summary", "ollama", "m", "formal", None)
 
 
 def test_unknown_path_is_404(live_server):
@@ -421,7 +427,7 @@ def test_api_note_transcription_failure_keeps_the_audio(notes_dir, monkeypatch):
 def test_api_note_cleanup_http_failure_keeps_the_transcript(notes_dir, monkeypatch):
     import urllib.error as ue
 
-    def ollama_500(transcript, mode="edit", backend="ollama", model=None, tone=None):
+    def ollama_500(transcript, mode="edit", backend="ollama", model=None, tone=None, instructions=None):
         raise ue.HTTPError("http://127.0.0.1:11434/api/chat", 500, "cudaMalloc failed", {}, None)
 
     monkeypatch.setattr(cleanup, "clean", ollama_500)
@@ -474,3 +480,250 @@ def test_malformed_json_bodies_are_400(live_server):
     for method, path in (("PUT", "/api/vocab"), ("PUT", "/api/settings"), ("POST", "/clean")):
         status, _, body = _request(method, path, b"{not json", {"Content-Type": "application/json"})
         assert status == 400 and b"not valid JSON" in body, (method, path)
+
+
+# --- Phase 9: editing, revise, versions, reveal, keepalive ----------------------
+
+
+def test_detail_carries_the_path_and_the_version_log(notes_dir):
+    d = _make_session(notes_dir, "2026-08-10-0900-history", meta={"title": "History"}, audio=None)
+    status, data = _get_json("/api/notes/2026-08-10-0900-history")
+    assert status == 200
+    assert data["path"] == str(d)
+    assert [e["op"] for e in data["versions"]] == ["clean"]  # opening a pre-versioning folder snapshots note.md as v1
+
+    _send_json("PUT", "/api/notes/2026-08-10-0900-history/note", {"text": "# Edited\n\nnew body"})
+    status, data = _get_json("/api/notes/2026-08-10-0900-history")
+    assert [e["op"] for e in data["versions"]] == ["clean", "edit"]  # the old note.md became v1
+    assert data["title"] == "Edited"
+
+
+def test_put_note_saves_an_edit_as_a_new_version(notes_dir):
+    d = _make_session(notes_dir, "2026-08-10-0901-edit", meta={"title": "Old"}, audio=None)
+    status, data = _send_json("PUT", "/api/notes/2026-08-10-0901-edit/note",
+                              {"text": "# Typed\n\nI wrote this by hand."})
+    assert status == 200, data
+    assert data == {"version": 2, "title": "Typed", "note": "# Typed\n\nI wrote this by hand.\n"}
+    assert (d / "note.md").read_text(encoding="utf-8") == "# Typed\n\nI wrote this by hand.\n"
+    assert (d / "versions" / "note-2.md").read_text(encoding="utf-8") == "# Typed\n\nI wrote this by hand.\n"
+    assert (d / "versions" / "note-1.md").read_text(encoding="utf-8") == "# T\n\nbody\n"
+
+    for bad in ({"text": ""}, {"text": "   \n"}, {"text": 5}, {}):
+        status, data = _send_json("PUT", "/api/notes/2026-08-10-0901-edit/note", bad)
+        assert status == 400, bad
+    status, _ = _send_json("PUT", "/api/notes/2026-01-01-0000-missing/note", {"text": "x"})
+    assert status == 404
+
+
+def test_reclean_passes_instructions_and_returns_a_version(notes_dir):
+    d = _make_session(notes_dir, "2026-08-10-0902-redo", meta={"title": "Old", "cleanup_mode": "edit"},
+                      audio=None)
+    status, data = _send_json("POST", "/api/notes/2026-08-10-0902-redo/reclean",
+                              {"mode": "light", "instructions": "make it longer"})
+    assert status == 200, data
+    assert data == {"title": "Fake Title", "note": "# Fake Title\n\nFake body.\n", "version": 2}
+    assert _seen["clean"][5] == "make it longer"
+    entries = _json.loads((d / "meta.json").read_text(encoding="utf-8"))["versions"]
+    assert [e["op"] for e in entries] == ["clean", "regenerate"]
+    assert entries[1]["instructions"] == "make it longer" and entries[1]["mode"] == "light"
+
+
+def test_revise_rewrites_the_current_note(notes_dir):
+    d = _make_session(notes_dir, "2026-08-10-0903-revise", meta={"title": "Old", "cleanup_mode": "light"},
+                      note="# Hand Edited\n\nthe note as it stands\n", audio=None)
+    status, data = _send_json("POST", "/api/notes/2026-08-10-0903-revise/revise",
+                              {"instructions": "shorter", "backend": "ollama", "model": "m"})
+    assert status == 200, data
+    assert data == {"title": "Revised", "note": "# Revised\n\nShorter body.\n", "version": 2}
+    # the reviser sees the note, not the transcript
+    assert _seen["revise"] == ("# Hand Edited\n\nthe note as it stands\n", "shorter", "ollama", "m")
+    assert (d / "note.md").read_text(encoding="utf-8") == "# Revised\n\nShorter body.\n"
+    entries = _json.loads((d / "meta.json").read_text(encoding="utf-8"))["versions"]
+    assert entries[1]["op"] == "revise" and entries[1]["instructions"] == "shorter"
+
+    for bad in ({"instructions": ""}, {"instructions": "  "}, {}):
+        status, _ = _send_json("POST", "/api/notes/2026-08-10-0903-revise/revise", bad)
+        assert status == 400, bad
+    status, body = _send_json("POST", "/api/notes/2026-08-10-0903-revise/revise",
+                              {"instructions": "x", "backend": "gpt"})
+    assert status == 400 and "bad backend" in body["error"]
+    status, _ = _send_json("POST", "/api/notes/2026-01-01-0000-missing/revise", {"instructions": "x"})
+    assert status == 404
+
+
+def test_revise_without_a_note_is_400(notes_dir):
+    _make_session(notes_dir, "2026-08-10-0904-noteless", note=None, audio=None)
+    status, data = _send_json("POST", "/api/notes/2026-08-10-0904-noteless/revise", {"instructions": "x"})
+    assert status == 400 and "no note to revise" in data["error"]
+
+
+def test_get_and_restore_a_version(notes_dir):
+    d = _make_session(notes_dir, "2026-08-10-0905-versions", meta={"title": "V1"}, audio=None)
+    _send_json("PUT", "/api/notes/2026-08-10-0905-versions/note", {"text": "# V2\n\nsecond"})
+
+    status, data = _get_json("/api/notes/2026-08-10-0905-versions/versions/1")
+    assert status == 200
+    assert data["n"] == 1 and data["text"] == "# T\n\nbody\n" and data["op"] == "clean"
+    status, data = _get_json("/api/notes/2026-08-10-0905-versions/versions/2")
+    assert data["text"] == "# V2\n\nsecond\n" and data["op"] == "edit"
+    for bad in ("/versions/3", "/versions/0", "/versions/99"):
+        status, _ = _get_json(f"/api/notes/2026-08-10-0905-versions{bad}")
+        assert status == 404, bad
+    status, _ = _get_json("/api/notes/2026-08-10-0905-versions/versions/x")
+    assert status == 404  # <n> must be digits
+    status, _ = _get_json("/api/notes/2026-01-01-0000-missing/versions/1")
+    assert status == 404
+
+    status, data = _send_json("POST", "/api/notes/2026-08-10-0905-versions/restore", {"n": 1})
+    assert status == 200, data
+    assert data == {"title": "T", "note": "# T\n\nbody\n", "version": 3}
+    assert (d / "note.md").read_text(encoding="utf-8") == "# T\n\nbody\n"
+    entries = _json.loads((d / "meta.json").read_text(encoding="utf-8"))["versions"]
+    assert entries[2]["op"] == "restore" and entries[2]["restored_from"] == 1
+
+    status, _ = _send_json("POST", "/api/notes/2026-08-10-0905-versions/restore", {"n": 99})
+    assert status == 404
+    for bad in ({"n": "1"}, {"n": 1.5}, {"n": True}, {}):
+        status, _ = _send_json("POST", "/api/notes/2026-08-10-0905-versions/restore", bad)
+        assert status == 400, bad
+
+
+def _record_reveal(monkeypatch, *, wsl: bool, wslpath_out: str = "", popen_error: bool = False):
+    calls: list[tuple] = []
+    monkeypatch.setattr(server, "_is_wsl", lambda: wsl)
+
+    class _Done:
+        stdout = wslpath_out
+
+    def fake_run(cmd, **kw):
+        calls.append(("run", tuple(cmd), kw.get("timeout")))
+        return _Done()
+
+    def fake_popen(cmd, **kw):
+        calls.append(("popen", tuple(cmd), kw.get("stdout")))
+        if popen_error:
+            raise OSError("explorer.exe: no such file")
+        return None
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    monkeypatch.setattr(server.subprocess, "Popen", fake_popen)
+    return calls
+
+
+def test_reveal_on_wsl_goes_through_wslpath_and_explorer(notes_dir, monkeypatch):
+    d = _make_session(notes_dir, "2026-08-10-0906-reveal", audio=None)
+    calls = _record_reveal(monkeypatch, wsl=True, wslpath_out="D:\\notes\\2026-08-10-0906-reveal\n")
+    status, data = _send_json("POST", "/api/notes/2026-08-10-0906-reveal/reveal", {})
+    assert status == 200
+    assert data == {"opened": True, "path": str(d)}
+    assert calls[0] == ("run", ("wslpath", "-w", str(d)), 5)  # bounded: never blocks the daemon
+    assert calls[1] == ("popen", ("explorer.exe", "D:\\notes\\2026-08-10-0906-reveal"),
+                        server.subprocess.DEVNULL)
+
+
+def test_reveal_off_wsl_uses_xdg_open(notes_dir, monkeypatch):
+    d = _make_session(notes_dir, "2026-08-10-0907-xdg", audio=None)
+    calls = _record_reveal(monkeypatch, wsl=False)
+    monkeypatch.setattr(server.sys, "platform", "linux")
+    status, data = _send_json("POST", "/api/notes/2026-08-10-0907-xdg/reveal", {})
+    assert status == 200 and data == {"opened": True, "path": str(d)}
+    assert calls == [("popen", ("xdg-open", str(d)), server.subprocess.DEVNULL)]
+
+
+def test_reveal_reports_failure_instead_of_raising(notes_dir, monkeypatch):
+    d = _make_session(notes_dir, "2026-08-10-0908-broken", audio=None)
+    _record_reveal(monkeypatch, wsl=False, popen_error=True)
+    status, data = _send_json("POST", "/api/notes/2026-08-10-0908-broken/reveal", {})
+    assert status == 200 and data == {"opened": False, "path": str(d)}
+
+    _record_reveal(monkeypatch, wsl=True, wslpath_out="   \n")  # wslpath produced nothing usable
+    status, data = _send_json("POST", "/api/notes/2026-08-10-0908-broken/reveal", {})
+    assert status == 200 and data == {"opened": False, "path": str(d)}
+
+    status, _ = _send_json("POST", "/api/notes/2026-01-01-0000-missing/reveal", {})
+    assert status == 404
+
+
+def test_clean_endpoint_passes_instructions(live_server):
+    status, data = _send_json("POST", "/clean", {"transcript": "hello", "instructions": "make it longer"})
+    assert status == 200 and data == {"title": "Fake Title", "body": "Fake body."}
+    assert _seen["clean"][5] == "make it longer"
+
+
+def test_revise_endpoint_mirrors_clean(live_server):
+    status, data = _send_json("POST", "/revise", {"note": "# T\n\nbody", "instructions": "shorter",
+                                                  "backend": "ollama", "model": "m"})
+    assert status == 200 and data == {"title": "Revised", "body": "Shorter body."}
+    assert _seen["revise"] == ("# T\n\nbody", "shorter", "ollama", "m")
+
+    for bad in ({}, {"note": "# T\n\nbody"}, {"instructions": "shorter"},
+                {"note": "  ", "instructions": "shorter"}, {"note": "# T", "instructions": " "},
+                {"note": 5, "instructions": "shorter"}):
+        status, data = _send_json("POST", "/revise", bad)
+        assert status == 400, bad  # a missing field is a bad request, not a KeyError 500
+        assert "error" in data
+
+
+def test_stream_ping_keeps_a_paused_session_alive(live_server):
+    assert server._STREAM_TTL_S == 1800.0  # a pause has to survive; 120 s did not
+    sess = daemon.StreamSession()
+    server._sessions[sess.sid].last_seen -= 200  # far past the old 120 s TTL
+    aged = server._sessions[sess.sid].last_seen
+    status, data = _send_json("POST", f"/stream/ping?sid={sess.sid}", {})
+    assert status == 200 and data == {"ok": True}
+    assert server._sessions[sess.sid].last_seen > aged  # the ping is what moved the clock
+    assert sess.append(b"\x00\x00") == ""  # still usable after the pause
+
+    # A nearly-expired session survives the next sweep *because* of the ping; one that
+    # was not pinged does not (/stream/start sweeps before it hands out a new sid).
+    doomed = daemon.StreamSession()
+    server._sessions[sess.sid].last_seen -= server._STREAM_TTL_S - 10  # ~1790 s old
+    server._sessions[doomed.sid].last_seen -= server._STREAM_TTL_S + 1
+    status, _ = _send_json("POST", f"/stream/ping?sid={sess.sid}", {})
+    assert status == 200
+    daemon.StreamSession()  # starting a session sweeps the expired ones
+    assert sess.sid in server._sessions
+    assert doomed.sid not in server._sessions
+
+    status, data = _send_json("POST", "/stream/ping?sid=nope", {})
+    assert status == 404 and "unknown stream session" in data["error"]
+
+
+def test_a_corrupt_meta_does_not_500_a_read(notes_dir):
+    """The migration a GET performs is best-effort: an unparsable meta.json still
+    serves the note (with no history) instead of failing the request."""
+    d = _make_session(notes_dir, "2026-08-10-0910-corrupt", meta="{half a fi", audio=None)
+    status, data = _get_json("/api/notes/2026-08-10-0910-corrupt")
+    assert status == 200
+    assert data["note"] == "# T\n\nbody\n" and data["versions"] == []
+    status, _ = _get_json("/api/notes/2026-08-10-0910-corrupt/versions/1")
+    assert status == 404  # nothing was migrated, so there is no v1 to read
+    assert (d / "meta.json").read_text(encoding="utf-8") == "{half a fi"  # and nothing was rewritten
+
+
+def test_cross_site_revise_is_refused(notes_dir):
+    _make_session(notes_dir, "2026-08-10-0909-xsite", audio=None)
+    status, _, _ = _request("POST", "/api/notes/2026-08-10-0909-xsite/revise", b'{"instructions": "shorter"}',
+                            {"Content-Type": "application/json", "Origin": "https://evil.example"})
+    assert status == 403 and "revise" not in _seen
+    status, _, _ = _request("PUT", "/api/notes/2026-08-10-0909-xsite/note", b'{"text": "# X\\n\\ny"}',
+                            {"Content-Type": "application/json", "Origin": "https://evil.example"})
+    assert status == 403
+    assert (notes_dir / "2026-08-10-0909-xsite" / "note.md").read_text(encoding="utf-8") == "# T\n\nbody\n"
+
+
+def test_opening_a_pre_versions_note_migrates_it(notes_dir):
+    # A 0.5.0 folder: note.md + meta.json without "versions". Opening it must show v1 and let
+    # Restore work at once — not only after the first edit.
+    d = _make_session(notes_dir, "2026-08-10-0900-legacy", meta={"title": "Legacy", "created": "2026-08-10T09:00:00",
+                                                                  "cleanup_mode": "edit", "cleanup_backend": "ollama"},
+                      note="# Legacy\n\nold text\n", audio=None)
+    status, data = _get_json("/api/notes/2026-08-10-0900-legacy")
+    assert status == 200
+    assert [v["n"] for v in data["versions"]] == [1] and data["versions"][0]["op"] == "clean"
+    assert data["versions"][0]["created"] == "2026-08-10T09:00:00" and data["versions"][0]["mode"] == "edit"
+    assert (d / "versions" / "note-1.md").read_text(encoding="utf-8") == "# Legacy\n\nold text\n"
+    status, v1 = _get_json("/api/notes/2026-08-10-0900-legacy/versions/1")
+    assert status == 200 and v1["text"] == "# Legacy\n\nold text\n"
+    status, data = _send_json("POST", "/api/notes/2026-08-10-0900-legacy/restore", {"n": 1})
+    assert status == 200 and data["version"] == 2

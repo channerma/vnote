@@ -80,24 +80,58 @@
       <h2 id="note-title"></h2>
       <p id="note-meta" class="meta"></p>
       <audio id="note-audio" controls preload="none"></audio>
-      <textarea id="note-text" class="mono" readonly rows="18"></textarea>
+      <textarea id="note-editor" class="mono" rows="18" spellcheck="false"
+                aria-label="Note text (Markdown)"></textarea>
       <div class="row">
+        <button type="button" id="note-save">Save</button>
+        <span id="note-save-status" class="status inline"></span>
         <button type="button" id="note-copy">Copy</button>
         <span id="note-copy-status" class="status inline"></span>
       </div>
-      <div class="row">
-        <label class="pick inline-pick">
-          <span>Re-clean as</span>
-          <select id="reclean-mode">
-            <option value="edit">Edit</option>
-            <option value="light">Light</option>
-            <option value="summary">Summary</option>
-            <option value="dictation">Dictation</option>
-          </select>
-        </label>
-        <button type="button" id="reclean">Re-clean</button>
-        <span id="reclean-status" class="status inline"></span>
+
+      <div class="reprocess">
+        <div class="row">
+          <label class="pick inline-pick">
+            <span>Mode</span>
+            <select id="regenerate-mode">
+              <option value="edit">Edit</option>
+              <option value="light">Light</option>
+              <option value="summary">Summary</option>
+              <option value="dictation">Dictation</option>
+            </select>
+          </label>
+          <button type="button" id="regenerate">Regenerate from transcript</button>
+        </div>
+        <div class="row">
+          <input type="text" id="revise-instructions" class="grow"
+                 placeholder="make it shorter · turn the second half into a checklist"
+                 aria-label="Instruction for Revise and Regenerate"
+                 autocomplete="off" spellcheck="false">
+          <button type="button" id="revise">Revise</button>
+        </div>
+        <p class="hint">An instruction here also steers Regenerate.</p>
+        <p id="process-status" class="status"></p>
       </div>
+
+      <div id="note-versions" class="row" hidden>
+        <label class="pick inline-pick">
+          <span>Version</span>
+          <select id="version-select"></select>
+        </label>
+        <button type="button" id="version-restore">Restore</button>
+      </div>
+
+      <div id="note-folder" class="row folder" hidden>
+        <code id="note-path" class="path"></code>
+        <button type="button" id="note-path-copy">Copy path</button>
+        <button type="button" id="note-reveal">Open folder</button>
+        <span id="note-path-status" class="status inline"></span>
+      </div>
+
+      <div class="row">
+        <button type="button" id="note-continue" disabled>Continue recording (coming)</button>
+      </div>
+
       <details id="note-transcript">
         <summary>Raw transcript</summary>
         <pre></pre>

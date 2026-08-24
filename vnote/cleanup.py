@@ -72,11 +72,43 @@ _SYSTEM = (
 )
 
 
-def _build_user_prompt(transcript: str, mode: str, tone: str | None = None) -> str:
+_REVISE_SYSTEM = (
+    "You revise an existing Markdown note that was written from a dictated transcript. "
+    "Apply the author's instruction to the note. Keep everything the instruction does not "
+    "touch exactly as it is — the author's voice, the content, the structure, the wording. "
+    "Output GitHub-flavored Markdown.\n\n"
+    "Respond in exactly this format and nothing else:\n"
+    "TITLE: <keep the existing title unless the instruction changes it>\n"
+    "---\n"
+    "<the revised note>"
+)
+
+
+def _build_user_prompt(
+    transcript: str, mode: str, tone: str | None = None, instructions: str | None = None
+) -> str:
     instruction = _MODE_INSTRUCTIONS[mode]
     if tone:
         instruction += f" Write in a {tone} tone."
-    return f"{instruction}\n\nTRANSCRIPT:\n\"\"\"\n{transcript}\n\"\"\""
+    prompt = f"{instruction}\n\nTRANSCRIPT:\n\"\"\"\n{transcript}\n\"\"\""
+    if instructions and instructions.strip():
+        prompt += (
+            "\n\nAdditional instructions from the author (follow them; they take precedence "
+            f"over the defaults above): {instructions.strip()}"
+        )
+    return prompt
+
+
+def _build_revise_prompt(note_text: str, instructions: str) -> str:
+    return f"INSTRUCTION:\n{instructions}\n\nNOTE:\n\"\"\"\n{note_text}\n\"\"\""
+
+
+def _split_heading(note_text: str) -> tuple[str, str]:
+    """Split a leading '# Title' off a note: (title, note without that heading)."""
+    m = re.match(r"\s*#[ \t]+(.+?)[ \t]*(?:\n(.*))?$", note_text, re.DOTALL)
+    if m:
+        return m.group(1).strip(), (m.group(2) or "").strip()
+    return "", note_text.strip()
 
 
 def _system_for(mode: str) -> str:
@@ -128,18 +160,65 @@ def clean(
     backend: str = "ollama",
     model: str | None = None,
     tone: str | None = None,
+    instructions: str | None = None,
 ) -> CleanResult:
     if mode not in _MODE_INSTRUCTIONS:
         raise ValueError(f"unknown mode: {mode!r} (expected one of {', '.join(_MODE_INSTRUCTIONS)})")
+    raw = _complete(
+        backend,
+        _system_for(mode),
+        _build_user_prompt(transcript, mode, tone, instructions),
+        model,
+        for_mode=mode,
+    )
+    return _finish(raw, transcript, mode)
+
+
+def revise(
+    note_text: str,
+    instructions: str,
+    *,
+    backend: str = "ollama",
+    model: str | None = None,
+) -> CleanResult:
+    """Rework an existing note per a free-text instruction ("make it shorter").
+
+    Unlike clean(), the input is the finished Markdown note rather than the
+    transcript. A leading '# Title' heading is split off and handed back as the
+    title, so revising a note round-trips through the same CleanResult shape.
+    """
+    if not instructions or not instructions.strip():
+        raise ValueError("revise needs a non-empty instruction")
+    heading, body = _split_heading(note_text)
+    raw = _complete(
+        backend,
+        _REVISE_SYSTEM,
+        _build_revise_prompt(body, instructions.strip()),
+        model,
+        for_mode=None,
+    )
+    result = _parse_response(raw, heading or note_text)
+    if heading and result.title == _fallback_title(heading):
+        # The model dropped the TITLE: line — keep the note's own heading verbatim.
+        result = CleanResult(title=heading, body=result.body)
+    return result
+
+
+def _complete(backend: str, system: str, user: str, model: str | None, *, for_mode: str | None) -> str:
+    """Run one prompt through the chosen backend; returns the raw model text.
+
+    `for_mode` is only consulted to pick Ollama's default model — flow-mode
+    dictation gets the small, fast one.
+    """
     if backend == "ollama":
-        default = dictation_model() if mode == "dictation" else ollama_model()
-        return _clean_ollama(transcript, mode, model or default, tone)
+        default = dictation_model() if for_mode == "dictation" else ollama_model()
+        return _ollama_complete(system, user, model or default)
     if backend == "claude-code":
         # No default model: let the Claude Code CLI use whatever the user's own
         # setup selects, so vnote never pins their subscription to one model.
-        return _clean_claude_code(transcript, mode, model, tone)
+        return _claude_code_complete(system, user, model)
     if backend == "claude":
-        return _clean_claude(transcript, mode, model or str(config.get("claude_model")), tone)
+        return _claude_complete(system, user, model or str(config.get("claude_model")))
     raise ValueError(
         f"unknown backend: {backend!r} (expected 'ollama', 'claude-code' or 'claude')"
     )
@@ -188,7 +267,7 @@ def _ensure_model_present(model: str) -> None:
     )
 
 
-def _clean_ollama(transcript: str, mode: str, model: str, tone: str | None = None) -> CleanResult:
+def _ollama_complete(system: str, user: str, model: str) -> str:
     _ensure_ollama_running()
     _ensure_model_present(model)
     payload = {
@@ -196,8 +275,8 @@ def _clean_ollama(transcript: str, mode: str, model: str, tone: str | None = Non
         "stream": False,
         "options": {"temperature": 0.3},
         "messages": [
-            {"role": "system", "content": _system_for(mode)},
-            {"role": "user", "content": _build_user_prompt(transcript, mode, tone)},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
         ],
     }
     req = urllib.request.Request(
@@ -210,7 +289,7 @@ def _clean_ollama(transcript: str, mode: str, model: str, tone: str | None = Non
     content = (data.get("message") or {}).get("content", "")
     if not content.strip():
         raise RuntimeError(f"empty response from Ollama model {model!r}")
-    return _finish(content, transcript, mode)
+    return content
 
 
 # --- Claude Code CLI (subscription, no API key) ---
@@ -223,10 +302,8 @@ def claude_code_bin() -> str | None:
     return shutil.which(str(config.get("claude_code_bin")))
 
 
-def _clean_claude_code(
-    transcript: str, mode: str, model: str | None = None, tone: str | None = None
-) -> CleanResult:
-    """Clean up via the Claude Code CLI — bills your subscription, not an API key.
+def _claude_code_complete(system: str, user: str, model: str | None = None) -> str:
+    """Run a prompt through the Claude Code CLI — bills your subscription, not an API key.
 
     Tools are disabled: this is a pure text transform, so the model needs no
     filesystem, shell or network access. The prompt goes in on stdin rather than
@@ -242,13 +319,13 @@ def _clean_claude_code(
             "    Or use the local backend:  --backend ollama"
         )
 
-    cmd = [exe, "-p", "--allowed-tools", "", "--system-prompt", _system_for(mode)]
+    cmd = [exe, "-p", "--allowed-tools", "", "--system-prompt", system]
     if model:
         cmd += ["--model", model]
     try:
         proc = subprocess.run(
             cmd,
-            input=_build_user_prompt(transcript, mode, tone),
+            input=user,
             capture_output=True,
             text=True,
             timeout=_CLAUDE_CODE_TIMEOUT_S,
@@ -266,14 +343,14 @@ def _clean_claude_code(
         )
     if not proc.stdout.strip():
         raise RuntimeError("empty response from Claude Code")
-    return _finish(proc.stdout, transcript, mode)
+    return proc.stdout
 
 
 # --- Claude (optional metered API backend) ---
 
 
-def _clean_claude(transcript: str, mode: str, model: str, tone: str | None = None) -> CleanResult:
-    """Clean up via the Anthropic API. Opt-in: needs the `claude` extra + a key.
+def _claude_complete(system: str, user: str, model: str) -> str:
+    """Run a prompt through the Anthropic API. Opt-in: needs the `claude` extra + a key.
 
     Reuses the same system prompt, user prompt and response parser as the local
     backend so the two produce the same TITLE/--- output shape.
@@ -303,8 +380,8 @@ def _clean_claude(transcript: str, mode: str, model: str, tone: str | None = Non
         resp = client.messages.create(
             model=model,
             max_tokens=8192,
-            system=_system_for(mode),
-            messages=[{"role": "user", "content": _build_user_prompt(transcript, mode, tone)}],
+            system=system,
+            messages=[{"role": "user", "content": user}],
         )
     except anthropic.APIError as exc:
         raise RuntimeError(f"Anthropic API error: {exc}") from exc
@@ -312,4 +389,4 @@ def _clean_claude(transcript: str, mode: str, model: str, tone: str | None = Non
     content = "".join(block.text for block in resp.content if getattr(block, "type", None) == "text")
     if not content.strip():
         raise RuntimeError(f"empty response from Claude model {model!r}")
-    return _finish(content, transcript, mode)
+    return content

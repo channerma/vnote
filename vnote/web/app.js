@@ -12,7 +12,8 @@
  *     #record #pause #stop      transport buttons (#pause label: Pause/Resume)
  *     #timer                    "0:00" of recorded time (frozen while paused)
  *     #rec-status               ready / recording / paused / processing / error
- #retry                                  re-send the last recording after a failed upload (hidden otherwise)
+ *     #retry                    re-send the last recording after a failed upload
+ *                               (hidden otherwise)
  *     #pick-mode                select: light edit summary dictation raw
  *     #pick-backend             select, filled from the `backend` setting
  *     #pick-language            text input, placeholder "auto"
@@ -23,10 +24,21 @@
  *   Notes view
  *     #notes-refresh #notes-list
  *     #note-detail              hidden until a note is opened
- *     #note-title #note-meta #note-audio (<audio>) #note-text (readonly)
+ *     #note-title #note-meta #note-audio (<audio>)
+ *     #note-editor              editable textarea holding the note's Markdown
+ *     #note-save #note-save-status    PUT the editor as a new version
  *     #note-copy #note-copy-status
+ *     #regenerate-mode          select: edit light summary dictation
+ *     #regenerate               re-run cleanup from the raw transcript
+ *     #revise-instructions      one-line instruction for #revise (and #regenerate)
+ *     #revise                   apply that instruction to the current note
+ *     #process-status           shared status for #regenerate and #revise
+ *     #note-versions            container; hidden when the note has no versions
+ *     #version-select #version-restore   version history, newest first
+ *     #note-folder              container; hidden when the note has no path
+ *     #note-path #note-path-copy #note-reveal #note-path-status
+ *     #note-continue            disabled affordance ("Continue recording (coming)")
  *     #note-transcript          <details> containing a <pre>
- *     #reclean-mode #reclean #reclean-status
  *
  *   Settings view
  *     #settings-table           <table>; this file fills its <tbody>
@@ -108,6 +120,14 @@ function fmtCreated(iso) {
     ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
 }
 
+/* ISO string -> local "HH:MM" */
+function fmtTime(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+}
+
 /* seconds -> "m:ss" */
 function fmtDuration(seconds) {
   if (seconds === null || seconds === undefined || isNaN(seconds)) return '';
@@ -127,17 +147,19 @@ function flash(el, text, ms) {
   }, ms || 2000);
 }
 
-async function copyText(text, statusEl) {
+/* `stillWanted`, when given, is re-checked after the clipboard call: callers
+ * whose status line belongs to a note drop the flash once that note is gone. */
+async function copyText(text, statusEl, stillWanted) {
+  var msg;
   try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(text);
-      flash(statusEl, 'copied');
-      return;
-    }
-    throw new Error('no clipboard api');
+    if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('no clipboard api');
+    await navigator.clipboard.writeText(text);
+    msg = 'copied';
   } catch (e) {
-    flash(statusEl, copyFallback(text) ? 'copied' : 'copy failed');
+    msg = copyFallback(text) ? 'copied' : 'copy failed';
   }
+  if (stillWanted && !stillWanted()) return;
+  flash(statusEl, msg);
 }
 
 /* Fallback: put the text in a textarea, select it, execCommand('copy'). */
@@ -170,6 +192,7 @@ var TABS = [
 
 var notesLoaded = false;
 var vocabLoaded = false;
+var currentTab = null;
 
 function showTab(name) {
   var known = false;
@@ -187,6 +210,7 @@ function showTab(name) {
     if (viewEl) viewEl.hidden = !active;
   });
   lsSet(LS_TAB, name);
+  currentTab = name;
 
   if (name === 'notes' && !notesLoaded) {
     notesLoaded = true;
@@ -576,7 +600,23 @@ function showResult(data) {
 
 /* -------------------------------------------------------------------- notes */
 
-var currentNote = null;
+var currentNote = null;     // the last /api/notes/<name> payload
+var loadedText = '';        // #note-editor as it was loaded — the dirty baseline
+var viewingVersion = null;  // n while an older version is previewed, else null
+var processing = false;     // a write (save/restore/regenerate/revise) is in flight
+var noteGeneration = 0;     // bumped by loadNote(); see noteToken()
+
+/* Reprocessing a note takes tens of seconds, and the user can open another note
+ * meanwhile. Every async note operation captures a token first and re-checks it
+ * before touching the DOM, so a late reply never lands on the wrong note. */
+function noteToken() {
+  return { gen: noteGeneration, name: currentNote ? currentNote.name : null };
+}
+
+function stillCurrent(token) {
+  return token.gen === noteGeneration &&
+    !!currentNote && !!token.name && currentNote.name === token.name;
+}
 
 async function loadNotes(openName) {
   var list = $('notes-list');
@@ -602,7 +642,7 @@ async function loadNotes(openName) {
 
   notesLoaded = true;
   renderNotes(notes);
-  if (openName) openNote(openName);
+  if (openName) await openNote(openName);
 }
 
 function renderNotes(notes) {
@@ -644,6 +684,9 @@ function renderNotes(notes) {
     li.appendChild(btn);
     list.appendChild(li);
   });
+
+  // A re-render loses the selection; the open note keeps it.
+  if (currentNote && currentNote.name) highlightNote(currentNote.name);
 }
 
 function highlightNote(name) {
@@ -653,23 +696,222 @@ function highlightNote(name) {
   }
 }
 
+/* The editor holds edits the daemon has not seen yet. */
+function isDirty() {
+  if (!currentNote || viewingVersion !== null) return false;
+  return $('note-editor').value !== loadedText;
+}
+
+/* Returns false when the user chose to keep unsaved edits. */
+function confirmDiscard() {
+  if (!isDirty()) return true;
+  return window.confirm('This note has unsaved edits. Discard them?');
+}
+
+/* Make good on that prompt for callers that do not reload the editor anyway. */
+function revertEditor() {
+  if (!currentNote || viewingVersion !== null) return;
+  $('note-editor').value = loadedText;
+  updateSaveState();
+}
+
+function updateSaveState() {
+  $('note-save').disabled = processing || viewingVersion !== null || !isDirty();
+}
+
+function updateProcessState() {
+  var have = !!(currentNote && currentNote.name);
+  var previewing = viewingVersion !== null;
+  var instructions = $('revise-instructions').value.trim();
+  var editor = $('note-editor');
+  $('regenerate').disabled = processing || previewing || !have;
+  $('revise').disabled = processing || previewing || !have || !instructions;
+  $('regenerate-mode').disabled = processing;
+  $('revise-instructions').disabled = processing;
+  $('version-select').disabled = processing;
+  $('version-restore').disabled = processing || !previewing;
+
+  // Single owner of the editor's read-only state: an old version on screen or a
+  // write in flight both mean "what you type here would be lost".
+  editor.readOnly = processing || previewing;
+  editor.classList.toggle('viewing-old', previewing);
+
+  // The list stays browsable during a write: the load-generation guard discards a late
+  // reply's DOM writes, and the server keeps the new version for when the note is reopened.
+
+  updateSaveState();
+}
+
+function setProcessing(on) {
+  processing = on;
+  updateProcessState();
+}
+
+/* Versions -----------------------------------------------------------------
+ * The server sends them oldest first; the list shows them newest first and the
+ * current note is the last entry. */
+
+function clip(text, max) {
+  var s = String(text).replace(/\s+/g, ' ').trim();
+  var chars = Array.from(s);   // never cut a surrogate pair in half
+  return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : s;
+}
+
+function versionDesc(v, isFirst) {
+  var op = v.op || 'version';
+  if (op === 'clean') {
+    if (isFirst) return 'original';
+    return v.mode ? 'clean: ' + v.mode : 'clean';
+  }
+  if (op === 'regenerate') return v.mode ? 'regenerate: ' + v.mode : 'regenerate';
+  if (op === 'revise') return v.instructions ? 'revise: "' + clip(v.instructions, 40) + '"' : 'revise';
+  if (op === 'restore') {
+    return (v.restored_from !== null && v.restored_from !== undefined)
+      ? 'restore of v' + v.restored_from : 'restore';
+  }
+  return op;
+}
+
+function versionLabel(v, isFirst) {
+  var bits = ['v' + v.n, versionDesc(v, isFirst)];
+  var t = fmtTime(v.created);
+  if (t) bits.push(t);
+  return bits.join(' · ');
+}
+
+/* The highest version number, i.e. what #note-editor currently holds. */
+function currentVersionN(versions) {
+  if (!versions || !versions.length) return null;
+  return versions[versions.length - 1].n;
+}
+
+function renderVersions(versions) {
+  var box = $('note-versions');
+  var sel = $('version-select');
+  sel.innerHTML = '';
+  if (!versions || !versions.length) {
+    box.hidden = true;
+    viewingVersion = null;
+    updateProcessState();
+    return;
+  }
+  var firstN = versions[0].n;
+  for (var i = versions.length - 1; i >= 0; i--) {
+    var v = versions[i];
+    var opt = document.createElement('option');
+    opt.value = String(v.n);
+    opt.textContent = versionLabel(v, v.n === firstN);
+    sel.appendChild(opt);
+  }
+  sel.value = String(currentVersionN(versions));
+  box.hidden = false;
+  viewingVersion = null;
+  updateProcessState();
+}
+
+/* Preview version n. The select is disabled for the duration of the GET, so the
+ * reply can only ever be the preview the user is still waiting for. */
+async function showVersion(n) {
+  if (!currentNote || !currentNote.name || processing) return;
+  var status = $('note-save-status');
+  var editor = $('note-editor');
+  var token = noteToken();
+
+  if (n === currentVersionN(currentNote.versions)) {
+    viewingVersion = null;
+    editor.value = loadedText;
+    status.textContent = '';
+    updateProcessState();
+    return;
+  }
+
+  status.textContent = 'loading v' + n + '…';
+  viewingVersion = n;
+  setProcessing(true);
+  try {
+    var data = await getJSON(
+      '/api/notes/' + encodeURIComponent(token.name) + '/versions/' + encodeURIComponent(n));
+    if (!stillCurrent(token) || viewingVersion !== n) return;
+    editor.value = data.text || '';
+    status.textContent = 'viewing v' + n + ' — restore to edit';
+  } catch (e) {
+    if (!stillCurrent(token) || viewingVersion !== n) return;
+    // Nothing was loaded: hand the editor back instead of freezing it.
+    viewingVersion = null;
+    status.textContent = 'could not load v' + n + ' — ' + errText(e);
+    var back = currentVersionN(currentNote.versions);
+    if (back !== null) $('version-select').value = String(back);
+  } finally {
+    setProcessing(false);
+  }
+}
+
+async function restoreVersion() {
+  if (!currentNote || !currentNote.name || viewingVersion === null || processing) return;
+  var status = $('note-save-status');
+  var token = noteToken();
+  var n = viewingVersion;
+  setProcessing(true);
+  status.textContent = 'restoring v' + n + '…';
+  try {
+    var data = await postJSON(
+      '/api/notes/' + encodeURIComponent(token.name) + '/restore', { n: n });
+    if (!stillCurrent(token)) return;
+    notesLoaded = false;
+    viewingVersion = null;          // loadNote() must not think edits are pending
+    await loadNote(token.name);
+    if (currentNote && currentNote.name === token.name) {
+      flash($('note-save-status'), 'restored v' + n + ' as v' + (data.version || '?'));
+    }
+  } catch (e) {
+    if (stillCurrent(token)) status.textContent = errText(e);
+  } finally {
+    setProcessing(false);
+  }
+}
+
+/* Detail -------------------------------------------------------------------- */
+
+/* Click path: asks before throwing unsaved edits away. */
 async function openNote(name) {
   if (!name) return;
+  if (!confirmDiscard()) return;
+  await loadNote(name);
+}
+
+async function loadNote(name) {
+  if (!name) return;
   var detail = $('note-detail');
-  $('reclean-status').textContent = '';
+  $('process-status').textContent = '';
+  $('note-save-status').textContent = '';
+  $('note-path-status').textContent = '';
+  viewingVersion = null;
+  var editor = $('note-editor');
+  updateProcessState();            // drops any preview's read-only state
   highlightNote(name);
+
+  // Anything already in flight for the previous note is now stale.
+  noteGeneration += 1;
+  var gen = noteGeneration;
 
   var data;
   try {
     data = await getJSON('/api/notes/' + encodeURIComponent(name));
   } catch (e) {
+    if (gen !== noteGeneration) return;
+    currentNote = null;
+    loadedText = '';
     detail.hidden = false;
     $('note-title').textContent = 'could not open ' + name;
     $('note-meta').textContent = errText(e);
-    $('note-text').value = '';
+    editor.value = '';
     $('note-audio').hidden = true;
+    $('note-versions').hidden = true;
+    $('note-folder').hidden = true;
+    updateProcessState();
     return;
   }
+  if (gen !== noteGeneration) return;   // the user opened something else meanwhile
 
   currentNote = data;
   // The server sends the list-item summary fields top-level; fall back to the raw
@@ -695,7 +937,8 @@ async function openNote(name) {
   if (meta.backend) bits.push(meta.backend);
   $('note-meta').textContent = bits.join(' · ');
 
-  $('note-text').value = data.note || '';
+  loadedText = data.note || '';
+  editor.value = loadedText;
   $('note-transcript').querySelector('pre').textContent = data.transcript || '';
 
   var audio = $('note-audio');
@@ -708,30 +951,136 @@ async function openNote(name) {
     audio.hidden = true;
   }
 
-  selectIfPresent($('reclean-mode'), meta.mode);
+  var path = data.path || '';
+  $('note-path').textContent = path;
+  $('note-folder').hidden = !path;
+
+  renderVersions(data.versions || []);
+  selectIfPresent($('regenerate-mode'), meta.mode);
+  updateProcessState();
   detail.hidden = false;
 }
 
-async function recleanNote() {
-  if (!currentNote || !currentNote.name) return;
-  var btn = $('reclean');
-  var status = $('reclean-status');
-  btn.disabled = true;
-  status.textContent = 're-cleaning…';
+/* Manual edit -> a new version. */
+async function saveNote() {
+  if (!currentNote || !currentNote.name || viewingVersion !== null || processing) return;
+  var status = $('note-save-status');
+  var token = noteToken();
+  var name = token.name;
+  var text = $('note-editor').value;
+  setProcessing(true);
+  status.textContent = 'saving…';
   try {
-    var body = { mode: $('reclean-mode').value };
+    var data = await putJSON('/api/notes/' + encodeURIComponent(name) + '/note',
+                             { text: text });
+    if (!stillCurrent(token)) return;
+    notesLoaded = false;
+    await loadNote(name);
+    if (currentNote && currentNote.name === name) {
+      flash($('note-save-status'), 'saved as v' + (data.version || '?'));
+    }
+  } catch (e) {
+    if (stillCurrent(token)) status.textContent = errText(e);
+  } finally {
+    setProcessing(false);
+  }
+}
+
+/* Re-process ---------------------------------------------------------------
+ * Regenerate re-runs cleanup from the raw transcript; revise applies an
+ * instruction to the current note. Both write a new version. */
+
+/* Apply a {title, note, version} reply to the detail. */
+async function applyProcessed(data, status, token) {
+  if (!stillCurrent(token)) return;   // the user is looking at another note now
+
+  // The reply is the newest version, whatever was on screen before it landed.
+  viewingVersion = null;
+  $('note-save-status').textContent = '';
+  if (data.title) $('note-title').textContent = data.title;
+  loadedText = data.note || '';
+  $('note-editor').value = loadedText;
+  currentNote.note = loadedText;
+  $('revise-instructions').value = '';
+  updateProcessState();
+
+  // Refetch: the list item's title, #note-meta and the version list all moved.
+  notesLoaded = false;
+  await loadNotes(token.name);
+  // loadNote() moved the generation on, so match on the name alone here.
+  if (currentNote && currentNote.name === token.name) {
+    status.textContent = 'done — v' + (data.version || '?');
+  }
+}
+
+async function regenerateNote() {
+  if (!currentNote || !currentNote.name || processing || viewingVersion !== null) return;
+  if (!confirmDiscard()) return;
+  var status = $('process-status');
+  var token = noteToken();
+  setProcessing(true);
+  status.textContent = 'regenerating…';
+  try {
+    var body = { mode: $('regenerate-mode').value };
+    var backend = $('pick-backend').value;
+    if (backend) body.backend = backend;
+    var instructions = $('revise-instructions').value.trim();
+    if (instructions) body.instructions = instructions;
+    var data = await postJSON(
+      '/api/notes/' + encodeURIComponent(token.name) + '/reclean', body);
+    await applyProcessed(data, status, token);
+  } catch (e) {
+    if (stillCurrent(token)) status.textContent = errText(e);
+  } finally {
+    setProcessing(false);
+  }
+}
+
+async function reviseNote() {
+  if (!currentNote || !currentNote.name || processing || viewingVersion !== null) return;
+  var instructions = $('revise-instructions').value.trim();
+  if (!instructions) return;
+  if (!confirmDiscard()) return;
+  var status = $('process-status');
+  var token = noteToken();
+  setProcessing(true);
+  status.textContent = 'revising…';
+  try {
+    var body = { instructions: instructions };
     var backend = $('pick-backend').value;
     if (backend) body.backend = backend;
     var data = await postJSON(
-      '/api/notes/' + encodeURIComponent(currentNote.name) + '/reclean', body);
-    if (data.title) $('note-title').textContent = data.title;
-    $('note-text').value = data.note || '';
-    currentNote.note = data.note || '';
-    status.textContent = '';
-    flash(status, 're-cleaned');
-    notesLoaded = false;
+      '/api/notes/' + encodeURIComponent(token.name) + '/revise', body);
+    await applyProcessed(data, status, token);
   } catch (e) {
-    status.textContent = errText(e);
+    if (stillCurrent(token)) status.textContent = errText(e);
+  } finally {
+    setProcessing(false);
+  }
+}
+
+/* Folder -------------------------------------------------------------------- */
+
+async function revealNote() {
+  if (!currentNote || !currentNote.name) return;
+  var btn = $('note-reveal');
+  var status = $('note-path-status');
+  var token = noteToken();
+  btn.disabled = true;
+  status.textContent = 'opening…';
+  try {
+    // No body: the route takes none.
+    var data = await api(
+      '/api/notes/' + encodeURIComponent(token.name) + '/reveal', { method: 'POST' });
+    if (!stillCurrent(token)) return;
+    if (data.opened) {
+      status.textContent = '';
+      flash(status, 'opened');
+    } else {
+      status.textContent = "couldn't open it here — the path is above";
+    }
+  } catch (e) {
+    if (stillCurrent(token)) status.textContent = errText(e);
   } finally {
     btn.disabled = false;
   }
@@ -918,7 +1267,14 @@ function typingInAField(el) {
 function wire() {
   TABS.forEach(function (t) {
     var el = $(t.tab);
-    if (el) el.addEventListener('click', function () { showTab(t.name); });
+    if (el) el.addEventListener('click', function () {
+      // Leaving the notes view hides the editor — ask before losing edits.
+      if (currentTab === 'notes' && t.name !== 'notes') {
+        if (!confirmDiscard()) return;
+        revertEditor();   // the prompt said "discard", so actually discard them
+      }
+      showTab(t.name);
+    });
   });
 
   // blur after a click so a later Space toggles pause instead of re-clicking the button
@@ -937,20 +1293,61 @@ function wire() {
     copyText($('result-text').value, $('copy-status'));
   });
   $('note-copy').addEventListener('click', function () {
-    copyText($('note-text').value, $('note-copy-status'));
+    var token = noteToken();
+    copyText($('note-editor').value, $('note-copy-status'),
+             function () { return stillCurrent(token); });
   });
 
   $('result-open').addEventListener('click', function () {
     if (!lastNoteName) return;
+    notesLoaded = true;   // keep showTab() from starting a second, nameless load
     showTab('notes');
     loadNotes(lastNoteName);
   });
 
   $('notes-refresh').addEventListener('click', function () { loadNotes(); });
-  $('reclean').addEventListener('click', recleanNote);
+
+  $('note-editor').addEventListener('input', updateSaveState);
+  $('note-save').addEventListener('click', saveNote);
+
+  $('regenerate').addEventListener('click', regenerateNote);
+  $('revise').addEventListener('click', reviseNote);
+  $('revise-instructions').addEventListener('input', updateProcessState);
+  $('revise-instructions').addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter' && !$('revise').disabled) { ev.preventDefault(); reviseNote(); }
+  });
+
+  $('version-select').addEventListener('change', function (ev) {
+    var sel = ev.currentTarget;
+    var n = parseInt(sel.value, 10);
+    if (isNaN(n)) return;
+    if (!confirmDiscard()) {
+      var back = currentVersionN(currentNote && currentNote.versions);
+      if (back !== null) sel.value = String(back);
+      return;
+    }
+    showVersion(n);
+  });
+  $('version-restore').addEventListener('click', restoreVersion);
+
+  $('note-path-copy').addEventListener('click', function () {
+    var token = noteToken();
+    copyText($('note-path').textContent, $('note-path-status'),
+             function () { return stillCurrent(token); });
+  });
+  $('note-reveal').addEventListener('click', revealNote);
+
+  $('note-continue').disabled = true;   // an affordance only — no behaviour yet
 
   $('settings-save').addEventListener('click', saveSettings);
   $('vocab-save').addEventListener('click', saveVocab);
+
+  // Closing the tab with unsaved editor text asks first.
+  window.addEventListener('beforeunload', function (ev) {
+    if (!isDirty()) return;
+    ev.preventDefault();
+    ev.returnValue = '';
+  });
 
   // Space toggles pause while a recording is active.
   document.addEventListener('keydown', function (ev) {
@@ -967,6 +1364,7 @@ function wire() {
 function init() {
   wire();
   setTransport('ready');
+  updateProcessState();   // nothing is open yet: save/regenerate/revise stay off
   paintTimer();
   showTab(lsGet(LS_TAB) || 'record');
   boot();

@@ -60,3 +60,8 @@ def test_setup_keeps_other_saved_settings(monkeypatch, capsys):
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     firstrun.run(None, force=True)
     assert config.load_config() == {"default_mode": "summary", "language": "en", "backend": "claude-code"}
+
+
+def test_instructions_flag_parses():
+    assert _parse_args([]).instructions is None
+    assert _parse_args(["--instructions", "bullet points only"]).instructions == "bullet points only"

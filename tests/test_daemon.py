@@ -21,9 +21,17 @@ def _closed_port() -> int:
 
 class _StubHandler(BaseHTTPRequestHandler):
     responses: dict = {}  # path -> (status_code, json_payload), set per test
+    last_body: dict = {}  # path -> decoded JSON of the most recent POST
 
     def log_message(self, *args):
         pass
+
+    def _read_body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            self.last_body[self.path] = json.loads(self.rfile.read(n) or b"{}")
+        except ValueError:
+            pass
 
     def _reply(self):
         code, payload = self.responses.get(self.path, (404, {"error": "not found"}))
@@ -34,14 +42,18 @@ class _StubHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        self._read_body()
+        self._reply()
+
     do_GET = _reply
-    do_POST = _reply
 
 
 @pytest.fixture
 def stub_daemon(monkeypatch):
     """Serve canned JSON on an ephemeral port and point config.daemon_addr at it."""
     _StubHandler.responses = {}
+    _StubHandler.last_body = {}
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), _StubHandler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     monkeypatch.setattr(config, "daemon_addr", lambda: ("127.0.0.1", httpd.server_address[1]))
@@ -83,6 +95,23 @@ def test_error_in_200_body_raises_runtime_error(stub_daemon):
     stub_daemon.responses = {"/clean": (200, {"error": "model exploded"})}
     with pytest.raises(RuntimeError, match="model exploded"):
         daemon.clean("some transcript")
+
+
+def test_clean_sends_instructions_in_the_body(stub_daemon):
+    stub_daemon.responses = {"/clean": (200, {"title": "T", "body": "B"})}
+    daemon.clean("hello world", mode="edit", instructions="shorter")
+    assert stub_daemon.last_body["/clean"]["instructions"] == "shorter"
+
+
+def test_revise_round_trip(stub_daemon):
+    stub_daemon.responses = {"/revise": (200, {"title": "Kept Title", "body": "Shorter body."})}
+    result = daemon.revise("# Kept Title\n\nlong body", "make it shorter")
+    assert isinstance(result, CleanResult)
+    assert (result.title, result.body) == ("Kept Title", "Shorter body.")
+    sent = stub_daemon.last_body["/revise"]
+    assert sent["note"] == "# Kept Title\n\nlong body"
+    assert sent["instructions"] == "make it shorter"
+    assert sent["backend"] == "ollama"
 
 
 # --- cli routing ---------------------------------------------------------------

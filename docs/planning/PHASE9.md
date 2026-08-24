@@ -5,7 +5,11 @@
 > with a Continue-recording affordance designed in · the raw/processed **layout goes to
 > Claude Design** as two explorations · **linear version history** for the note ·
 > **full re-transcription on Stop** with the live text staying copyable. The design
-> brief is `docs/design/claude-design-brief.md`. No code yet.
+> brief is `docs/design/claude-design-brief.md`.
+>
+> **Status:** Phase 1 (API foundations) built 2026-08-24 — versions, edit, revise,
+> instructions (also `vnote --instructions`), reveal, `/stream/ping` + 30-min TTL, and
+> the current page wired to them with the brief's ids. Phases 2–5 not started.
 
 ## What the Body asked for (after recording a real session in the 0.5.0 page)
 
@@ -71,9 +75,9 @@ unavailable — both end in `pipeline.make_note`.
    completion with raw as a side pane / tab) and *always side by side*, at desktop and
    phone widths. We pick from pictures.
 4. **Re-processing and history** — *linear versions*: `note.md` is current; each
-   regenerate / revise / manual save moves the previous file to
-   `versions/note-<n>.md` and appends `{n, created, op, mode, backend, instructions}`
-   to `meta.json`. Version picker + "restore" (which is itself a new version).
+   regenerate / revise / manual save snapshots the new text as `versions/note-<n>.md` and
+   appends `{n, created, op, mode, backend, instructions}` to `meta.json`. Version picker +
+   "restore" (which is itself a new version).
    Overwrite (today) destroys the Body's edits on re-run; branching is a tree UI
    nobody asked for.
 5. **(Ours) Final transcript authority** — after stop, run the full one-pass
@@ -129,8 +133,11 @@ scales), continue-recording (multi-take semantics), selection-preserving live te
 | `POST /stream/append` | returns `{committed, tail}`; work happens on a per-session worker; the request never blocks on the GPU |
 | `POST /stream/finish?sid=&note=1&mode=&backend=&language=&raw=` | the daemon-held audio → full one-pass transcription → `make_note` → the same payload as `/api/note` (+ `live_transcript` for comparison) |
 
-Versions on disk: `versions/note-<n>.md`; `meta.json.versions = [{n, created, op, mode,
-backend, model, instructions}]`; `note.md` is always the current text.
+Versions on disk: `versions/note-<n>.md` holds **every** version, the current one included
+(so a version is never reconstructed from anything else); `meta.json.versions = [{n, created,
+op, mode, backend, model, instructions, restored_from}]`; `note.md` is a copy of the current
+version's text. Pre-versions folders are migrated (v1 = their note.md) when first opened or
+written.
 
 The element-id contract for the new markup is the table in the brief; `app.js` is
 rewired to it in Phase 4 (the 0.5.0 ids `tab-*`, `view-record`, `result*`,

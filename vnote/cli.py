@@ -49,6 +49,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                    help="cleanup backend: ollama (local), claude-code (your Claude "
                         "subscription), claude (metered API). Default: your saved first-run choice")
     p.add_argument("--model", help="override the cleanup model name")
+    p.add_argument("--instructions", metavar="TEXT",
+                   help="extra instructions for the cleanup, e.g. 'bullet points only' (also with --redo)")
     p.add_argument("--language", help="force transcription language (e.g. 'en'); default: the saved "
                                       "`language` setting, else auto-detect")
     p.add_argument("--no-clipboard", action="store_true", help="do not copy the result to the clipboard")
@@ -149,7 +151,8 @@ def _do_redo(args: argparse.Namespace, backend: str) -> int:
 
     try:
         result = pipeline.reclean(
-            Path(args.redo), clean_fn=clean_fn, mode=args.mode, backend=backend, model=args.model
+            Path(args.redo), clean_fn=clean_fn, mode=args.mode, backend=backend, model=args.model,
+            instructions=args.instructions,
         )
     except (RuntimeError, ValueError) as exc:
         print(f"error: cleanup failed: {exc}", file=sys.stderr)
@@ -241,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
             transcribe_fn=transcribe_fn,
             clean_fn=clean_fn,
             mode=args.mode,
+            instructions=args.instructions,
             backend=backend,
             model=args.model,
             language=args.language,

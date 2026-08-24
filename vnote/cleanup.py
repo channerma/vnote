@@ -19,7 +19,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from .config import CLAUDE_CODE_BIN, CLAUDE_MODEL, OLLAMA_HOST, dictation_model, ollama_model
+from . import config
+from .config import dictation_model, ollama_model
 
 # --- prompt construction -----------------------------------------------------
 
@@ -138,7 +139,7 @@ def clean(
         # setup selects, so vnote never pins their subscription to one model.
         return _clean_claude_code(transcript, mode, model, tone)
     if backend == "claude":
-        return _clean_claude(transcript, mode, model or CLAUDE_MODEL, tone)
+        return _clean_claude(transcript, mode, model or str(config.get("claude_model")), tone)
     raise ValueError(
         f"unknown backend: {backend!r} (expected 'ollama', 'claude-code' or 'claude')"
     )
@@ -149,9 +150,9 @@ def clean(
 
 def _ollama_get(path: str, timeout: float = 2.0) -> dict | None:
     try:
-        with urllib.request.urlopen(f"{OLLAMA_HOST}{path}", timeout=timeout) as r:
+        with urllib.request.urlopen(f"{config.get('ollama_host')}{path}", timeout=timeout) as r:
             return json.loads(r.read())
-    except (urllib.error.URLError, TimeoutError, ConnectionError):
+    except (urllib.error.URLError, TimeoutError, ConnectionError, ValueError):  # ValueError: bad URL/scheme
         return None
 
 
@@ -200,7 +201,7 @@ def _clean_ollama(transcript: str, mode: str, model: str, tone: str | None = Non
         ],
     }
     req = urllib.request.Request(
-        f"{OLLAMA_HOST}/api/chat",
+        f"{config.get('ollama_host')}/api/chat",
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
@@ -219,7 +220,7 @@ _CLAUDE_CODE_TIMEOUT_S = 600
 
 def claude_code_bin() -> str | None:
     """Path to the Claude Code executable, or None if it isn't installed."""
-    return shutil.which(CLAUDE_CODE_BIN)
+    return shutil.which(str(config.get("claude_code_bin")))
 
 
 def _clean_claude_code(
@@ -234,7 +235,8 @@ def _clean_claude_code(
     exe = claude_code_bin()
     if exe is None:
         raise RuntimeError(
-            f"The claude-code backend needs the Claude Code CLI on PATH (looked for {CLAUDE_CODE_BIN!r}).\n"
+            f"The claude-code backend needs the Claude Code CLI on PATH "
+            f"(looked for {config.get('claude_code_bin')!r}).\n"
             "    Install it:              https://claude.com/product/claude-code\n"
             "    Or point vnote at it:    VNOTE_CLAUDE_CODE_BIN=/path/to/claude\n"
             "    Or use the local backend:  --backend ollama"

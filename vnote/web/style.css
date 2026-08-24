@@ -1,0 +1,316 @@
+/* vnote web UI — plain, readable, function first. A designer may restyle. */
+
+:root {
+  --bg: #f7f7f6;
+  --panel: #ffffff;
+  --ink: #1b1b1a;
+  --ink-soft: #5c5c58;
+  --line: #d8d8d4;
+  --accent: #2f6fd0;
+  --accent-ink: #ffffff;
+  --rec: #c62828;
+  --pause: #b8860b;
+  --bad: #b3261e;
+  --code-bg: #f2f2ef;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17181a;
+    --panel: #202225;
+    --ink: #e8e8e6;
+    --ink-soft: #a0a09b;
+    --line: #35373b;
+    --accent: #5b95e8;
+    --accent-ink: #10161f;
+    --rec: #ef5350;
+    --pause: #e0a92b;
+    --bad: #f08b84;
+    --code-bg: #191a1c;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0 auto;
+  padding: 1.5rem 1rem 4rem;
+  max-width: 900px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+        Arial, "Noto Sans", sans-serif;
+}
+
+h1 { font-size: 1.35rem; margin: 0; letter-spacing: 0.02em; }
+h2 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+
+code, .mono, pre {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+               "Liberation Mono", monospace;
+  font-size: 0.9em;
+}
+
+/* --- header + tabs ------------------------------------------------------ */
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding-bottom: 0.75rem;
+}
+
+.daemon-info {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+.daemon-info.bad { color: var(--bad); }
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 1.25rem;
+}
+
+.tab {
+  background: none;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--radius) var(--radius) 0 0;
+  padding: 0.5rem 1rem;
+  margin-bottom: -1px;
+  color: var(--ink-soft);
+  font: inherit;
+  cursor: pointer;
+}
+.tab:hover { color: var(--ink); }
+.tab.active {
+  background: var(--panel);
+  border-color: var(--line);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* --- generic controls --------------------------------------------------- */
+
+button {
+  font: inherit;
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+
+input, select, textarea {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.5rem;
+  max-width: 100%;
+}
+input:disabled, select:disabled, textarea:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+textarea {
+  width: 100%;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.75rem 0;
+}
+
+.status { color: var(--ink-soft); margin: 0.5rem 0; min-height: 1.4em; }
+.status.inline { margin: 0; font-size: 0.9rem; }
+.hint { color: var(--ink-soft); font-size: 0.85rem; margin: 0.4rem 0; }
+.warning {
+  color: var(--bad);
+  border-left: 3px solid var(--bad);
+  padding-left: 0.6rem;
+  margin: 0.5rem 0;
+  font-size: 0.9rem;
+}
+.bad { color: var(--bad); }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+  margin-top: 1.25rem;
+}
+.card h2 { margin-top: 0; }
+
+/* --- record view -------------------------------------------------------- */
+
+.picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.pick { display: flex; flex-direction: column; gap: 0.2rem; flex: 1 1 14rem; }
+.pick > span { font-size: 0.8rem; color: var(--ink-soft); text-transform: uppercase;
+               letter-spacing: 0.04em; }
+.pick select, .pick input { width: 100%; }
+.inline-pick { flex-direction: row; align-items: center; flex: 0 1 auto; }
+.inline-pick > span { text-transform: none; letter-spacing: 0; }
+
+.recorder {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+button.big {
+  font-size: 1.15rem;
+  padding: 0.8rem 1.8rem;
+  font-weight: 600;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+button.big:disabled { background: var(--panel); color: var(--ink); border-color: var(--line); }
+
+.timer {
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 1.6rem;
+  margin-left: auto;
+  color: var(--ink-soft);
+}
+
+.is-recording .timer { color: var(--rec); }
+.is-recording #rec-status { color: var(--rec); font-weight: 600; }
+.is-recording #stop { border-color: var(--rec); color: var(--rec); }
+
+.is-paused .timer { color: var(--pause); }
+.is-paused #rec-status { color: var(--pause); font-weight: 600; }
+.is-paused #pause { border-color: var(--pause); color: var(--pause); }
+
+.is-processing #rec-status { color: var(--ink-soft); font-style: italic; }
+
+/* --- notes -------------------------------------------------------------- */
+
+.notes-list { list-style: none; margin: 0; padding: 0; }
+.notes-list .empty { color: var(--ink-soft); padding: 0.6rem 0; }
+
+.note-item + .note-item { border-top: 1px solid var(--line); }
+
+.note-button {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.75rem;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 0;
+  background: none;
+  padding: 0.6rem 0.4rem;
+}
+.note-button:hover:not(:disabled) { background: var(--panel); border-color: transparent; }
+.note-button.selected { background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); }
+.note-item-title { font-weight: 600; }
+.note-item-meta { color: var(--ink-soft); font-size: 0.85rem; margin-left: auto; }
+
+.meta { color: var(--ink-soft); font-size: 0.85rem; margin: 0 0 0.75rem; }
+
+#note-audio { width: 100%; margin-bottom: 0.75rem; }
+#note-audio[hidden] { display: none; }
+
+#note-transcript { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: 0.75rem; }
+#note-transcript summary { cursor: pointer; color: var(--ink-soft); }
+#note-transcript pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  margin-top: 0.6rem;
+  max-height: 24rem;
+  overflow: auto;
+}
+
+/* --- settings ----------------------------------------------------------- */
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+.settings-table th, .settings-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--line);
+}
+.settings-table th {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-soft);
+}
+.settings-table td:first-child { white-space: nowrap; }
+.settings-table td code { background: var(--code-bg); padding: 0.1rem 0.3rem; border-radius: 4px; }
+.settings-table input, .settings-table select { width: 100%; min-width: 8rem; }
+
+.row-hint { margin: 0.3rem 0 0; font-size: 0.78rem; color: var(--ink-soft); }
+
+.badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  color: var(--ink-soft);
+}
+.badge-env { border-color: var(--pause); color: var(--pause); }
+.badge-file { border-color: var(--accent); color: var(--accent); }
+
+/* --- phone -------------------------------------------------------------- */
+
+@media (max-width: 600px) {
+  body { padding: 1rem 0.75rem 3rem; }
+  .tabs { gap: 0; }
+  .tab { flex: 1; padding: 0.5rem 0.4rem; text-align: center; }
+  .picks { flex-direction: column; gap: 0.75rem; }
+  .recorder { gap: 0.5rem; }
+  button.big { flex: 1 1 100%; }
+  .timer { margin-left: 0; }
+  .note-item-meta { margin-left: 0; width: 100%; }
+  .settings-table, .settings-table thead, .settings-table tbody,
+  .settings-table tr, .settings-table th, .settings-table td { display: block; }
+  .settings-table thead { display: none; }
+  .settings-table tr {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    margin-bottom: 0.75rem;
+    padding: 0.4rem;
+    background: var(--panel);
+  }
+  .settings-table td { border-bottom: none; padding: 0.3rem 0.4rem; }
+}

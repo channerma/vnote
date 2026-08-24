@@ -1,31 +1,43 @@
-"""vnote daemon: warm models behind a localhost HTTP API.
+"""vnote daemon: warm models and the web UI behind a localhost HTTP API.
 
 Run:  vnote --serve   (foreground; Ctrl-C to stop). Stdlib-only, same as the
 Ollama client in cleanup.py. Single-user/localhost by design — no auth — and
 inference is serialized behind a lock (one GPU; CTranslate2 models aren't
 guaranteed concurrency-safe).
+
+Routes: ``GET /`` and ``/static/*`` serve the page in ``vnote/web/``; ``/api/*``
+is what that page talks to (docs/planning/PHASE8.md has the contract);
+``/transcribe``, ``/clean`` and ``/stream/*`` are the per-step endpoints the
+CLI uses when a daemon is up.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import uuid
+import webbrowser
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__, config
+from . import __version__, config, output
 from .audio import BYTES_PER_S, wav_bytes
 
 _infer_lock = threading.Lock()
 _started = 0.0
+
+
+class _BadRequest(ValueError):
+    """A malformed request body/header; answered with 400 instead of 500."""
 
 
 def _warm() -> str:
@@ -50,7 +62,7 @@ def _transcribe_pcm(pcm: bytes, language: str | None) -> tuple[str, dict]:
         tmp.unlink(missing_ok=True)
 
 
-# --- streaming sessions (vnote-flow --stream) --------------------------------
+# --- streaming sessions ------------------------------------------------------
 #
 # Chunked HTTP instead of WebSockets (stdlib has none): the client POSTs raw
 # PCM chunks into a session; every >=0.5 s of new audio triggers a synchronous
@@ -95,9 +107,141 @@ def _sweep_sessions() -> None:
             del _sessions[sid]
 
 
+# --- the web UI: static files + note folders ---------------------------------
+
+_WEB_DIR = Path(__file__).resolve().parent / "web"
+_STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+}
+_AUDIO_TYPES = {
+    ".wav": "audio/wav",
+    ".webm": "audio/webm",
+    ".ogg": "audio/ogg",
+    ".mp4": "audio/mp4",
+    ".m4a": "audio/mp4",
+    ".flac": "audio/flac",
+    ".mp3": "audio/mpeg",
+}
+_STATIC_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
+_SESSION_RE = re.compile(r"\d{4}-\d{2}-\d{2}-\d{4}-[a-z0-9-]+")  # what output.make_session_dir produces
+_FORMAT_RE = re.compile(r"[a-z0-9]{1,8}")
+_FILE_CHUNK = 64 * 1024
+
+
+def _notes_dir() -> Path:
+    return output.NOTES_DIR  # bound in output.py; tests monkeypatch it there
+
+
+def _session_path(name: str) -> Path | None:
+    """The session folder for a URL name, or None — never anything outside NOTES_DIR."""
+    if not _SESSION_RE.fullmatch(name):
+        return None
+    root = _notes_dir().resolve()
+    try:
+        path = (root / name).resolve()
+    except OSError:
+        return None
+    if path.parent != root or not path.is_dir():
+        return None
+    return path
+
+
+def _audio_file(session: Path) -> Path | None:
+    for p in sorted(session.glob("audio.*")):
+        if p.is_file() and p.suffix.lower() in _AUDIO_TYPES:
+            return p
+    return None
+
+
+def _read_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _read_meta(session: Path) -> dict:
+    try:
+        data = json.loads((session / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _stamp_to_iso(name: str) -> str | None:
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})", name)
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}T{m.group(4)}:{m.group(5)}:00" if m else None
+
+
+def _summary(session: Path) -> dict:
+    """The list-item view of one session folder; every field tolerates a missing meta.json."""
+    meta = _read_meta(session)
+    duration = meta.get("audio_duration_s")
+    if duration is None:
+        duration = meta.get("recording_duration_s")
+    if duration is None:
+        duration = meta.get("seconds")
+    return {
+        "name": session.name,
+        "title": meta.get("title") or session.name,
+        "created": meta.get("created") or _stamp_to_iso(session.name),
+        "duration_s": duration,
+        "mode": meta.get("cleanup_mode") or meta.get("mode"),
+        "backend": meta.get("cleanup_backend"),
+        "has_audio": _audio_file(session) is not None,
+        "has_note": (session / "note.md").is_file(),
+    }
+
+
+def _list_notes() -> list[dict]:
+    root = _notes_dir()
+    if not root.is_dir():
+        return []
+    dirs = [d for d in root.iterdir() if d.is_dir() and _SESSION_RE.fullmatch(d.name)]
+    return [_summary(d) for d in sorted(dirs, key=lambda d: d.name, reverse=True)]  # stamp-first names sort by time
+
+
+def _note_detail(session: Path) -> dict:
+    audio = _audio_file(session)
+    return {
+        **_summary(session),
+        "meta": _read_meta(session),
+        "note": _read_text(session / "note.md"),
+        "transcript": _read_text(session / "transcript.txt") or "",
+        "audio_url": f"/api/notes/{session.name}/audio" if audio else None,
+    }
+
+
+def _preserve_upload(tmp: Path) -> Path | None:
+    """Keep a recording whose note could not be written — it is the only copy the user has."""
+    try:
+        dest_dir = _notes_dir() / "failed"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{datetime.now():%Y%m%d-%H%M%S}{tmp.suffix}"
+        shutil.move(str(tmp), dest)
+        return dest
+    except OSError:
+        return None
+
+
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _one(query: dict[str, list[str]], key: str, default: str | None = None) -> str | None:
+    values = query.get(key)
+    return values[0] if values and values[0] != "" else default
+
+
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args: object) -> None:  # keep the console quiet; we print our own lines
         pass
+
+    # --- response helpers ---
 
     def _send(self, code: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
@@ -107,26 +251,150 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_file(self, path: Path, ctype: str) -> None:
+        """Send a file; honours a single ``Range: bytes=a-b`` so ``<audio>`` can seek."""
+        size = path.stat().st_size
+        start, end, status = 0, size - 1, 200
+        rng = self.headers.get("Range")
+        m = re.fullmatch(r"bytes=(\d*)-(\d*)", rng.strip()) if rng else None
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            else:  # suffix form: the last N bytes
+                start = max(size - int(m.group(2)), 0)
+            if start >= size or start > end:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            status = 206
+        length = max(end - start + 1, 0)
+        f = path.open("rb")  # open BEFORE any header goes out, so a failure is still a clean 500
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "no-cache")
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        with f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(_FILE_CHUNK, remaining))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except OSError:
+                    return  # the player seeked away (broken pipe / reset); nothing to report
+                remaining -= len(chunk)
+
+    def _cross_site(self) -> bool:
+        """True for a browser request from another origin (or a rebound Host): such a request can't
+        read our reply, but a cross-site form post could still rewrite a note. Non-browser clients
+        send no Origin and pass."""
+        allowed = _LOCAL_HOSTS | {config.DAEMON_HOST}
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
+        if host and host not in allowed:
+            return True
+        origin = self.headers.get("Origin")
+        return bool(origin) and (urlparse(origin).hostname or "") not in allowed
+
+    def _send_static(self, name: str) -> None:
+        if not _STATIC_NAME_RE.fullmatch(name) or ".." in name:
+            return self._send(404, {"error": "not found"})
+        path = _WEB_DIR / name
+        ctype = _STATIC_TYPES.get(path.suffix.lower())
+        if ctype is None or not path.is_file():
+            return self._send(404, {"error": "not found"})
+        self._send_file(path, ctype)
+
     def _body_len(self) -> int:
-        return int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            return int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            raise _BadRequest("bad Content-Length header") from None
 
     def _read_json(self) -> dict:
         n = self._body_len()
-        return json.loads(self.rfile.read(n) or b"{}") if n else {}
+        try:
+            data = json.loads(self.rfile.read(n) or b"{}") if n else {}
+        except ValueError:
+            raise _BadRequest("request body is not valid JSON") from None
+        return data if isinstance(data, dict) else {}
+
+    # --- GET ---
 
     def do_GET(self) -> None:
-        if self.path == "/health":
-            from . import transcribe
+        try:
+            path = urlparse(self.path).path
+            if path in ("/", "/index.html"):
+                return self._send_static("index.html")
+            if path.startswith("/static/"):
+                return self._send_static(path[len("/static/"):])
+            if path == "/health":
+                from . import transcribe
 
-            self._send(200, {
-                "status": "ok",
-                "version": __version__,
-                "device": transcribe._device or "cpu",
-                "whisper_model": config.WHISPER_MODEL,
-                "uptime_s": round(time.monotonic() - _started, 1),
-            })
-        else:
+                return self._send(200, {
+                    "status": "ok",
+                    "version": __version__,
+                    "device": transcribe._device or "cpu",
+                    "whisper_model": config.WHISPER_MODEL,
+                    "uptime_s": round(time.monotonic() - _started, 1),
+                })
+            if path == "/api/settings":
+                return self._send(200, {"settings": config.describe()})
+            if path == "/api/vocab":
+                return self._send(200, {"text": _read_text(config.vocab_file()) or ""})
+            if path == "/api/notes":
+                return self._send(200, {"notes": _list_notes()})
+            m = re.fullmatch(r"/api/notes/([^/]+)(/audio)?", path)
+            if m:
+                session = _session_path(m.group(1))
+                if session is None:
+                    return self._send(404, {"error": f"no such note: {m.group(1)}"})
+                if not m.group(2):
+                    return self._send(200, _note_detail(session))
+                audio = _audio_file(session)
+                if audio is None:
+                    return self._send(404, {"error": "this note has no audio"})
+                return self._send_file(audio, _AUDIO_TYPES[audio.suffix.lower()])
             self._send(404, {"error": "not found"})
+        except Exception as exc:  # noqa: BLE001
+            self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
+
+    # --- PUT (settings + vocabulary) ---
+
+    def do_PUT(self) -> None:
+        if self._cross_site():
+            return self._send(403, {"error": "cross-site request refused"})
+        try:
+            path = urlparse(self.path).path
+            if path == "/api/settings":
+                try:
+                    saved = config.update(self._read_json())
+                except ValueError as exc:
+                    return self._send(400, {"error": str(exc)})
+                return self._send(200, {"saved": saved})
+            if path == "/api/vocab":
+                text = self._read_json().get("text")
+                if not isinstance(text, str):
+                    return self._send(400, {"error": "body must be {\"text\": \"...\"}"})
+                target = config.vocab_file()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text if not text or text.endswith("\n") else text + "\n", encoding="utf-8")
+                return self._send(200, {"saved": True})
+            self._send(404, {"error": "not found"})
+        except _BadRequest as exc:
+            self._send(400, {"error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
+
+    # --- POST ---
 
     def _transcribe(self, audio: Path, language: str | None) -> dict:
         from .transcribe import transcribe
@@ -142,7 +410,7 @@ class _Handler(BaseHTTPRequestHandler):
         if n <= 0:
             return self._send(400, {"error": "empty audio body"})
         fmt = (query.get("format") or ["wav"])[0].lower()
-        if not re.fullmatch(r"[a-z0-9]{1,8}", fmt):
+        if not _FORMAT_RE.fullmatch(fmt):
             return self._send(400, {"error": f"bad format: {fmt!r}"})
         language = (query.get("language") or [None])[0]
         fd, name = tempfile.mkstemp(prefix="vnote-upload-", suffix=f".{fmt}")
@@ -157,6 +425,87 @@ class _Handler(BaseHTTPRequestHandler):
             tmp.unlink(missing_ok=True)
         self._send(200, payload)
 
+    def _api_note(self, query: dict[str, list[str]]) -> None:
+        """The web recorder's one call: audio bytes in, a finished note folder out."""
+        n = self._body_len()
+        if n <= 0:
+            return self._send(400, {"error": "empty audio body"})
+        fmt = (_one(query, "format") or "webm").lower()
+        if not _FORMAT_RE.fullmatch(fmt):
+            return self._send(400, {"error": f"bad format: {fmt!r}"})
+        raw = (_one(query, "raw") or "0").lower() in ("1", "true", "yes")
+        if raw:  # no LLM runs, so a bad saved default mode/backend must not block a raw recording
+            mode, backend = "edit", config.BUILTIN_BACKEND
+        else:
+            mode = _one(query, "mode") or config.default_mode()
+            if mode not in config.MODES:
+                return self._send(400, {"error": f"bad mode: {mode!r} (one of {', '.join(config.MODES)})"})
+            backend = _one(query, "backend") or config.backend()
+            if backend not in config.setting("backend").choices:
+                return self._send(400, {"error": f"bad backend: {backend!r}"})
+        model = _one(query, "model")
+        language = _one(query, "language") or config.language()
+        if language and language.lower() == "auto":  # the page's way to override a saved language
+            language = None
+
+        fd, name = tempfile.mkstemp(prefix="vnote-web-", suffix=f".{fmt}")
+        tmp = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(self.rfile.read(n))
+            from . import cleanup, pipeline, transcribe
+
+            def locked_transcribe(path: Path, language: str | None = None):
+                with _infer_lock:  # guards the GPU model only — an LLM round-trip must not block /transcribe
+                    return transcribe.transcribe(path, language=language)
+
+            # Decide the reply here, send it AFTER the temp file is gone: the response
+            # releases the client, which may observe (or assert) that the upload was removed.
+            try:
+                result = pipeline.make_note(
+                    tmp, transcribe_fn=locked_transcribe, clean_fn=cleanup.clean,
+                    mode=mode, backend=backend, model=model, language=language, raw=raw, source="web",
+                )
+            except pipeline.EmptyTranscriptError:
+                reply = (400, {"error": "no speech detected"})
+            except Exception as exc:  # noqa: BLE001 - the upload is the only copy of the recording: keep it
+                kept = _preserve_upload(tmp)
+                reply = (500, {"error": f"{type(exc).__name__}: {exc}", "audio_kept": str(kept) if kept else None})
+            else:
+                reply = (200, {
+                    "name": result.session_dir.name,
+                    "title": result.title,
+                    "note": result.note_text,
+                    "transcript": result.transcript,
+                    "meta": result.meta,
+                    "cleanup_error": result.cleanup_error,
+                })
+        finally:
+            tmp.unlink(missing_ok=True)  # the session folder (or failed/) holds its own copy now
+        self._send(*reply)
+
+    def _api_reclean(self, name: str) -> None:
+        session = _session_path(name)
+        if session is None:
+            return self._send(404, {"error": f"no such note: {name}"})
+        data = self._read_json()
+        mode = data.get("mode") or config.default_mode()
+        if mode not in config.MODES:
+            return self._send(400, {"error": f"bad mode: {mode!r} (one of {', '.join(config.MODES)})"})
+        backend = data.get("backend") or config.backend()
+        if backend not in config.setting("backend").choices:
+            return self._send(400, {"error": f"bad backend: {backend!r}"})
+        from . import cleanup, pipeline
+
+        try:
+            result = pipeline.reclean(session, clean_fn=cleanup.clean, mode=mode, backend=backend,
+                                      model=data.get("model"))
+        except FileNotFoundError as exc:
+            return self._send(404, {"error": str(exc)})
+        except pipeline.EmptyTranscriptError:
+            return self._send(400, {"error": "transcript is empty"})
+        self._send(200, {"title": result.title, "note": result.note_text})
+
     def _stream_session(self, url) -> tuple[str, _StreamSession] | None:
         """Look up ?sid=...; sends the 404 itself when the session is unknown/expired."""
         _sweep_sessions()  # enforce the TTL on every touch, not only /stream/start
@@ -169,9 +518,16 @@ class _Handler(BaseHTTPRequestHandler):
         return sid, sess
 
     def do_POST(self) -> None:
+        if self._cross_site():
+            return self._send(403, {"error": "cross-site request refused"})
         try:
             url = urlparse(self.path)
-            if url.path == "/transcribe":
+            reclean = re.fullmatch(r"/api/notes/([^/]+)/reclean", url.path)
+            if url.path == "/api/note":
+                return self._api_note(parse_qs(url.query))
+            elif reclean:
+                return self._api_reclean(reclean.group(1))
+            elif url.path == "/transcribe":
                 ctype = (self.headers.get("Content-Type") or "").partition(";")[0].strip().lower()
                 if ctype == "application/octet-stream" or ctype.startswith("audio/"):
                     return self._transcribe_body(parse_qs(url.query))
@@ -192,28 +548,6 @@ class _Handler(BaseHTTPRequestHandler):
                     tone=data.get("tone"),
                 )
                 self._send(200, {"title": result.title, "body": result.body})
-            elif url.path == "/history":
-                data = self._read_json()
-                from . import history
-
-                history.append_take(
-                    raw=data.get("raw"),
-                    clean=data.get("clean"),
-                    wav=base64.b64decode(data["wav_b64"]) if data.get("wav_b64") else None,
-                    seconds=float(data.get("seconds") or 0.0),
-                    mode=data.get("mode"),
-                    tone=data.get("tone"),
-                )
-                self._send(200, {"saved": True})
-            elif url.path == "/promote":
-                data = self._read_json()
-                from . import history
-
-                try:
-                    session = history.promote_take(data.get("take") or "last")
-                except ValueError as exc:
-                    return self._send(400, {"error": str(exc)})
-                self._send(200, {"note": session.name})
             elif url.path == "/stream/start":
                 data = self._read_json()
                 _sweep_sessions()
@@ -240,11 +574,43 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, {"transcript": text, "meta": meta})
             else:
                 self._send(404, {"error": "not found"})
+        except _BadRequest as exc:
+            self._send(400, {"error": str(exc)})
         except Exception as exc:  # noqa: BLE001
             self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
 
 
-def serve() -> int:
+# --- process entry point -----------------------------------------------------
+
+
+def _is_wsl() -> bool:
+    try:
+        return "microsoft" in Path("/proc/version").read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
+
+
+def _open_browser(url: str) -> None:
+    """Best-effort, never fatal. Under WSL the page belongs in the *Windows* browser, so
+    go through cmd.exe first — Python's webbrowser would pick a Linux (or text-mode)
+    browser inside WSL, which is never what you want."""
+    if _is_wsl():
+        for exe in ("cmd.exe", "/mnt/c/Windows/System32/cmd.exe"):
+            try:
+                subprocess.Popen([exe, "/c", "start", "", url], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except OSError:
+                continue
+    try:
+        if webbrowser.open(url):
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    print(f"  (could not open a browser here — visit {url})", flush=True)
+
+
+def serve(open_browser: bool = False) -> int:
     global _started
     host, port = config.daemon_addr()
     try:
@@ -254,9 +620,12 @@ def serve() -> int:
         print("       (is another `vnote --serve` already running?)", file=sys.stderr)
         return 1
     _started = time.monotonic()
+    url = f"http://{host}:{port}"
     print(f"vnote daemon — warming {config.WHISPER_MODEL} ...", flush=True)
     device = _warm()
-    print(f"  warm on {device}; listening on http://{host}:{port}  (Ctrl-C to stop)", flush=True)
+    print(f"  warm on {device}; web UI + API at {url}  (Ctrl-C to stop)", flush=True)
+    if open_browser:
+        threading.Thread(target=_open_browser, args=(url,), daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

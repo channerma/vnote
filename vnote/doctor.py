@@ -28,7 +28,8 @@ def _check_recorder() -> tuple[str, str]:
         import sounddevice  # noqa: F401
         return OK, "recorder: `sounddevice` (PortAudio) library available"
     except Exception:  # noqa: BLE001 - import or PortAudio load failure
-        return BAD, "no recorder found — install pulseaudio-utils (parec) or ffmpeg (file mode still works)"
+        return BAD, ("no recorder found — install pulseaudio-utils (parec) or ffmpeg, or record in the "
+                    "browser via the web UI (`vnote --serve`); file mode still works")
 
 
 def _check_gpu() -> tuple[str, str]:
@@ -49,27 +50,8 @@ def _check_daemon() -> tuple[str, str]:
 
     host, port = config.daemon_addr()
     if daemon.is_up():
-        return OK, f"daemon: up at {host}:{port} (models warm)"
-    return WARN, f"no daemon at {host}:{port} — models load per run; start one: `vnote --serve`"
-
-
-def _check_flow() -> tuple[str, str]:
-    """Flow-mode readiness on *this* machine (on WSL the client usually runs Windows-side)."""
-    from .client import inject as _inject
-
-    plat = _inject._platform()
-    chord = _inject._paste_chord_cmd(plat)
-    try:
-        import pynput  # noqa: F401
-        have_pynput = True
-    except Exception:  # noqa: BLE001 - missing package or no display backend
-        have_pynput = False
-    if chord is None and not have_pynput:
-        extra = " or wtype/ydotool" if plat == "wayland" else ""
-        return WARN, f"flow: no injection path on {plat} — install the `[flow]` extra (pynput){extra}"
-    via = Path(chord[0]).name if chord else "pynput"
-    hotkey = "hotkey ready (pynput)" if have_pynput else "hotkey here needs `pynput` (`[flow]` extra)"
-    return OK, f"flow: inject via {via} ({plat}); {hotkey}"
+        return OK, f"daemon: up at {host}:{port} (models warm; web UI at http://{host}:{port})"
+    return WARN, f"no daemon at {host}:{port} — models load per run; `vnote --serve` starts one (plus the web UI)"
 
 
 def _check_backend(backend: str) -> tuple[str, str]:
@@ -77,7 +59,7 @@ def _check_backend(backend: str) -> tuple[str, str]:
         from .cleanup import _ollama_get
 
         if _ollama_get("/api/version") is None:
-            return WARN, f"Ollama not reachable at {config.OLLAMA_HOST} — start it: `ollama serve`"
+            return WARN, f"Ollama not reachable at {config.get('ollama_host')} — start it: `ollama serve`"
         model = config.ollama_model()
         names = {m.get("name", "") for m in (_ollama_get("/api/tags", timeout=5.0) or {}).get("models", [])}
         if model in names or any(n == model or n.startswith(model + ":") for n in names):
@@ -90,7 +72,7 @@ def _check_backend(backend: str) -> tuple[str, str]:
         if exe is None:
             return BAD, (
                 f"claude-code backend selected but the Claude Code CLI "
-                f"({config.CLAUDE_CODE_BIN!r}) is not on PATH"
+                f"({config.get('claude_code_bin')!r}) is not on PATH"
             )
         return OK, f"claude-code backend: CLI at {exe} (uses your Claude subscription)"
     # claude (metered API)
@@ -103,7 +85,7 @@ def _check_backend(backend: str) -> tuple[str, str]:
             "claude backend selected but ANTHROPIC_API_KEY is not set — the SDK will "
             "fall back to an `ant auth login` profile if you have one (see .env.example)"
         )
-    return OK, f"claude backend: `anthropic` installed, key set, model {config.CLAUDE_MODEL}"
+    return OK, f"claude backend: `anthropic` installed, key set, model {config.get('claude_model')}"
 
 
 def run(backend: str) -> int:
@@ -119,7 +101,6 @@ def run(backend: str) -> int:
         _check_gpu(),
         _check_clipboard(),
         _check_daemon(),
-        _check_flow(),
         _check_backend(backend),
     ]
     failures = 0

@@ -1,12 +1,12 @@
 [project]
 name = "vnote"
-version = "0.4.0"
-description = "Local voice notes: record -> faster-whisper transcription -> LLM cleanup, straight to your clipboard"
+version = "0.5.0"
+description = "Local voice notes: record in the browser or the terminal -> faster-whisper on your GPU -> LLM cleanup -> clean Markdown"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Scott Greenwood" }]
-keywords = ["whisper", "transcription", "dictation", "voice-notes", "ollama", "wsl", "cli"]
+keywords = ["whisper", "transcription", "dictation", "voice-notes", "ollama", "claude", "web-ui", "cli"]
 dependencies = [
     "faster-whisper>=1.1.0",
     "sounddevice>=0.4.6",
@@ -22,9 +22,6 @@ dependencies = [
 [project.optional-dependencies]
 # Optional Claude cleanup backend (`vnote --backend claude`). Needs ANTHROPIC_API_KEY.
 claude = ["anthropic>=0.40"]
-# Flow-mode client (`vnote-flow`): global hotkey + keystroke injection + tray icon.
-# Install on the machine that owns the keyboard (on WSL setups: Windows Python).
-flow = ["pynput>=1.7", "pystray>=0.19", "pillow>=10"]
 # Dev tooling (tests + lint).
 dev = ["pytest>=8", "ruff>=0.6"]
 
@@ -35,7 +32,6 @@ Issues = "https://github.com/greenwoodms06/vnote/issues"
 
 [project.scripts]
 vnote = "vnote.cli:main"
-vnote-flow = "vnote.client.app:main"
 
 [build-system]
 requires = ["hatchling"]

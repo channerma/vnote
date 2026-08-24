@@ -38,6 +38,7 @@ def write_session(
     note_md: str | None,
     title: str,
     meta: dict,
+    heading: bool = True,
 ) -> dict[str, Path]:
     """Populate ``session_dir``. Returns a map of artifact name -> path."""
     written: dict[str, Path] = {}
@@ -54,7 +55,8 @@ def write_session(
 
     if note_md is not None:
         note_path = session_dir / "note.md"
-        note_path.write_text(f"# {title}\n\n{note_md.strip()}\n", encoding="utf-8")
+        head = f"# {title}\n\n" if heading else ""  # dictation mode: plain text, no title line
+        note_path.write_text(f"{head}{note_md.strip()}\n", encoding="utf-8")
         written["note"] = note_path
 
     meta_path = session_dir / "meta.json"

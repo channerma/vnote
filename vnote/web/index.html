@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vnote</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+
+<header class="topbar">
+  <h1>vnote</h1>
+  <p id="daemon-info" class="daemon-info">connecting…</p>
+</header>
+
+<nav class="tabs" aria-label="Views">
+  <button type="button" id="tab-record" class="tab">Record</button>
+  <button type="button" id="tab-notes" class="tab">Notes</button>
+  <button type="button" id="tab-settings" class="tab">Settings</button>
+</nav>
+
+<main>
+
+  <!-- ---------------------------------------------------------------- Record -->
+  <section id="view-record" class="view">
+
+    <div class="picks">
+      <label class="pick">
+        <span>Mode</span>
+        <select id="pick-mode">
+          <option value="edit">Edit — reorganize into headings and lists (default)</option>
+          <option value="light">Light — fix fillers and grammar only</option>
+          <option value="summary">Summary — condense</option>
+          <option value="dictation">Dictation — plain text, fast</option>
+          <option value="raw">Raw — transcript only, no LLM</option>
+        </select>
+      </label>
+      <label class="pick">
+        <span>Backend</span>
+        <select id="pick-backend"></select>
+      </label>
+      <label class="pick">
+        <span>Language</span>
+        <input type="text" id="pick-language" placeholder="auto" autocomplete="off" spellcheck="false">
+      </label>
+    </div>
+
+    <div class="recorder">
+      <button type="button" id="record" class="big">● Record</button>
+      <button type="button" id="pause" disabled>⏸ Pause</button>
+      <button type="button" id="stop" disabled>■ Stop</button>
+      <span id="timer" class="timer">0:00</span>
+    </div>
+
+    <p id="rec-status" class="status">ready</p>
+    <button type="button" id="retry" hidden>Retry upload</button>
+    <p class="hint">Space pauses and resumes while recording (unless you are typing in a field).</p>
+
+    <div id="result" class="card" hidden>
+      <h2 id="result-title"></h2>
+      <p id="result-warning" class="warning" hidden></p>
+      <textarea id="result-text" class="mono" readonly rows="18"></textarea>
+      <div class="row">
+        <button type="button" id="copy">Copy</button>
+        <span id="copy-status" class="status inline"></span>
+        <button type="button" id="result-open">Open in Notes</button>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ----------------------------------------------------------------- Notes -->
+  <section id="view-notes" class="view" hidden>
+
+    <div class="row">
+      <button type="button" id="notes-refresh">Refresh</button>
+    </div>
+
+    <ul id="notes-list" class="notes-list"></ul>
+
+    <div id="note-detail" class="card" hidden>
+      <h2 id="note-title"></h2>
+      <p id="note-meta" class="meta"></p>
+      <audio id="note-audio" controls preload="none"></audio>
+      <textarea id="note-text" class="mono" readonly rows="18"></textarea>
+      <div class="row">
+        <button type="button" id="note-copy">Copy</button>
+        <span id="note-copy-status" class="status inline"></span>
+      </div>
+      <div class="row">
+        <label class="pick inline-pick">
+          <span>Re-clean as</span>
+          <select id="reclean-mode">
+            <option value="edit">Edit</option>
+            <option value="light">Light</option>
+            <option value="summary">Summary</option>
+            <option value="dictation">Dictation</option>
+          </select>
+        </label>
+        <button type="button" id="reclean">Re-clean</button>
+        <span id="reclean-status" class="status inline"></span>
+      </div>
+      <details id="note-transcript">
+        <summary>Raw transcript</summary>
+        <pre></pre>
+      </details>
+    </div>
+
+  </section>
+
+  <!-- -------------------------------------------------------------- Settings -->
+  <section id="view-settings" class="view" hidden>
+
+    <h2>Settings</h2>
+    <table id="settings-table" class="settings-table">
+      <thead>
+        <tr><th>Key</th><th>Description</th><th>Value</th><th>Source</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="row">
+      <button type="button" id="settings-save">Save settings</button>
+      <span id="settings-status" class="status inline"></span>
+    </div>
+
+    <h2>Vocabulary</h2>
+    <p class="hint">
+      One entry per line. A bare line is a <strong>hotword</strong> that biases transcription
+      toward that spelling. A line of the form <code>wrong -&gt; right</code> is a
+      <strong>whole-word correction</strong> applied after transcription.
+      Edits apply to the next recording — no restart needed.
+    </p>
+    <textarea id="vocab" class="mono" rows="12" spellcheck="false"></textarea>
+    <div class="row">
+      <button type="button" id="vocab-save">Save vocabulary</button>
+      <span id="vocab-status" class="status inline"></span>
+    </div>
+
+  </section>
+
+</main>
+</html>

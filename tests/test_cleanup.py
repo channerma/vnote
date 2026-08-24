@@ -47,7 +47,7 @@ def test_build_user_prompt_includes_mode_instruction_and_transcript():
     assert "filler" in prompt.lower()  # the 'light' instruction mentions filler words
 
 
-# --- dictation mode (flow client) --------------------------------------------
+# --- dictation mode (plain-text output, no title framing) ------------------
 
 
 def test_dictation_finish_is_plain_text_not_title_framed():

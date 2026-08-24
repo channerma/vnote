@@ -1,3 +1,3 @@
 """Local voice notes: record -> faster-whisper transcription -> LLM cleanup."""
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

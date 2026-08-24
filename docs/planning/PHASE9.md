@@ -16,7 +16,8 @@
 > 2026-08-24: exploration 1a — stage + drawer**; the Claude Design handoff (index.html,
 > style.css, HANDOFF.md) is recorded under `docs/design/handoff/`; Phase 4 = rewire
 > `app.js` to it (state via `data-view` / `data-state` / `data-live` / `data-raw` /
-> `data-daemon` attributes, as the handoff specifies). Phase 5 not started.
+> `data-daemon` attributes, as the handoff specifies) — **built and reviewed the same day;
+> version 0.6.0**. Phase 5 not started.
 
 ## What the Body asked for (after recording a real session in the 0.5.0 page)
 

@@ -1,388 +1,389 @@
-/* vnote web UI — plain, readable, function first. A designer may restyle. */
+/* ==========================================================================
+   vnote 0.5.0 — style.css   (layout 1a: stage + drawer)
+   Modernist: Archivo, zero radius, 2px rules, one accent (#ec3013).
+   Dark is the primary composition; light is its mirror.
+
+   The design's Google-Fonts @import is deliberately gone: this page makes no
+   external requests. Archivo is used when it is installed, the system stack
+   otherwise.
+   ========================================================================== */
 
 :root {
-  --bg: #f7f7f6;
-  --panel: #ffffff;
-  --ink: #1b1b1a;
-  --ink-soft: #5c5c58;
-  --line: #d8d8d4;
-  --accent: #2f6fd0;
-  --accent-ink: #ffffff;
-  --rec: #c62828;
-  --pause: #b8860b;
-  --bad: #b3261e;
-  --code-bg: #f2f2ef;
-  --radius: 8px;
+  --bg:#201e1d; --panel:#191817; --surface:#2a2827;
+  --text:#f3f2f2; --dim:#9b9797; --faint:#8f8b8b;
+  --line:rgba(243,242,242,.16); --rule:rgba(243,242,242,.34);
+  --accent:#ec3013; --accent-hi:#ff9783;
+  --font:"Archivo", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
-
-@media (prefers-color-scheme: dark) {
+@media (prefers-color-scheme: light) {
   :root {
-    --bg: #17181a;
-    --panel: #202225;
-    --ink: #e8e8e6;
-    --ink-soft: #a0a09b;
-    --line: #35373b;
-    --accent: #5b95e8;
-    --accent-ink: #10161f;
-    --rec: #ef5350;
-    --pause: #e0a92b;
-    --bad: #f08b84;
-    --code-bg: #191a1c;
+    --bg:#f3f2f2; --panel:#eae9e9; --surface:#f8f4f4;
+    --text:#201e1d; --dim:#605d5d; --faint:#6f6c6c;
+    --line:rgba(32,30,29,.18); --rule:rgba(32,30,29,.4);
+    --accent:#ec3013; --accent-hi:#ae1800;
   }
 }
 
-* { box-sizing: border-box; }
-
-html { -webkit-text-size-adjust: 100%; }
-
+*,*::before,*::after { box-sizing:border-box; }
+html,body { height:100%; }
 body {
-  margin: 0 auto;
-  padding: 1.5rem 1rem 4rem;
-  max-width: 900px;
-  background: var(--bg);
-  color: var(--ink);
-  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
-        Arial, "Noto Sans", sans-serif;
+  margin:0; overflow:hidden;
+  background:var(--bg); color:var(--text);
+  font:400 15px/1.55 var(--font);
+  -webkit-text-size-adjust:100%;
+}
+h1,h2,h3 { font-weight:800; letter-spacing:-.015em; line-height:1.14; margin:0; }
+p { margin:0; }
+code, .mono { font-family:var(--mono); font-size:.86em; }
+kbd { font-family:var(--mono); font-size:12.5px; border:1px solid var(--line); padding:1px 5px; }
+a { color:var(--accent); text-underline-offset:3px; }
+a:hover { color:var(--accent-hi); }
+::selection { background:color-mix(in srgb, var(--accent) 30%, transparent); }
+:focus { outline:none; }
+:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+[hidden] { display:none !important; }
+.micro { font-size:10px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; color:var(--faint); }
+.hint { font-size:12.5px; color:var(--faint); max-width:82ch; }
+.inline-status { font-size:11.5px; color:var(--faint); }
+.rule { height:2px; border:0; background:var(--rule); margin:0; }
+.vrule { width:2px; align-self:stretch; background:var(--line); }
+
+/* — controls ————————————————————————————————————————————— */
+.btn {
+  display:inline-flex; align-items:center; justify-content:flex-start; gap:7px;
+  font:800 13px/1.2 var(--font); color:var(--text);
+  background:transparent; border:1px solid transparent; border-radius:0;
+  padding:8px 13px; cursor:pointer; white-space:nowrap;
+}
+.btn-sm { font-size:12.5px; padding:6px 11px; }
+.btn-wide { width:100%; font-size:14px; padding:10px 12px; }
+.btn-primary { background:var(--accent); color:#f3f2f2; }
+.btn-primary:hover { background:#dd2b0f; }
+.btn-primary:active { background:#ae1800; }
+.btn-secondary { border-color:var(--line); }
+.btn-secondary:hover { background:color-mix(in srgb, var(--text) 7%, transparent); }
+.btn-secondary:active { background:color-mix(in srgb, var(--text) 14%, transparent); }
+.btn-pending { border:1px dashed var(--line); color:var(--faint); }
+.btn:disabled { opacity:.45; cursor:not-allowed; }
+.rec-dot { width:10px; height:10px; border-radius:50%; background:currentColor; flex:0 0 auto; }
+.btn-primary .rec-dot { background:#f3f2f2; }
+
+.icon-btn {
+  width:28px; height:28px; display:grid; place-items:center; padding:0;
+  background:transparent; border:1px solid var(--line); color:var(--dim); cursor:pointer;
+}
+.icon-btn:hover { color:var(--text); background:color-mix(in srgb, var(--text) 7%, transparent); }
+.icon-btn svg, .ico { width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:2; display:block; }
+.link-btn {
+  display:inline-flex; align-items:center; gap:8px; padding:0;
+  background:transparent; border:0; color:var(--text);
+  font:800 13px/1.3 var(--font); cursor:pointer; text-align:left;
+}
+.link-btn:hover { color:var(--accent-hi); }
+.link-btn.accent { color:var(--accent-hi); font-size:12px; }
+
+input[type=text], input[type=search], select, textarea {
+  background:var(--surface); color:var(--text);
+  border:1px solid var(--line); border-radius:0;
+  font:400 13px/1.4 var(--font); padding:7px 9px;
+}
+input[type=search] { width:100%; }
+input[type=checkbox] { accent-color:var(--accent); width:15px; height:15px; margin:0; }
+.field { display:flex; flex-direction:column; gap:5px; margin:0; }
+.field.grow { flex:1; min-width:220px; }
+.field > label { font-size:10px; font-weight:800; letter-spacing:.12em; text-transform:uppercase; color:var(--faint); }
+.check { display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; padding-bottom:8px; }
+.tag {
+  font-size:9.5px; font-weight:800; letter-spacing:.1em; text-transform:uppercase;
+  border:1px solid var(--line); padding:1px 5px; color:var(--dim);
 }
 
-h1 { font-size: 1.35rem; margin: 0; letter-spacing: 0.02em; }
-h2 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+/* — shell ————————————————————————————————————————————————— */
+.app { display:flex; height:100%; }
+.stage { flex:1; min-width:0; display:flex; flex-direction:column; }
+#view-note { flex:1; min-height:0; display:flex; flex-direction:column; }
+.app[data-view="settings"] #view-note { display:none; }
+.app[data-view="note"] #view-settings { display:none; }
 
-code, .mono, pre {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-               "Liberation Mono", monospace;
-  font-size: 0.9em;
+/* — sidebar ——————————————————————————————————————————————— */
+#sidebar {
+  width:264px; flex:0 0 264px; display:flex; flex-direction:column;
+  background:var(--panel); border-right:2px solid var(--rule); overflow:hidden;
 }
+.side-head {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:14px 16px 12px; border-bottom:2px solid var(--rule);
+}
+.brand { font-weight:800; font-size:15px; letter-spacing:.02em; }
+.side-actions { padding:12px 16px 10px; display:flex; flex-direction:column; gap:10px; border-bottom:1px solid var(--line); }
+.stats { display:flex; gap:16px; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--faint); }
+#notes-list { flex:1; overflow-y:auto; padding-bottom:8px; }
+.day { padding:14px 16px 6px; font-size:10px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; color:var(--faint); }
+.note-row {
+  display:flex; flex-direction:column; gap:3px; padding:8px 16px 9px;
+  text-decoration:none; color:var(--text); border-left:2px solid transparent;
+}
+.note-row:hover { background:color-mix(in srgb, var(--text) 6%, transparent); color:var(--text); }
+.note-row.is-active { background:var(--surface); border-left-color:var(--accent); }
+.note-row-title { font-size:13.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.note-row-meta { display:flex; align-items:center; gap:8px; font-size:11px; color:var(--dim); }
+.note-row-meta .tag { margin-left:auto; }
+#notes-empty { flex:1; padding:28px 16px; display:flex; flex-direction:column; gap:8px; }
+#notes-empty strong { font-size:13px; }
+#notes-empty p { font-size:12.5px; color:var(--dim); }
+.side-foot { border-top:2px solid var(--rule); padding:10px 16px 12px; display:flex; flex-direction:column; gap:8px; }
+#daemon-info { font-family:var(--mono); font-size:10.5px; line-height:1.4; color:var(--faint); }
+/* one muted line inside the list: "loading…", or why it could not be read */
+.side-note { padding:14px 16px; font-size:12.5px; color:var(--dim); }
+.side-note.bad { color:var(--accent-hi); }
 
-/* --- header + tabs ------------------------------------------------------ */
-
+/* — top bar / transport ————————————————————————————————————— */
 .topbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.75rem;
-  padding-bottom: 0.75rem;
+  flex:0 0 auto; min-height:60px; display:flex; align-items:center; gap:14px;
+  padding:10px 26px; border-bottom:2px solid var(--rule); flex-wrap:wrap;
+}
+.topbar-plain { min-height:52px; }
+.topbar .dot { width:11px; height:11px; border-radius:50%; background:var(--dim); flex:0 0 auto; }
+#rec-status { font-size:11px; font-weight:800; letter-spacing:.16em; text-transform:uppercase; color:var(--dim); }
+#timer { font-family:var(--mono); font-size:22px; font-weight:600; letter-spacing:.02em; }
+.transport { display:flex; gap:10px; }
+.topbar-right { margin-left:auto; display:flex; align-items:center; gap:12px; }
+
+/* state: idle */
+[data-state="idle"] .topbar .dot,
+[data-state="idle"] #timer,
+[data-state="idle"] #pause,
+[data-state="idle"] #stop,
+[data-state="idle"] .topbar-right { display:none; }
+[data-state="idle"] .note, [data-state="idle"] #live, [data-state="idle"] .progress, [data-state="idle"] #process-status { display:none; }
+[data-state="idle"] #rec-status { color:var(--faint); }
+/* the start itself (microphone, live session): the idle stage stays, but Stop —
+   labelled Cancel by app.js — has to be reachable */
+[data-state="idle"][data-starting="true"] #record { display:none; }
+[data-state="idle"][data-starting="true"] #stop { display:inline-flex; }
+
+/* state: recording */
+[data-state="recording"] .topbar { border-bottom-color:var(--accent); background:color-mix(in srgb, var(--accent) 10%, transparent); }
+[data-state="recording"] .topbar .dot { background:var(--accent); animation:blink 1.6s steps(1,end) infinite; }
+[data-state="recording"] #rec-status { color:var(--accent-hi); }
+[data-state="recording"] #record, [data-state="recording"] .idle,
+[data-state="recording"] .note, [data-state="recording"] .progress, [data-state="recording"] #process-status { display:none; }
+
+/* state: paused */
+[data-state="paused"] .topbar { border-bottom-color:var(--accent-hi); background:color-mix(in srgb, var(--accent-hi) 10%, transparent); }
+[data-state="paused"] .topbar .dot { background:transparent; border:2px solid var(--accent-hi); }
+[data-state="paused"] #rec-status { color:var(--accent-hi); }
+[data-state="paused"] #timer { color:var(--dim); }
+[data-state="paused"] #pause { border-color:var(--accent-hi); color:var(--accent-hi); }
+[data-state="paused"] #record, [data-state="paused"] .idle,
+[data-state="paused"] .note, [data-state="paused"] .progress, [data-state="paused"] #process-status { display:none; }
+
+/* state: processing — the live text stays exactly where it was */
+[data-state="processing"] .topbar { background:var(--panel); }
+[data-state="processing"] .topbar .dot { background:transparent; border:2px solid var(--dim); }
+[data-state="processing"] #timer { color:var(--dim); }
+[data-state="processing"] #record, [data-state="processing"] #pause, [data-state="processing"] #stop,
+[data-state="processing"] .idle, [data-state="processing"] .note { display:none; }
+[data-state="processing"] #live { opacity:.72; }
+[data-state="processing"] .big-timer { display:none; }
+
+/* state: note */
+[data-state="note"] .topbar, [data-state="note"] .idle,
+[data-state="note"] #live, [data-state="note"] .progress, [data-state="note"] #process-status { display:none; }
+
+/* live transcript off */
+#view-note[data-live="off"] .live-inner { display:none; }
+#view-note[data-live="on"] .big-timer { display:none; }
+/* vnote: a take without live text has nothing for #live-copy to copy */
+#view-note[data-live="off"] .topbar-right { display:none; }
+/* vnote: an upload that failed leaves the live text on the idle stage — it is the
+   only place the words are still readable, and Retry is the way out of it */
+#view-note[data-state="idle"][data-retry="true"][data-live="on"] #live { display:block; }
+#view-note[data-state="idle"][data-retry="true"][data-live="on"] .topbar-right { display:flex; }
+
+@keyframes blink { 0%,55% { opacity:1; } 56%,100% { opacity:.25; } }
+@keyframes crawl { 0% { transform:translateX(-100%); } 100% { transform:translateX(400%); } }
+.progress { flex:0 0 2px; background:var(--line); overflow:hidden; position:relative; }
+.progress > span { position:absolute; inset:0; width:22%; background:var(--accent); animation:crawl 2.2s linear infinite; }
+#process-status { flex:0 0 auto; padding:14px 26px; border-bottom:1px solid var(--line); font-size:13.5px; }
+/* the one status line the app speaks through: the processing copy, a live-transcript
+   warning, a reprocess result. It is hidden per state above — show it in any state
+   whenever it actually has something to say. */
+[data-state] #process-status:not(:empty) { display:block; }
+@media (prefers-reduced-motion: reduce) {
+  .progress > span { animation:none; width:100%; opacity:.4; }
+  .topbar .dot { animation:none !important; }
 }
 
-.daemon-info {
-  margin: 0;
-  color: var(--ink-soft);
-  font-size: 0.85rem;
+/* — idle stage ——————————————————————————————————————————— */
+.idle { flex:1; min-height:0; overflow-y:auto; padding:64px 26px 26px; display:flex; flex-direction:column; align-items:flex-start; gap:26px; }
+.idle h1 { font-size:38px; }
+.lede { max-width:58ch; font-size:15px; line-height:1.6; color:var(--dim); }
+.idle .rule, .picks { width:100%; max-width:860px; }
+.picks { display:flex; gap:26px; flex-wrap:wrap; align-items:flex-end; }
+
+/* — banners ——————————————————————————————————————————————— */
+.banner, #note-warning {
+  flex:0 0 auto; padding:14px 26px;
+  border-bottom:2px solid var(--accent-hi);
+  background:color-mix(in srgb, var(--accent-hi) 10%, transparent);
+  font-size:13.5px; line-height:1.6;
 }
-.daemon-info.bad { color: var(--bad); }
+.banner p { color:var(--dim); margin-top:4px; max-width:70ch; }
+.banner strong { font-size:16px; font-weight:800; }
+#note-warning { border-bottom-width:1px; }
+.app[data-daemon="down"] #record, .app[data-daemon="down"] #stop, .app[data-daemon="down"] #new-note { opacity:.45; pointer-events:none; }
+.app[data-daemon="down"] #daemon-info { color:var(--accent-hi); }
 
-.tabs {
-  display: flex;
-  gap: 0.25rem;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 1.25rem;
+/* — live transcript ————————————————————————————————————— */
+#live { flex:1; min-height:0; overflow-y:auto; padding:36px 26px 26px; }
+.live-inner { max-width:74ch; }
+.live-text { margin-top:16px; font-size:19px; line-height:1.78; letter-spacing:-.005em; }
+#live-committed { color:var(--text); }
+/* committed paragraphs: stable inline nodes, each new one opening a fresh line so
+   #live-tail still flows after the last of them */
+.live-para { display:inline; }
+.live-para + .live-para::before { content:''; display:block; height:.9em; }
+#live-tail { color:var(--dim); border-bottom:1px dotted var(--faint); }
+.big-timer { font-family:var(--mono); font-size:64px; font-weight:600; line-height:1; letter-spacing:-.02em; }
+
+/* — the note ——————————————————————————————————————————— */
+.note { flex:1; min-height:0; display:flex; flex-direction:column; }
+.note-head { flex:0 0 auto; display:flex; align-items:flex-start; gap:18px 18px; flex-wrap:wrap; padding:18px 26px 14px; border-bottom:2px solid var(--rule); }
+.note-head-main { flex:1 1 320px; min-width:0; display:flex; flex-direction:column; gap:5px; }
+#note-title { font-size:27px; max-width:34ch; border-bottom:1px dashed var(--line); padding-bottom:3px; }
+#note-title:focus-visible { outline-offset:4px; }
+#note-meta { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--dim); }
+.note-head-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+#version-select { font-family:var(--mono); font-size:12px; max-width:280px; }
+
+.note-body { flex:1; min-height:0; display:flex; }
+.pane { display:flex; flex-direction:column; min-width:0; }
+.pane-note { flex:1.55; border-right:2px solid var(--rule); }
+.pane-raw { flex:1; max-width:420px; background:var(--panel); }
+.pane-head { flex:0 0 auto; display:flex; align-items:center; gap:10px; padding:10px 20px; border-bottom:1px solid var(--line); }
+/* vnote: :first-of-type counts elements of that name, so it never matched the
+   status span that follows the .micro label — both panes push from there */
+.pane-head .micro + .inline-status { margin-left:auto; }
+.pane-raw .pane-head .micro + .btn { margin-left:auto; }
+#note-editor {
+  flex:1; min-height:0; width:100%; resize:none;
+  background:var(--bg); border:0; padding:24px 22px;
+  font:400 16.5px/1.72 var(--font); color:var(--text);
 }
-
-.tab {
-  background: none;
-  border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: var(--radius) var(--radius) 0 0;
-  padding: 0.5rem 1rem;
-  margin-bottom: -1px;
-  color: var(--ink-soft);
-  font: inherit;
-  cursor: pointer;
+#note-raw {
+  flex:1; min-height:0; overflow-y:auto; padding:18px;
+  font-family:var(--mono); font-size:12.5px; line-height:1.72; color:var(--dim);
+  user-select:text; white-space:pre-wrap; overflow-wrap:break-word;
 }
-.tab:hover { color: var(--ink); }
-.tab.active {
-  background: var(--panel);
-  border-color: var(--line);
-  color: var(--ink);
-  font-weight: 600;
+#note-editor.viewing-old { color:var(--dim); }
+.note[data-raw="hidden"] .pane-raw { display:none; }
+
+/* phone tabs: markup is always there, the strip only shows at phone widths (below) */
+.note-tabs { display:none; gap:0; border-bottom:1px solid var(--line); }
+.note-tab {
+  flex:1; background:transparent; border:0; border-bottom:2px solid transparent;
+  color:var(--dim); font:800 12px/1.2 var(--font); letter-spacing:.08em; text-transform:uppercase;
+  padding:12px 8px; cursor:pointer;
 }
+.note-tab.is-active { color:var(--text); border-bottom-color:var(--accent); }
 
-/* --- generic controls --------------------------------------------------- */
+.note-foot { flex:0 0 auto; border-top:2px solid var(--rule); background:var(--panel); padding:14px 22px; display:flex; flex-direction:column; gap:12px; }
+.reprocess { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+.artefacts { display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding-top:12px; border-top:1px solid var(--line); }
+#note-audio { height:34px; width:340px; max-width:100%; }
+#note-path { border:1px solid var(--line); padding:5px 8px; font-size:11.5px; color:var(--dim); }
 
-button {
-  font: inherit;
-  padding: 0.45rem 0.9rem;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--panel);
-  color: var(--ink);
-  cursor: pointer;
+/* — settings ——————————————————————————————————————————— */
+#view-settings { flex:1; min-height:0; display:flex; flex-direction:column; }
+#view-settings .topbar .inline-status { margin-left:auto; }
+.settings-scroll { flex:1; min-height:0; overflow-y:auto; padding:22px 26px 34px; display:flex; flex-direction:column; gap:26px; }
+table.settings { width:100%; border-collapse:collapse; font-size:13.5px; }
+table.settings th {
+  text-align:left; padding:0 12px 8px 0; border-bottom:2px solid var(--rule);
+  font-size:10px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; color:var(--faint);
 }
-button:hover:not(:disabled) { border-color: var(--accent); }
-button:disabled { opacity: 0.5; cursor: default; }
+table.settings th:nth-child(1) { width:24%; } table.settings th:nth-child(3) { width:24%; } table.settings th:nth-child(4) { width:9%; }
+table.settings td { padding:13px 12px 13px 0; border-bottom:1px solid var(--line); vertical-align:top; color:var(--dim); }
+table.settings td:last-child { padding-right:0; }
+table.settings td strong { display:block; color:var(--text); font-weight:600; }
+table.settings td code { display:block; font-size:11px; color:var(--faint); }
+table.settings td select, table.settings td input { width:100%; }
+.why { display:block; font-size:11.5px; color:var(--faint); margin-top:2px; }
+.badge { font-size:9.5px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; border:1px solid var(--line); padding:2px 6px; color:var(--dim); white-space:nowrap; }
+.badge-env { border-color:var(--accent-hi); color:var(--accent-hi); }
+.vocab-block { display:flex; flex-direction:column; gap:10px; }
+.vocab-head { display:flex; align-items:baseline; gap:14px; }
+.vocab-head h2 { font-size:19px; }
+.vocab-head .btn { margin-left:auto; }
+#vocab { width:100%; height:180px; resize:vertical; font-family:var(--mono); font-size:13px; line-height:1.7; padding:14px; }
 
-input, select, textarea {
-  font: inherit;
-  color: var(--ink);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 0.4rem 0.5rem;
-  max-width: 100%;
+/* — responsive ————————————————————————————————————————— */
+/* above the overlay width, #sidebar-toggle collapses the sidebar away and pins
+   itself over the stage — the same move the off-canvas rules make below 860px */
+@media (min-width:861px) {
+  .app[data-sidebar="collapsed"] #sidebar { width:0; flex-basis:0; border-right:0; overflow:visible; }
+  .app[data-sidebar="collapsed"] #sidebar > :not(.side-head) { display:none; }
+  .app[data-sidebar="collapsed"] .side-head { border-bottom:0; padding:12px; }
+  .app[data-sidebar="collapsed"] .brand { display:none; }
+  .app[data-sidebar="collapsed"] #sidebar-toggle { position:fixed; top:12px; left:12px; z-index:21; background:var(--panel); }
+  .app[data-sidebar="collapsed"] .topbar { padding-left:52px; }
+  .app[data-sidebar="collapsed"] .note-head, .app[data-sidebar="collapsed"] .idle { padding-left:52px; }
+  /* vnote: with the top bar hidden (a note on the stage) these come first instead */
+  .app[data-sidebar="collapsed"] #process-status,
+  .app[data-sidebar="collapsed"] .banner { padding-left:52px; }
 }
-input:disabled, select:disabled, textarea:disabled {
-  opacity: 0.6;
-  cursor: default;
+/* below 1100px the raw transcript stops being a column and becomes a drawer */
+@media (max-width:1100px) {
+  .note { overflow-y:auto; }
+  .note-body { flex:0 0 auto; min-height:auto; flex-direction:column; overflow:visible; }
+  .pane-note { flex:0 0 auto; border-right:0; border-bottom:2px solid var(--rule); min-height:340px; }
+  .pane-raw { flex:0 0 auto; max-width:none; }
+  #note-editor { min-height:280px; }
+  #note-raw { max-height:240px; }
+  .note-head, .note-foot { position:static; }
 }
-textarea {
-  width: 100%;
-  resize: vertical;
-  line-height: 1.5;
-}
-
-.row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.6rem;
-  margin: 0.75rem 0;
-}
-
-.status { color: var(--ink-soft); margin: 0.5rem 0; min-height: 1.4em; }
-.status.inline { margin: 0; font-size: 0.9rem; }
-.hint { color: var(--ink-soft); font-size: 0.85rem; margin: 0.4rem 0; }
-.warning {
-  color: var(--bad);
-  border-left: 3px solid var(--bad);
-  padding-left: 0.6rem;
-  margin: 0.5rem 0;
-  font-size: 0.9rem;
-}
-.bad { color: var(--bad); }
-
-.card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 1rem;
-  margin-top: 1.25rem;
-}
-.card h2 { margin-top: 0; }
-
-/* --- record view -------------------------------------------------------- */
-
-.picks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
-  margin-bottom: 1.25rem;
-}
-
-.pick { display: flex; flex-direction: column; gap: 0.2rem; flex: 1 1 14rem; }
-.pick > span { font-size: 0.8rem; color: var(--ink-soft); text-transform: uppercase;
-               letter-spacing: 0.04em; }
-.pick select, .pick input { width: 100%; }
-.inline-pick { flex-direction: row; align-items: center; flex: 0 1 auto; }
-.inline-pick > span { text-transform: none; letter-spacing: 0; }
-
-.pick-toggle {
-  flex-direction: row;
-  align-items: center;
-  gap: 0.45rem;
-  flex: 0 1 auto;
-  align-self: flex-end;
-  padding-bottom: 0.45rem;
-  cursor: pointer;
-}
-.pick-toggle > input { width: auto; }
-.pick-toggle > span { text-transform: none; letter-spacing: 0; font-size: 0.9rem;
-                      color: var(--ink); }
-.pick-toggle > input:disabled + span { color: var(--ink-soft); cursor: default; }
-
-.recorder {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-button.big {
-  font-size: 1.15rem;
-  padding: 0.8rem 1.8rem;
-  font-weight: 600;
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-ink);
-}
-button.big:disabled { background: var(--panel); color: var(--ink); border-color: var(--line); }
-
-.timer {
-  font-variant-numeric: tabular-nums;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 1.6rem;
-  margin-left: auto;
-  color: var(--ink-soft);
-}
-
-.is-recording .timer { color: var(--rec); }
-.is-recording #rec-status { color: var(--rec); font-weight: 600; }
-.is-recording #stop { border-color: var(--rec); color: var(--rec); }
-
-.is-paused .timer { color: var(--pause); }
-.is-paused #rec-status { color: var(--pause); font-weight: 600; }
-.is-paused #pause { border-color: var(--pause); color: var(--pause); }
-
-.is-processing #rec-status { color: var(--ink-soft); font-style: italic; }
-
-/* --- live transcript ---------------------------------------------------- */
-
-.live .hint { margin-top: 0.6rem; }
-.live .row { margin-bottom: 0; }
-
-.live-pane {
-  max-height: 22rem;
-  overflow: auto;
-  overflow-wrap: break-word;
-  background: var(--code-bg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 0.75rem 0.9rem;
-  max-width: 42rem;          /* ~70-80 characters */
-}
-
-.live-committed { display: block; }
-.live-committed p { margin: 0 0 0.75rem; }
-.live-committed p:last-child { margin-bottom: 0; }
-
-/* Still being transcribed: dimmer and italic, on its own line under the settled
- * text (a separate node, so repainting it never disturbs a selection above). */
-.live-tail {
-  display: block;
-  color: var(--ink-soft);
-  font-style: italic;
-}
-.live-committed:not(:empty) + .live-tail:not(:empty) { margin-top: 0.75rem; }
-
-/* --- notes -------------------------------------------------------------- */
-
-.notes-list { list-style: none; margin: 0; padding: 0; }
-.notes-list .empty { color: var(--ink-soft); padding: 0.6rem 0; }
-
-.note-item + .note-item { border-top: 1px solid var(--line); }
-
-.note-button {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.25rem 0.75rem;
-  width: 100%;
-  text-align: left;
-  border: none;
-  border-radius: 0;
-  background: none;
-  padding: 0.6rem 0.4rem;
-}
-.note-button:hover:not(:disabled) { background: var(--panel); border-color: transparent; }
-.note-button.selected { background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); }
-.note-item-title { font-weight: 600; }
-.note-item-meta { color: var(--ink-soft); font-size: 0.85rem; margin-left: auto; }
-
-.meta { color: var(--ink-soft); font-size: 0.85rem; margin: 0 0 0.75rem; }
-
-#note-audio { width: 100%; margin-bottom: 0.75rem; }
-#note-audio[hidden] { display: none; }
-
-.grow { flex: 1 1 18rem; }
-
-.reprocess {
-  margin-top: 1rem;
-  border-top: 1px solid var(--line);
-  padding-top: 0.5rem;
-}
-.reprocess .status { margin: 0.25rem 0 0; }
-
-#note-editor.viewing-old {
-  background: var(--code-bg);
-  border-style: dashed;
-}
-
-.folder { align-items: baseline; }
-.path {
-  flex: 1 1 20rem;
-  min-width: 0;
-  background: var(--code-bg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 0.3rem 0.5rem;
-  color: var(--ink-soft);
-  word-break: break-all;
-  user-select: all;
-}
-
-#note-transcript { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: 0.75rem; }
-#note-transcript summary { cursor: pointer; color: var(--ink-soft); }
-#note-transcript pre {
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: var(--code-bg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 0.75rem;
-  margin-top: 0.6rem;
-  max-height: 24rem;
-  overflow: auto;
-}
-
-/* --- settings ----------------------------------------------------------- */
-
-.settings-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.95rem;
-}
-.settings-table th, .settings-table td {
-  text-align: left;
-  vertical-align: top;
-  padding: 0.5rem 0.6rem;
-  border-bottom: 1px solid var(--line);
-}
-.settings-table th {
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--ink-soft);
-}
-.settings-table td:first-child { white-space: nowrap; }
-.settings-table td code { background: var(--code-bg); padding: 0.1rem 0.3rem; border-radius: 4px; }
-.settings-table input, .settings-table select { width: 100%; min-width: 8rem; }
-
-.row-hint { margin: 0.3rem 0 0; font-size: 0.78rem; color: var(--ink-soft); }
-
-.badge {
-  display: inline-block;
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 0.05rem 0.5rem;
-  color: var(--ink-soft);
-}
-.badge-env { border-color: var(--pause); color: var(--pause); }
-.badge-file { border-color: var(--accent); color: var(--accent); }
-
-/* --- phone -------------------------------------------------------------- */
-
-@media (max-width: 600px) {
-  body { padding: 1rem 0.75rem 3rem; }
-  .tabs { gap: 0; }
-  .tab { flex: 1; padding: 0.5rem 0.4rem; text-align: center; }
-  .picks { flex-direction: column; gap: 0.75rem; }
-  /* the column drops the row's baseline: line the toggle up with the labels */
-  .pick-toggle { align-self: flex-start; padding-bottom: 0; }
-  .recorder { gap: 0.5rem; }
-  button.big { flex: 1 1 100%; }
-  .timer { margin-left: 0; }
-  .note-item-meta { margin-left: 0; width: 100%; }
-  .settings-table, .settings-table thead, .settings-table tbody,
-  .settings-table tr, .settings-table th, .settings-table td { display: block; }
-  .settings-table thead { display: none; }
-  .settings-table tr {
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    margin-bottom: 0.75rem;
-    padding: 0.4rem;
-    background: var(--panel);
+@media (max-width:860px) {
+  body { overflow:auto; }
+  #sidebar {
+    position:fixed; inset:0 auto 0 0; z-index:20; width:288px; flex-basis:288px;
+    transform:translateX(-100%); transition:transform .18s ease;
   }
-  .settings-table td { border-bottom: none; padding: 0.3rem 0.4rem; }
+  #sidebar[data-open="true"] { transform:none; box-shadow:0 12px 32px rgba(0,0,0,.4); }
+  #sidebar-toggle { position:fixed; top:12px; left:12px; z-index:21; background:var(--panel); }
+  .topbar { padding:10px 16px 10px 52px; }
+  .topbar-right { width:100%; margin-left:0; }
+  .idle, #live, #process-status { padding-left:16px; padding-right:16px; }
+  .idle { padding-top:24px; }
+  .idle h1 { font-size:30px; }
+  .note-head { flex-direction:column; padding:14px 16px; }
+  .note-head-actions { width:100%; }
+  #note-title { font-size:22px; }
+  .pane-head { padding:9px 16px; }
+  #note-editor { padding:16px; font-size:16px; }
+  .note-foot { padding:12px 16px; }
+  .reprocess { flex-direction:column; align-items:stretch; }
+  .reprocess .vrule { display:none; }
+  .reprocess .btn { justify-content:flex-start; padding-block:12px; }
+  /* the stacked panes become Note / Raw / Audio tabs (app.js sets both the active
+     class and .note[data-raw]; the class is what decides here) */
+  .note-tabs { display:flex; }
+  .note.tab-note .pane-raw { display:none; }
+  .note.tab-raw .pane-note { display:none; }
+  .note.tab-raw .pane-raw { display:flex; }
+  .note.tab-audio .note-body { display:none; }
+  .note:not(.tab-audio) .artefacts { display:none; }
+  /* vnote: the tab strip decides which pane is up, so Hide/Show has nothing to do */
+  #note-raw-toggle { display:none; }
+  .live-text { font-size:16.5px; }
+  .big-timer { font-size:48px; }
+  .settings-scroll { padding:16px 16px 28px; }
+  table.settings, table.settings thead { display:block; }
+  table.settings thead { display:none; }
+  table.settings tbody, table.settings tr, table.settings td { display:block; width:auto; }
+  table.settings tr { border-bottom:2px solid var(--rule); padding:12px 0; }
+  table.settings td { border:0; padding:3px 0; }
+  .btn, .icon-btn, .link-btn { min-height:44px; }
+  .btn-sm { min-height:40px; }
 }

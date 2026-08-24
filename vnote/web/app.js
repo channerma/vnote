@@ -1,54 +1,67 @@
 /* vnote web UI — vanilla JS, no build step, no external requests.
  *
- * Contract between markup (index.html, replaceable) and behaviour (this file).
- * Every id below must exist exactly once in the document.
+ * Contract between markup (index.html, the Claude Design handoff) and behaviour
+ * (this file). Every id below exists exactly once in the document.
  *
- *   Tabs / chrome
- *     #tab-record #tab-notes #tab-settings   buttons; toggle the views below
- *     #view-record #view-notes #view-settings sections; one visible at a time
- *     #daemon-info                            one line from /health
+ * State is CSS-driven: this file sets data attributes, style.css does the rest.
+ *   #app        data-view="note|settings"  data-daemon="down"  data-sidebar="collapsed"
+ *   #view-note  data-state="idle|recording|paused|processing|note"
+ *               data-live="on|off"  data-starting="true" (during a start, Stop = Cancel)
+ *   #note       data-raw="shown|hidden"    tab-note|tab-raw|tab-audio (phone tabs)
+ *   #sidebar    data-open="true|false"     (off-canvas below 860px)
  *
- *   Record view
- *     #record #pause #stop      transport buttons (#pause label: Pause/Resume,
- *                               #stop label: Stop/Cancel while starting)
- *     #timer                    "0:00" of recorded time (frozen while paused)
- *     #rec-status               ready / recording / paused / processing / error
- *     #retry                    re-send the last recording after a failed upload
- *                               (hidden otherwise, and during a recording)
+ *   Shell
+ *     #app                      the flex shell; carries view/daemon/sidebar state
+ *     #sidebar #sidebar-toggle  the history pane; the toggle collapses it
+ *     #new-note                 clears the stage back to idle
+ *     #notes-search             filters the rows by title, live
+ *     #stats-notes #stats-minutes   the stats strip ("7 notes this week", "29 min")
+ *     #notes-list               .day headers + .note-row anchors, newest first
+ *     #notes-empty              swapped with #notes-list via `hidden`
+ *     #notes-empty-dir          the daemon's notes_dir, inside that sentence
+ *     #nav-settings             toggles data-view
+ *     #daemon-info              one line from /health, or "daemon unreachable"
+ *
+ *   Stage — recording
+ *     #view-note                the stage; data-state drives every screen below
+ *     #rec-status               New note / Recording / Paused / Processing
+ *     #timer #big-timer         recorded time (frozen while paused); the big one
+ *                               is the stage when the live transcript is off
+ *     #record #pause #stop      transport (#pause: Pause/Resume, #stop: Stop/Cancel)
+ *     #live-copy #live-copy-status   copy the live text, from the top bar
+ *     #process-status           the one status line: the processing sentence, a
+ *                               live-transcript warning, a reprocess result
  *     #pick-mode                select: light edit summary dictation raw
- *     #pick-backend             select, filled from the `backend` setting
- *     #pick-language            text input, placeholder "auto"
+ *     #pick-backend             select, filled from /api/settings
+ *     #pick-language            select: the configured language, the last pick,
+ *                               the common ones, and auto
  *     #live-toggle              checkbox: stream PCM and show the transcript live
- *     #live                     container, hidden unless a live recording is
- *                               running or has just finished
+ *     #mic-help                 banner: permission denied / insecure context
+ *     #retry-wrap #retry-detail #retry   banner: a failed upload, still in this tab
+ *     #live                     the live stage (scroller)
  *     #live-committed           the settled text (one <p> per paragraph)
  *     #live-tail                <span>: the still-changing tail
- *     #live-copy #live-copy-status
- *     #result                   container, hidden until a note exists
- *     #result-title #result-text (readonly textarea) #result-warning
- *     #copy #copy-status #result-open
  *
- *   Notes view
- *     #notes-refresh #notes-list
- *     #note-detail              hidden until a note is opened
- *     #note-title #note-meta #note-audio (<audio>)
- *     #note-editor              editable textarea holding the note's Markdown
+ *   Stage — a note
+ *     #note                     the article; data-raw drives the raw drawer
+ *     #note-title               contenteditable; rewrites the note's "# " heading
+ *     #note-meta                created, duration, mode, backend, whisper, timings
+ *     #version-select #version-restore   linear history, newest first
+ *     #note-continue            disabled affordance ("Continue recording")
+ *     #note-warning             "cleanup failed — this is the raw transcript"
+ *     #note-tab-note #note-tab-raw #note-tab-audio   phone tabs over the panes
+ *     #note-editor              the note's Markdown
  *     #note-save #note-save-status    PUT the editor as a new version
  *     #note-copy #note-copy-status
- *     #regenerate-mode          select: edit light summary dictation
- *     #regenerate               re-run cleanup from the raw transcript
- *     #revise-instructions      one-line instruction for #revise (and #regenerate)
- *     #revise                   apply that instruction to the current note
- *     #process-status           shared status for #regenerate and #revise
- *     #note-versions            container; hidden when the note has no versions
- *     #version-select #version-restore   version history, newest first
- *     #note-folder              container; hidden when the note has no path
- *     #note-path #note-path-copy #note-reveal #note-path-status
- *     #note-continue            disabled affordance ("Continue recording (coming)")
- *     #note-transcript          <details> containing a <pre>
+ *     #note-raw #note-raw-copy #note-raw-status #note-raw-toggle   the transcript
+ *     #regenerate-mode #regenerate    re-run cleanup from the raw transcript
+ *     #revise-instructions #revise    apply an instruction to the current note
+ *     #note-audio               <audio>, hidden when the folder has none
+ *     #note-path #note-path-copy #note-path-status #note-reveal
  *
  *   Settings view
- *     #settings-table           <table>; this file fills its <tbody>
+ *     #view-settings            the settings screen (CSS only: data-view shows it)
+ *     #settings-table           the <tbody> this file fills
  *     #settings-save #settings-status
  *     #vocab #vocab-save #vocab-status
  */
@@ -59,7 +72,6 @@
 
 function $(id) { return document.getElementById(id); }
 
-var LS_TAB = 'vnote.tab';
 var LS_PICKS = 'vnote.picks';
 
 function lsGet(key) {
@@ -125,21 +137,40 @@ function postJSON(url, body) {
 
 function pad2(n) { return (n < 10 ? '0' : '') + n; }
 
-/* ISO string -> local "YYYY-MM-DD HH:MM" */
-function fmtCreated(iso) {
-  if (!iso) return '';
+function toDate(iso) {
+  if (!iso) return null;
   var d = new Date(iso);
-  if (isNaN(d.getTime())) return String(iso);
-  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) +
-    ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  return isNaN(d.getTime()) ? null : d;
 }
 
 /* ISO string -> local "HH:MM" */
 function fmtTime(iso) {
-  if (!iso) return '';
-  var d = new Date(iso);
-  if (isNaN(d.getTime())) return '';
-  return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  var d = toDate(iso);
+  return d ? pad2(d.getHours()) + ':' + pad2(d.getMinutes()) : '';
+}
+
+/* Local calendar day of an ISO string, as a comparable key. */
+function dayKey(iso) {
+  var d = toDate(iso);
+  if (!d) return '';
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+
+/* "Today" / "Yesterday" / "Aug 22" — the sidebar's day headers. */
+function dayLabel(iso) {
+  var d = toDate(iso);
+  if (!d) return 'Undated';
+  var today = new Date();
+  var key = dayKey(iso);
+  if (key === dayKey(today.toISOString())) return 'Today';
+  var yesterday = new Date(today.getTime());
+  yesterday.setDate(yesterday.getDate() - 1);   // not -86400000: DST days are not 24 h
+  if (key === dayKey(yesterday.toISOString())) return 'Yesterday';
+  try {
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  } catch (e) {
+    return key;
+  }
 }
 
 /* seconds -> "m:ss" */
@@ -149,7 +180,7 @@ function fmtDuration(seconds) {
   return Math.floor(total / 60) + ':' + pad2(total % 60);
 }
 
-/* Transient status text ("copied", "saved", …) */
+/* Transient status text ("copied", "saved 14:33", …) */
 var flashTimers = {};
 function flash(el, text, ms) {
   if (!el) return;
@@ -196,49 +227,145 @@ function copyFallback(text) {
   return ok;
 }
 
-/* --------------------------------------------------------------------- tabs */
+function el(tag, className, text) {
+  var node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
 
-var TABS = [
-  { name: 'record', tab: 'tab-record', view: 'view-record' },
-  { name: 'notes', tab: 'tab-notes', view: 'view-notes' },
-  { name: 'settings', tab: 'tab-settings', view: 'view-settings' }
-];
+/* -------------------------------------------------------------- shell state
+ *
+ * The four attributes below are the whole navigation model: there are no tabs
+ * and nothing is shown or hidden from here beyond them and the `hidden` flags.
+ */
 
-var notesLoaded = false;
 var vocabLoaded = false;
-var currentTab = null;
 
-function showTab(name) {
-  var known = false;
-  TABS.forEach(function (t) { if (t.name === name) known = true; });
-  if (!known) name = 'record';
-
-  TABS.forEach(function (t) {
-    var active = t.name === name;
-    var tabEl = $(t.tab);
-    var viewEl = $(t.view);
-    if (tabEl) {
-      tabEl.classList.toggle('active', active);
-      tabEl.setAttribute('aria-selected', active ? 'true' : 'false');
-    }
-    if (viewEl) viewEl.hidden = !active;
-  });
-  lsSet(LS_TAB, name);
-  currentTab = name;
-
-  if (name === 'notes' && !notesLoaded) {
-    notesLoaded = true;
-    loadNotes();
-  }
-  if (name === 'settings' && !vocabLoaded) {
+function setView(name) {
+  var view = name === 'settings' ? 'settings' : 'note';
+  $('app').dataset.view = view;
+  if (view === 'settings' && !vocabLoaded) {
     vocabLoaded = true;
     loadVocab();
   }
 }
 
+function currentView() { return $('app').dataset.view === 'settings' ? 'settings' : 'note'; }
+
+var stage = 'idle';   // data-state on #view-note
+
+var STAGE_LABEL = {
+  idle: 'New note', recording: 'Recording', paused: 'Paused',
+  processing: 'Processing', note: 'Note'
+};
+
+function setStage(name) {
+  stage = name;
+  $('view-note').dataset.state = name;
+  $('rec-status').textContent = STAGE_LABEL[name] || name;
+}
+
+/* The live pane or the big timer, decided per take (a take that fell back to
+ * MediaRecorder has no live text, whatever the toggle says). */
+function setLiveView(on) {
+  $('view-note').dataset.live = on ? 'on' : 'off';
+}
+
+function narrow() {
+  try {
+    return !!(window.matchMedia && window.matchMedia('(max-width: 860px)').matches);
+  } catch (e) {
+    return false;
+  }
+}
+
+/* Below 860px the sidebar is an overlay (data-open); above it, a column the
+ * toggle collapses away (data-sidebar). */
+function toggleSidebar() {
+  if (narrow()) {
+    var side = $('sidebar');
+    side.dataset.open = side.dataset.open === 'true' ? 'false' : 'true';
+  } else {
+    var app = $('app');
+    if (app.dataset.sidebar === 'collapsed') delete app.dataset.sidebar;
+    else app.dataset.sidebar = 'collapsed';
+  }
+  syncSidebarToggle();
+}
+
+/* The one button for both moves, so it has to say which one it is about to make.
+ * "Expanded" is "the sidebar is on screen", overlay or column. */
+function syncSidebarToggle() {
+  var open = narrow() ? $('sidebar').dataset.open === 'true'
+                      : $('app').dataset.sidebar !== 'collapsed';
+  var btn = $('sidebar-toggle');
+  var label = open ? 'Hide sidebar' : 'Show sidebar';
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  btn.setAttribute('aria-label', label);
+  btn.title = label;
+}
+
+function closeSidebarOverlay() {
+  if (!narrow()) return;
+  $('sidebar').dataset.open = 'false';
+  syncSidebarToggle();
+}
+
+function daemonIsDown() { return $('app').dataset.daemon === 'down'; }
+
+/* --------------------------------------------------------------- daemon health */
+
+var HEALTH_POLL_MS = 5000;
+
+function daemonUp(health) {
+  delete $('app').dataset.daemon;
+  $('daemon-info').textContent =
+    'vnote ' + (health.version || '?') + ' · ' +
+    (health.whisper_model || '?') + ' on ' + (health.device || '?');
+  syncRecordEnabled();
+}
+
+/* Quietly: a daemon that is down is polled every 5 s, and nothing is logged.
+ * Never while a take runs: the attribute takes the pointer off #stop, and a daemon
+ * restarted mid-recording would leave the take with no way to end. The next poll
+ * after it ends sets it if the daemon is still gone. */
+function daemonDown() {
+  if (takeActive()) return;
+  $('app').dataset.daemon = 'down';
+  $('daemon-info').textContent = 'daemon unreachable';
+  syncRecordEnabled();
+}
+
+/* CSS already stops the pointer on #record / #stop / #new-note while the daemon
+ * is down; this keeps the keyboard honest too. */
+function syncRecordEnabled() {
+  if (!takeActive()) $('record').disabled = daemonIsDown();
+}
+
+/* Notes are also created outside this page (the tray, the CLI). Refresh the list
+ * whenever nothing here would be disturbed by it. */
+function refreshNotesIfIdle() {
+  if (daemonIsDown() || takeActive() || isDirty()) return;
+  loadNotes();
+}
+
+var healthTicks = 0;
+var NOTES_REFRESH_POLLS = 6;   // every 6th health poll, i.e. ~30 s
+
+async function checkHealth() {
+  try {
+    daemonUp(await getJSON('/health'));
+  } catch (e) {
+    daemonDown();
+  }
+  healthTicks += 1;
+  if (healthTicks % NOTES_REFRESH_POLLS === 0) refreshNotesIfIdle();
+}
+
 /* --------------------------------------------------------------------- boot */
 
-var settingsRows = [];   // [{setting, control}]
+var settingsRows = [];   // [{setting, control}] — control null for read-only rows
 var backendChoices = [];
 
 function readPicks() {
@@ -279,32 +406,77 @@ function findSetting(settings, key) {
   return null;
 }
 
+function settingValue(settings, key) {
+  var s = findSetting(settings, key);
+  return s && s.value !== null && s.value !== undefined ? String(s.value) : '';
+}
+
+/* "ollama · qwen2.5:14b" — the design's backend label; claude-code brings its own
+ * model choice, so it stays bare. */
+function backendLabel(settings, name) {
+  var model = '';
+  if (name === 'ollama') model = settingValue(settings, 'ollama_model');
+  else if (name === 'claude') model = settingValue(settings, 'claude_model');
+  return model ? name + ' · ' + model : name;
+}
+
+function addOption(sel, value, label) {
+  var opt = document.createElement('option');
+  opt.value = value;
+  opt.textContent = label;
+  sel.appendChild(opt);
+  return opt;
+}
+
+/* The languages the picker offers beyond the configured one: whisper takes many
+ * more, but a per-recording pick is a short list, not a catalogue. */
+var COMMON_LANGUAGES = ['en', 'de', 'fr', 'es', 'it', 'pt', 'nl', 'pl', 'sv', 'ru', 'ja', 'zh', 'ko'];
+
 function applySettingsToPicks(settings) {
+  // localStorage wins over the daemon's defaults, and its language is in the list.
+  var picks = readPicks();
+
   var backend = findSetting(settings, 'backend');
   var backendSel = $('pick-backend');
   backendSel.innerHTML = '';
   backendChoices = (backend && backend.choices) ? backend.choices.slice() : [];
   if (!backendChoices.length && backend && backend.value) backendChoices = [backend.value];
   backendChoices.forEach(function (choice) {
-    var opt = document.createElement('option');
-    opt.value = choice;
-    opt.textContent = choice;
-    backendSel.appendChild(opt);
+    addOption(backendSel, choice, backendLabel(settings, choice));
   });
   if (backend) selectIfPresent(backendSel, backend.value);
 
   var mode = findSetting(settings, 'default_mode');
   if (mode) selectIfPresent($('pick-mode'), mode.value);
 
-  var lang = findSetting(settings, 'language');
-  if (lang && lang.value) $('pick-language').value = lang.value;
+  // "Everything stays in <notes_dir> on this machine" — the markup's fallback text
+  // stands when the daemon does not say where that is.
+  var notesDir = settingValue(settings, 'notes_dir').trim();
+  if (notesDir) $('notes-empty-dir').textContent = notesDir;
 
-  // localStorage wins over the daemon's defaults.
-  var picks = readPicks();
+  // The configured language leads (it is what Settings would use), then whatever
+  // was picked last, then the common ones, then auto.
+  var langSel = $('pick-language');
+  var lang = settingValue(settings, 'language').trim();
+  langSel.innerHTML = '';
+  var listed = [];   // an array, not a lookup object: a code is not a property name
+  function addLanguage(code, label) {
+    code = String(code || '').trim();
+    if (!code || listed.indexOf(code) !== -1) return;
+    listed.push(code);
+    addOption(langSel, code, label || code);
+  }
+  if (lang) addLanguage(lang, lang + ' (settings)');
+  if (picks) addLanguage(picks.language);
+  COMMON_LANGUAGES.forEach(function (code) { addLanguage(code); });
+  addOption(langSel, '', 'auto');
+  langSel.value = lang;          // no configured language: auto
+
   if (picks) {
     selectIfPresent($('pick-mode'), picks.mode);
     selectIfPresent($('pick-backend'), picks.backend);
-    if (typeof picks.language === 'string') $('pick-language').value = picks.language;
+    if (picks.language === '') langSel.value = '';
+    else selectIfPresent(langSel, picks.language);
   }
 }
 
@@ -313,16 +485,9 @@ async function boot() {
   var settingsPromise = getJSON('/api/settings');
 
   try {
-    var health = await healthPromise;
-    $('daemon-info').textContent =
-      'vnote ' + (health.version || '?') + ' · ' +
-      (health.whisper_model || '?') + ' on ' + (health.device || '?');
+    daemonUp(await healthPromise);
   } catch (e) {
-    $('daemon-info').textContent = 'daemon unreachable — ' + errText(e);
-    $('daemon-info').classList.add('bad');
-    $('record').dataset.blocked = '1';   // keeps setTransport() from re-enabling it
-    $('record').disabled = true;
-    $('rec-status').textContent = 'daemon unreachable';
+    daemonDown();
   }
 
   try {
@@ -331,8 +496,11 @@ async function boot() {
     applySettingsToPicks(settings);
     renderSettings(settings);
   } catch (e) {
+    // 'edit' is the daemon's built-in default; without this the first option
+    // ('light') would silently become the one this recording uses.
+    selectIfPresent($('pick-mode'), 'edit');
     $('settings-status').textContent = errText(e);
-    var tbody = $('settings-table').querySelector('tbody');
+    var tbody = $('settings-table');
     tbody.innerHTML = '';
     var tr = document.createElement('tr');
     var td = document.createElement('td');
@@ -341,6 +509,8 @@ async function boot() {
     tr.appendChild(td);
     tbody.appendChild(tr);
   }
+
+  await loadNotes();
 }
 
 /* ---------------------------------------------------------------- recording */
@@ -359,7 +529,7 @@ var recStarting = false;   // covers the whole start: getUserMedia, /stream/star
 var recCancelled = false;  // Stop pressed while still starting
 /* What #retry would send: {blob, format} from the MediaRecorder path, or {pcm:
  * [Uint8Array, …]} — the live path's safety copy, turned into a WAV on the click.
- * null means there is nothing to retry and the button stays hidden. */
+ * null means there is nothing to retry and the banner stays hidden. */
 var lastUpload = null;
 var recMime = '';
 var recElapsedMs = 0;      // accumulated recorded time (excludes pauses)
@@ -393,16 +563,18 @@ function liveSupported() {
 /* The toggle is a pick like the others (remembered in localStorage), except that a
  * browser without AudioWorklet pins it off. Default on where it works. */
 function initLiveToggle() {
-  var el = $('live-toggle');
+  var elx = $('live-toggle');
   liveAvailable = liveSupported();
   if (!liveAvailable) {
-    el.checked = false;
-    el.disabled = true;
-    el.title = 'not supported in this browser';
+    elx.checked = false;
+    elx.disabled = true;
+    elx.title = 'not supported in this browser';
+    setLiveView(false);
     return;
   }
   var picks = readPicks();
-  el.checked = (picks && typeof picks.live === 'boolean') ? picks.live : true;
+  elx.checked = (picks && typeof picks.live === 'boolean') ? picks.live : true;
+  setLiveView(elx.checked);
 }
 
 function pickMimeType() {
@@ -437,6 +609,12 @@ function capturePaused() {
   return !!recorder && recorder.state === 'paused';
 }
 
+/* The stage belongs to a take: New note and the history rows keep their hands off. */
+function takeActive() {
+  return recStarting || !!live || !!recorder ||
+    stage === 'recording' || stage === 'paused' || stage === 'processing';
+}
+
 function recordedMs() {
   var ms = recElapsedMs;
   if (capturing()) ms += performance.now() - recSegmentStart;
@@ -444,7 +622,9 @@ function recordedMs() {
 }
 
 function paintTimer() {
-  $('timer').textContent = fmtDuration(recordedMs() / 1000);
+  var text = fmtDuration(recordedMs() / 1000);
+  $('timer').textContent = text;
+  $('big-timer').textContent = text;
 }
 
 function startTicker() {
@@ -457,33 +637,63 @@ function stopTicker() {
   recTicker = null;
 }
 
+/* The one status line under the top bar. CSS shows it in any state as long as it
+ * has something to say. */
+function say(text) { $('process-status').textContent = text || ''; }
+
+function showMicHelp(on) { $('mic-help').hidden = !on; }
+
+/* The failed-upload banner. `lastUpload` decides whether it can be shown at all;
+ * setTransport() owns `hidden`, so the honest detail is all that is set here. */
+function retryDetail(text) { $('retry-detail').textContent = text || ''; }
+
+/* Only the microphone banner: #retry-wrap belongs to `lastUpload`, and that is the
+ * tab's only copy of a recording the daemon never got. setTransport() owns whether
+ * it is on screen; a successful upload — or New note, which asks first — clears it. */
+function clearBanners() {
+  showMicHelp(false);
+}
+
 /* States: ready, starting (microphone/session being opened — Stop cancels),
- * recording, paused, processing. */
+ * recording, paused, processing. Ready leaves an open note on the stage. */
 function setTransport(state) {
   var recording = state === 'recording';
   var paused = state === 'paused';
   var busy = state === 'processing';
   var starting = state === 'starting';
   var active = recording || paused || busy || starting;
+  var view = $('view-note');
 
-  $('record').disabled = active || $('record').dataset.blocked === '1';
+  $('record').disabled = active || daemonIsDown();
   $('pause').disabled = !(recording || paused);
   $('stop').disabled = !(recording || paused || starting);
-  $('pause').textContent = paused ? '▶ Resume' : '⏸ Pause';
-  $('stop').textContent = starting ? '■ Cancel' : '■ Stop';
+  $('pause').textContent = paused ? 'Resume' : 'Pause';
+  $('stop').textContent = starting ? 'Cancel' : 'Stop';
 
   // Retrying mid-take would upload one recording while another runs.
-  $('retry').hidden = !lastUpload || active;
-  $('retry').disabled = $('retry').hidden;
+  var offerRetry = !!lastUpload && !active;
+  $('retry-wrap').hidden = !offerRetry;
+  $('retry').disabled = !offerRetry;
+  // …and the live text the user was watching stays on the stage until it is gone
+  // (CSS: the idle stage hides #live and the Copy button otherwise).
+  if (offerRetry) view.dataset.retry = 'true';
+  else delete view.dataset.retry;
 
   ['pick-mode', 'pick-backend', 'pick-language'].forEach(function (id) {
     $(id).disabled = active;
   });
   $('live-toggle').disabled = active || !liveAvailable;
 
-  document.body.classList.toggle('is-recording', recording);
-  document.body.classList.toggle('is-paused', paused);
-  document.body.classList.toggle('is-processing', busy);
+  if (starting) {
+    setStage('idle');
+    view.dataset.starting = 'true';
+  } else {
+    delete view.dataset.starting;
+    if (recording) setStage('recording');
+    else if (paused) setStage('paused');
+    else if (busy) setStage('processing');
+    else if (stage !== 'note') setStage('idle');
+  }
 }
 
 function releaseStream() {
@@ -497,7 +707,7 @@ function releaseStream() {
 
 function noMediaRecorder() {
   releaseStream();
-  $('rec-status').textContent = 'this browser has no MediaRecorder — recording is not possible';
+  say('this browser has no MediaRecorder — recording is not possible');
   setTransport('ready');
 }
 
@@ -507,21 +717,22 @@ function startCancelled() {
   recCancelled = false;
   recStarting = false;
   releaseStream();
-  $('rec-status').textContent = 'ready';
+  say('');
   setTransport('ready');
   return true;
 }
 
+/* Record: the idle stage becomes a take. */
 async function startRecording() {
+  if (daemonIsDown()) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    $('rec-status').textContent =
-      'Microphone access needs a secure context — open this page at ' +
-      'http://localhost:8760 or http://127.0.0.1:8760';
+    showMicHelp(true);
+    say('the browser exposes no microphone API here — a secure context is required');
     return;
   }
   var wantLive = liveAvailable && $('live-toggle').checked;
   if (!wantLive && typeof MediaRecorder === 'undefined') {
-    $('rec-status').textContent = 'this browser has no MediaRecorder — recording is not possible';
+    say('this browser has no MediaRecorder — recording is not possible');
     return;
   }
 
@@ -530,19 +741,23 @@ async function startRecording() {
   recStarting = true;
   recCancelled = false;
   liveFallbackReason = '';
+  clearBanners();
+  closeNote();
   setTransport('starting');   // Stop is live from here on: it cancels the start
-  $('rec-status').textContent = 'requesting the microphone…';
+  say('requesting the microphone…');
   try {
     recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) {
     recStarting = false;
-    $('rec-status').textContent = 'microphone unavailable — ' + errText(e);
+    showMicHelp(true);
+    say('microphone unavailable — ' + errText(e));
     setTransport('ready');
     return;
   }
   if (startCancelled()) return;
 
-  resetLivePane(wantLive);
+  resetLivePane();
+  setLiveView(wantLive);
   if (wantLive) {
     var started = await startLive();
     recStarting = false;
@@ -550,7 +765,7 @@ async function startRecording() {
       if (recCancelled) { recCancelled = false; cancelLive(); }
       return;
     }
-    resetLivePane(false);      // this take has no live text: don't show an empty pane
+    setLiveView(false);        // this take has no live text: the big timer is the stage
     if (startCancelled()) return;
     if (typeof MediaRecorder === 'undefined') return noMediaRecorder();
     // startLive() left the reason in liveFallbackReason; MediaRecorder takes over
@@ -566,7 +781,7 @@ function startMediaRecorder() {
                     : new MediaRecorder(recStream);
   } catch (e) {
     releaseStream();
-    $('rec-status').textContent = 'could not start the recorder — ' + errText(e);
+    say('could not start the recorder — ' + errText(e));
     setTransport('ready');
     return;
   }
@@ -584,7 +799,7 @@ function startMediaRecorder() {
     stopTicker();
     releaseStream();
     recorder = null;
-    $('rec-status').textContent = 'recording error — ' + errText(err);
+    say('recording error — ' + errText(err));
     setTransport('ready');
   };
   recorder.onstop = function () {
@@ -603,7 +818,7 @@ function startMediaRecorder() {
   } catch (e) {
     releaseStream();
     recorder = null;
-    $('rec-status').textContent = 'could not start the recorder — ' + errText(e);
+    say('could not start the recorder — ' + errText(e));
     setTransport('ready');
     return;
   }
@@ -611,15 +826,15 @@ function startMediaRecorder() {
   paintTimer();
   startTicker();
   setTransport('recording');
-  $('rec-status').textContent = recordingStatus();
+  say(recordingNote());
 }
 
 /* Don't paper over a live-transcript failure: while a fallback take runs, the
  * status line keeps saying why the live pane is missing. */
-function recordingStatus() {
+function recordingNote() {
   return liveFallbackReason
-    ? 'recording — live transcript unavailable (' + liveFallbackReason + ')'
-    : 'recording';
+    ? 'live transcript unavailable (' + liveFallbackReason + ') — recording without it'
+    : '';
 }
 
 function togglePause() {
@@ -631,20 +846,18 @@ function togglePause() {
     stopTicker();
     paintTimer();
     setTransport('paused');
-    $('rec-status').textContent = 'paused';
   } else if (recorder.state === 'paused') {
     recSegmentStart = performance.now();
     try { recorder.resume(); } catch (e) { /* unsupported */ }
     startTicker();
     setTransport('recording');
-    $('rec-status').textContent = recordingStatus();
   }
 }
 
 function stopRecording() {
   if (recStarting) {          // nothing to stop yet: startRecording() unwinds instead
     recCancelled = true;
-    $('rec-status').textContent = 'cancelling…';
+    say('cancelling…');
     return;
   }
   if (live) return stopLive();
@@ -652,15 +865,24 @@ function stopRecording() {
   if (recorder.state === 'recording') recElapsedMs += performance.now() - recSegmentStart;
   stopTicker();
   setTransport('processing');
-  $('rec-status').textContent = 'finishing the recording…';
+  say(processingCopy());
   try {
     recorder.stop();   // the rest happens in recorder.onstop
   } catch (e) {
     releaseStream();
     recorder = null;
-    $('rec-status').textContent = 'could not stop the recorder — ' + errText(e);
+    say('could not stop the recorder — ' + errText(e));
     setTransport('ready');
   }
+}
+
+/* The design's processing sentence: no honest percentage exists, so it says what
+ * is happening and how long it usually takes. */
+function processingCopy() {
+  var mode = $('pick-mode').value;
+  var what = mode === 'raw' ? 'no cleanup' : 'then cleaning with ' + mode;
+  return 'Transcribing ' + fmtDuration(recordedMs() / 1000) + ' of audio, ' + what +
+    ' — usually 20–40 s.';
 }
 
 function noteQuery(format) {
@@ -679,20 +901,19 @@ function noteQuery(format) {
     add('mode', mode);
     add('backend', backend);
   }
-  add('language', language || 'auto');  // blank field = auto-detect, even if a language is saved in settings
+  add('language', language || 'auto');  // blank pick = auto-detect, even if a language is saved in settings
   return params.length ? '?' + params.join('&') : '';
 }
 
 async function uploadRecording(blob, format) {
   if (!blob || blob.size === 0) {
-    $('rec-status').textContent = 'nothing was recorded';
+    say('nothing was recorded');
     setTransport('ready');
     return;
   }
 
   setTransport('processing');
-  $('rec-status').textContent =
-    'processing… transcribing, then cleaning — this can take a minute; no progress is reported';
+  say(processingCopy());
 
   try {
     var data = await api('/api/note' + noteQuery(format), {
@@ -701,31 +922,29 @@ async function uploadRecording(blob, format) {
       body: blob
     });
     lastUpload = null;
-    showResult(data);
-    $('rec-status').textContent = 'ready';
+    retryDetail('');
+    await showResult(data);
   } catch (e) {
     lastUpload = { blob: blob, format: format };  // the browser holds the only copy until the daemon has it
-    $('rec-status').textContent = errText(e) + ' — the recording is still here: Retry upload, or Record to start over';
+    retryDetail(errText(e) + '.');
+    say('');
   } finally {
-    setTransport('ready');   // and with it #retry, from lastUpload
+    setTransport('ready');   // and with it the retry banner, from lastUpload
   }
 }
 
-function showResult(data) {
+/* The note reply: open it on the stage exactly as the sidebar would. */
+async function showResult(data) {
   lastNoteName = data.name || null;
-  $('result-title').textContent = data.title || data.name || 'note';
-  $('result-text').value = data.note || data.transcript || '';
-  var warn = $('result-warning');
-  if (data.cleanup_error) {
-    warn.textContent = 'cleanup failed — this is the raw transcript: ' + data.cleanup_error;
-    warn.hidden = false;
-  } else {
-    warn.textContent = '';
-    warn.hidden = true;
+  if (!lastNoteName) {
+    say('the daemon returned a note without a name — it is on disk, but cannot be opened here');
+    return;
   }
-  $('result-open').disabled = !lastNoteName;
-  $('result').hidden = false;
-  notesLoaded = false;   // the list is stale now
+  await loadNotes();
+  await loadNote(lastNoteName);   // not openNote(): this take owns the stage already
+  if (data.cleanup_error && currentNote && currentNote.name === lastNoteName) {
+    say('cleanup failed — this is the raw transcript: ' + data.cleanup_error);
+  }
 }
 
 /* ---------------------------------------------------------- live transcript
@@ -741,17 +960,16 @@ function showResult(data) {
  * #retry wraps the safety copy in a WAV header and uploads it as a normal note.
  */
 
-/* Clear the pane; `visible` keeps it on screen for a live recording. */
-function resetLivePane(visible) {
+/* Clear the pane. Whether it is on screen is data-state's business, not ours. */
+function resetLivePane() {
   liveParas = [];
   liveTail = '';
   $('live-committed').textContent = '';
   $('live-tail').textContent = '';
-  $('live').hidden = !visible;
 }
 
-/* The scroller around the text; no id of its own. */
-function livePane() { return $('live-committed').parentNode; }
+/* The scroller around the live text. */
+function livePane() { return $('live'); }
 
 function liveAtBottom() {
   var pane = livePane();
@@ -777,7 +995,6 @@ function committedParagraphs(committed) {
  * the ones that actually changed are replaced, so a selection over the text above
  * them survives every update. */
 function renderLive(data) {
-  $('live').hidden = false;
   var atBottom = liveAtBottom();
 
   var paras = committedParagraphs(data && data.committed);
@@ -789,7 +1006,10 @@ function renderLive(data) {
   if (first < liveParas.length || paras.length !== liveParas.length) {
     while (box.children.length > first) box.removeChild(box.lastChild);
     for (var i = first; i < paras.length; i++) {
-      var p = document.createElement('p');
+      // a span, not a <p>: #live-committed is inline inside .live-text, and the
+      // tail has to keep flowing after the last paragraph (.live-para in the CSS)
+      var p = document.createElement('span');
+      p.className = 'live-para';
       p.textContent = paras[i];
       box.appendChild(p);
     }
@@ -814,7 +1034,7 @@ function liveText() {
   return committed ? committed + ' ' + liveTail : liveTail;
 }
 
-/* Blank language field = auto-detect, as in noteQuery(). */
+/* Blank language pick = auto-detect, as in noteQuery(). */
 function liveLanguage() {
   var language = $('pick-language').value.trim();
   return language ? language : null;
@@ -840,11 +1060,10 @@ function finishQuery(sid) {
 }
 
 /* Returns true once PCM is flowing; false means "fall back to MediaRecorder",
- * with the reason in liveFallbackReason (and in #rec-status meanwhile). */
+ * with the reason in liveFallbackReason (and in the status line meanwhile). */
 function liveUnavailable(reason) {
   liveFallbackReason = reason;
-  $('rec-status').textContent =
-    'live transcript unavailable — recording without it (' + reason + ')';
+  say('live transcript unavailable — recording without it (' + reason + ')');
   return false;
 }
 
@@ -923,7 +1142,7 @@ async function startLive() {
   paintTimer();
   startTicker();
   setTransport('recording');
-  $('rec-status').textContent = 'recording';
+  say('');
   return true;
 }
 
@@ -933,7 +1152,7 @@ function liveNoAudio(session) {
   session.watchdog = null;
   if (live !== session || session.gotPcm || session.stopping) return;
   session.silentWarned = true;
-  $('rec-status').textContent = 'live transcript: no audio is arriving from the microphone';
+  say('no audio is arriving from the microphone');
 }
 
 /* Best effort: drop a session we started but whose audio we no longer want.
@@ -953,8 +1172,8 @@ function cancelLive() {
   stopTicker();
   recElapsedMs = 0;
   paintTimer();
-  resetLivePane(false);
-  $('rec-status').textContent = 'ready';
+  resetLivePane();
+  say('');
   setTransport('ready');
 }
 
@@ -972,9 +1191,7 @@ function onLivePcm(session, data) {
       session.gotPcm = true;
       if (session.silentWarned) {       // audio after all: take the warning back
         session.silentWarned = false;
-        if (live === session && !session.stopping) {
-          $('rec-status').textContent = session.state === 'paused' ? 'paused' : 'recording';
-        }
+        if (live === session && !session.stopping) say('');
       }
     }
   }
@@ -1027,9 +1244,8 @@ function liveSessionLost(session, e) {
   teardownLive(session);
   releaseStream();
   lastUpload = { pcm: session.all };
-  $('rec-status').textContent =
-    'the daemon lost this live session (' + errText(e) + ') — ' +
-    'Retry uploads the recording it has kept in this tab';
+  retryDetail('The daemon lost this live session (' + errText(e) + ').');
+  say('');
   setTransport('ready');
 }
 
@@ -1055,7 +1271,7 @@ function pumpLive(session) {
       renderLive(data);
       if (session.warned) {
         session.warned = false;
-        $('rec-status').textContent = session.state === 'paused' ? 'paused' : 'recording';
+        say('');
       }
     } catch (e) {
       if (live !== session) return;
@@ -1067,8 +1283,7 @@ function pumpLive(session) {
         session.retryAt = performance.now() + Math.min(backoff, LIVE_BACKOFF_MAX_MS);
         if (!session.warned) {
           session.warned = true;
-          $('rec-status').textContent =
-            'still recording — the live transcript stopped updating (' + errText(e) + ')';
+          say('still recording — the live transcript stopped updating (' + errText(e) + ')');
         }
       }
     } finally {
@@ -1101,7 +1316,6 @@ function toggleLivePause() {
     paintTimer();
     startLivePing(session);              // a long pause must not expire the session
     setTransport('paused');
-    $('rec-status').textContent = 'paused';
   } else if (session.state === 'paused') {
     recSegmentStart = performance.now();
     session.state = 'recording';
@@ -1109,7 +1323,6 @@ function toggleLivePause() {
     stopLivePing(session);
     startTicker();
     setTransport('recording');
-    $('rec-status').textContent = 'recording';
   }
 }
 
@@ -1206,7 +1419,7 @@ async function stopLive() {
   paintTimer();
   stopLivePing(session);
   setTransport('processing');
-  $('rec-status').textContent = 'finishing the recording…';
+  say(processingCopy());
 
   await flushWorklet(session);
   if (session.inflight) { try { await session.inflight; } catch (e) { /* reported already */ } }
@@ -1240,29 +1453,25 @@ async function stopLive() {
   if (unsent) {
     var missing = Math.max(0, Math.round(recordedMs() / 1000 - (session.seconds || 0)));
     lastUpload = { pcm: session.all };
-    $('rec-status').textContent =
-      'the daemon did not receive the last ' + missing + ' s (' + errText(unsent) + ') — ' +
-      'Retry uploads the recording this tab kept';
+    retryDetail('The daemon did not receive the last ' + missing + ' s (' + errText(unsent) + ').');
+    say('');
     setTransport('ready');
     return;
   }
 
-  $('rec-status').textContent =
-    'processing… transcribing the whole recording in one pass, then cleaning — ' +
-    'the live text below is copyable meanwhile';
   try {
     var data = await api('/stream/finish' + finishQuery(session.sid), { method: 'POST' });
     lastUpload = null;
-    showResult(data);
-    $('rec-status').textContent = 'ready';
+    retryDetail('');
+    await showResult(data);
   } catch (e) {
     var kept = (e && e.data) ? e.data.audio_kept : null;
     if (kept) {
-      $('rec-status').textContent = errText(e) + ' — the daemon kept the audio: ' + kept;
+      say(errText(e) + ' — the daemon kept the audio: ' + kept);
     } else {
       lastUpload = { pcm: session.all };   // this tab holds the only copy left
-      $('rec-status').textContent =
-        errText(e) + ' — Retry uploads the recording this tab kept';
+      retryDetail(errText(e) + '.');
+      say('');
     }
   } finally {
     setTransport('ready');
@@ -1271,8 +1480,11 @@ async function stopLive() {
 
 /* -------------------------------------------------------------------- notes */
 
+var allNotes = [];          // the last /api/notes payload, newest first
 var currentNote = null;     // the last /api/notes/<name> payload
 var loadedText = '';        // #note-editor as it was loaded — the dirty baseline
+var titleEditable = false;  // false for a note with no "# " heading (dictation)
+var haveVersions = false;
 var viewingVersion = null;  // n while an older version is previewed, else null
 var processing = false;     // a write (save/restore/regenerate/revise) is in flight
 var noteGeneration = 0;     // bumped by loadNote(); see noteToken()
@@ -1289,71 +1501,99 @@ function stillCurrent(token) {
     !!currentNote && !!token.name && currentNote.name === token.name;
 }
 
-async function loadNotes(openName) {
+function sideNote(text, bad) {
   var list = $('notes-list');
   list.innerHTML = '';
-  var li = document.createElement('li');
-  li.className = 'empty';
-  li.textContent = 'loading…';
-  list.appendChild(li);
+  list.appendChild(el('div', bad ? 'side-note bad' : 'side-note', text));
+  $('notes-list').hidden = false;
+  $('notes-empty').hidden = true;
+}
+
+async function loadNotes() {
+  if (!allNotes.length) sideNote('loading…');
 
   var notes;
   try {
     var data = await getJSON('/api/notes');
     notes = (data && data.notes) || [];
   } catch (e) {
-    list.innerHTML = '';
-    var err = document.createElement('li');
-    err.className = 'empty bad';
-    err.textContent = errText(e);
-    list.appendChild(err);
-    notesLoaded = false;   // try again next time the tab is shown
+    allNotes = [];
+    sideNote(errText(e), true);
+    renderStats([]);
     return;
   }
 
-  notesLoaded = true;
-  renderNotes(notes);
-  if (openName) await openNote(openName);
+  allNotes = notes;
+  renderStats(notes);
+  renderNotes(filteredNotes());
+}
+
+function filteredNotes() {
+  var q = $('notes-search').value.trim().toLowerCase();
+  if (!q) return allNotes;
+  return allNotes.filter(function (n) {
+    return String(n.title || n.name || '').toLowerCase().indexOf(q) !== -1;
+  });
+}
+
+/* "7 notes this week · 29 min" — from the whole list, not the filtered view. */
+function renderStats(notes) {
+  var since = Date.now() - 7 * 86400000;
+  var count = 0;
+  var seconds = 0;
+  notes.forEach(function (n) {
+    var d = toDate(n.created);
+    if (!d || d.getTime() < since) return;
+    count += 1;
+    if (n.duration_s) seconds += Number(n.duration_s) || 0;
+  });
+  $('stats-notes').textContent = count + (count === 1 ? ' note this week' : ' notes this week');
+  $('stats-minutes').textContent = Math.round(seconds / 60) + ' min';
+}
+
+function noteRow(n) {
+  var row = el('a', 'note-row');
+  row.setAttribute('href', '#');
+  row.dataset.name = n.name;
+  row.appendChild(el('span', 'note-row-title', n.title || n.name));
+
+  var meta = el('span', 'note-row-meta');
+  meta.appendChild(el('span', null, fmtTime(n.created)));
+  var duration = fmtDuration(n.duration_s);
+  if (duration) meta.appendChild(el('span', null, duration));
+  meta.appendChild(el('span', 'tag', n.mode || 'raw'));
+  row.appendChild(meta);
+
+  row.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    closeSidebarOverlay();
+    openNote(n.name);
+  });
+  return row;
 }
 
 function renderNotes(notes) {
   var list = $('notes-list');
   list.innerHTML = '';
 
+  var empty = !allNotes.length;
+  $('notes-empty').hidden = !empty;
+  list.hidden = empty;
+  if (empty) return;
+
   if (!notes.length) {
-    var empty = document.createElement('li');
-    empty.className = 'empty';
-    empty.textContent = 'no notes yet';
-    list.appendChild(empty);
+    list.appendChild(el('div', 'side-note', 'no note matches that.'));
     return;
   }
 
+  var day = null;
   notes.forEach(function (n) {
-    var li = document.createElement('li');
-    li.className = 'note-item';
-
-    var btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'note-button';
-    btn.dataset.name = n.name;
-
-    var title = document.createElement('span');
-    title.className = 'note-item-title';
-    title.textContent = n.title || n.name;
-    btn.appendChild(title);
-
-    var bits = [];
-    if (n.created) bits.push(fmtCreated(n.created));
-    if (n.duration_s !== null && n.duration_s !== undefined) bits.push(fmtDuration(n.duration_s));
-    if (n.mode) bits.push(n.mode);
-    var meta = document.createElement('span');
-    meta.className = 'note-item-meta';
-    meta.textContent = bits.join(' · ');
-    btn.appendChild(meta);
-
-    btn.addEventListener('click', function () { openNote(n.name); });
-    li.appendChild(btn);
-    list.appendChild(li);
+    var key = dayKey(n.created);
+    if (key !== day) {
+      day = key;
+      list.appendChild(el('div', 'day', dayLabel(n.created)));
+    }
+    list.appendChild(noteRow(n));
   });
 
   // A re-render loses the selection; the open note keeps it.
@@ -1361,9 +1601,13 @@ function renderNotes(notes) {
 }
 
 function highlightNote(name) {
-  var buttons = $('notes-list').querySelectorAll('.note-button');
-  for (var i = 0; i < buttons.length; i++) {
-    buttons[i].classList.toggle('selected', buttons[i].dataset.name === name);
+  var rows = $('notes-list').children;
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i].dataset || rows[i].dataset.name === undefined) continue;
+    var active = rows[i].dataset.name === name;
+    rows[i].classList.toggle('is-active', active);
+    if (active) rows[i].setAttribute('aria-current', 'true');
+    else rows[i].removeAttribute('aria-current');
   }
 }
 
@@ -1399,13 +1643,14 @@ function updateProcessState() {
   $('revise').disabled = processing || previewing || !have || !instructions;
   $('regenerate-mode').disabled = processing;
   $('revise-instructions').disabled = processing;
-  $('version-select').disabled = processing;
+  $('version-select').disabled = processing || !haveVersions;
   $('version-restore').disabled = processing || !previewing;
 
   // Single owner of the editor's read-only state: an old version on screen or a
   // write in flight both mean "what you type here would be lost".
   editor.readOnly = processing || previewing;
   editor.classList.toggle('viewing-old', previewing);
+  setTitleEditable(titleEditable && have && !processing && !previewing);
 
   // The list stays browsable during a write: the load-generation guard discards a late
   // reply's DOM writes, and the server keeps the new version for when the note is reopened.
@@ -1457,26 +1702,21 @@ function currentVersionN(versions) {
 }
 
 function renderVersions(versions) {
-  var box = $('note-versions');
   var sel = $('version-select');
   sel.innerHTML = '';
-  if (!versions || !versions.length) {
-    box.hidden = true;
-    viewingVersion = null;
+  viewingVersion = null;
+  haveVersions = !!(versions && versions.length);
+  if (!haveVersions) {
+    addOption(sel, '', 'no history');
     updateProcessState();
     return;
   }
   var firstN = versions[0].n;
   for (var i = versions.length - 1; i >= 0; i--) {
     var v = versions[i];
-    var opt = document.createElement('option');
-    opt.value = String(v.n);
-    opt.textContent = versionLabel(v, v.n === firstN);
-    sel.appendChild(opt);
+    addOption(sel, String(v.n), versionLabel(v, v.n === firstN));
   }
   sel.value = String(currentVersionN(versions));
-  box.hidden = false;
-  viewingVersion = null;
   updateProcessState();
 }
 
@@ -1528,9 +1768,9 @@ async function restoreVersion() {
     var data = await postJSON(
       '/api/notes/' + encodeURIComponent(token.name) + '/restore', { n: n });
     if (!stillCurrent(token)) return;
-    notesLoaded = false;
     viewingVersion = null;          // loadNote() must not think edits are pending
     await loadNote(token.name);
+    await loadNotes();
     if (currentNote && currentNote.name === token.name) {
       flash($('note-save-status'), 'restored v' + n + ' as v' + (data.version || '?'));
     }
@@ -1541,25 +1781,144 @@ async function restoreVersion() {
   }
 }
 
-/* Detail -------------------------------------------------------------------- */
+/* The note on the stage ---------------------------------------------------- */
+
+/* "# Title" -> "Title", for a note that has a heading line at all. */
+function headingOf(text) {
+  var first = String(text || '').replace(/^\s+/, '').split('\n', 1)[0];
+  var m = /^#[ \t]+(.+)$/.exec(first);
+  return m ? m[1].trim() : null;
+}
+
+/* Rewrite that heading line in place; null when the note has none. */
+function withHeading(text, title) {
+  var s = String(text || '');
+  var nl = s.indexOf('\n');
+  var first = nl === -1 ? s : s.slice(0, nl);
+  if (!/^[ \t]*#[ \t]+/.test(first)) return null;
+  return '# ' + title + (nl === -1 ? '' : s.slice(nl));
+}
+
+function setTitleEditable(on) {
+  var elx = $('note-title');
+  elx.contentEditable = on ? 'true' : 'false';
+  elx.setAttribute('contenteditable', on ? 'true' : 'false');
+  if (on || !currentNote) {
+    elx.title = '';
+  } else if (!titleEditable) {
+    elx.title = 'this note has no heading line — dictation notes are plain text, ' +
+      'so the title comes from the folder';
+  }
+}
+
+/* The title is the note's first "# " line: editing one edits the other. */
+function onTitleInput() {
+  if (!currentNote || !titleEditable || processing || viewingVersion !== null) return;
+  var title = $('note-title').textContent.replace(/\s+/g, ' ').trim();
+  var rewritten = withHeading($('note-editor').value, title);
+  if (rewritten === null) return;
+  $('note-editor').value = rewritten;
+  updateSaveState();
+}
+
+function setRaw(shown) {
+  $('note').dataset.raw = shown ? 'shown' : 'hidden';
+  $('note-raw-toggle').textContent = shown ? 'Hide' : 'Show';
+}
+
+/* Phone only (the strip is hidden above 860px): which pane the stack shows. */
+function applyNoteTab(name) {
+  var note = $('note');
+  ['note', 'raw', 'audio'].forEach(function (t) {
+    var on = t === name;
+    note.classList.toggle('tab-' + t, on);
+    var tab = $('note-tab-' + t);
+    tab.classList.toggle('is-active', on);
+    tab.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+}
+
+function pickNoteTab(name) {
+  applyNoteTab(name);
+  if (name === 'note') setRaw(false);
+  else if (name === 'raw') setRaw(true);
+}
+
+/* Everything the stage shows about a note but its text. */
+function renderNoteMeta(data) {
+  var raw = data.meta || {};
+  var box = $('note-meta');
+  box.innerHTML = '';
+
+  var created = data.created || raw.created;
+  if (created) box.appendChild(el('span', null, dayLabel(created) + ' ' + fmtTime(created)));
+
+  var duration = (data.duration_s !== undefined && data.duration_s !== null) ? data.duration_s
+    : (raw.audio_duration_s !== undefined ? raw.audio_duration_s : raw.recording_duration_s);
+  var d = fmtDuration(duration);
+  if (d) box.appendChild(el('span', null, d));
+
+  var mode = data.mode || raw.cleanup_mode;
+  box.appendChild(el('span', null, mode || 'raw'));
+
+  var backend = data.backend || raw.cleanup_backend;
+  if (backend) {
+    box.appendChild(el('span', null,
+      raw.cleanup_model ? backend + ' · ' + raw.cleanup_model : backend));
+  }
+  if (raw.whisper_model) {
+    box.appendChild(el('span', null,
+      raw.language ? raw.whisper_model + ' · ' + raw.language : raw.whisper_model));
+  }
+  var timings = [];
+  if (raw.transcribe_seconds !== undefined && raw.transcribe_seconds !== null) {
+    timings.push('transcribe ' + raw.transcribe_seconds + 's');
+  }
+  if (raw.cleanup_seconds !== undefined && raw.cleanup_seconds !== null) {
+    timings.push('clean ' + raw.cleanup_seconds + 's');
+  }
+  if (timings.length) box.appendChild(el('span', null, timings.join(' · ')));
+}
 
 /* Click path: asks before throwing unsaved edits away. */
 async function openNote(name) {
   if (!name) return;
+  if (takeActive()) return;    // the stage belongs to the running take
   if (!confirmDiscard()) return;
   await loadNote(name);
 }
 
+/* Leave the note stage without opening another one. */
+function closeNote() {
+  currentNote = null;
+  loadedText = '';
+  titleEditable = false;
+  viewingVersion = null;
+  haveVersions = false;
+  $('note-editor').value = '';
+  $('note-title').textContent = '';
+  $('note-meta').innerHTML = '';
+  $('note-raw').textContent = '';
+  $('note-warning').hidden = true;
+  $('note-save-status').textContent = '';
+  $('note-copy-status').textContent = '';
+  $('note-path-status').textContent = '';
+  renderVersions([]);
+  highlightNote(null);
+  updateProcessState();
+}
+
 async function loadNote(name) {
   if (!name) return;
-  var detail = $('note-detail');
-  $('process-status').textContent = '';
+  say('');
   $('note-save-status').textContent = '';
   $('note-path-status').textContent = '';
   viewingVersion = null;
   var editor = $('note-editor');
   updateProcessState();            // drops any preview's read-only state
   highlightNote(name);
+  setView('note');
+  applyNoteTab('note');
 
   // Anything already in flight for the previous note is now stale.
   noteGeneration += 1;
@@ -1572,45 +1931,42 @@ async function loadNote(name) {
     if (gen !== noteGeneration) return;
     currentNote = null;
     loadedText = '';
-    detail.hidden = false;
+    titleEditable = false;
     $('note-title').textContent = 'could not open ' + name;
-    $('note-meta').textContent = errText(e);
+    $('note-meta').innerHTML = '';
+    $('note-meta').appendChild(el('span', null, errText(e)));
     editor.value = '';
+    $('note-raw').textContent = '';
     $('note-audio').hidden = true;
-    $('note-versions').hidden = true;
-    $('note-folder').hidden = true;
+    $('note-path').textContent = '';
+    $('note-path').hidden = true;      // an empty bordered chip is not a path
+    $('note-warning').hidden = true;
+    renderVersions([]);
+    setStage('note');
     updateProcessState();
     return;
   }
   if (gen !== noteGeneration) return;   // the user opened something else meanwhile
 
   currentNote = data;
-  // The server sends the list-item summary fields top-level; fall back to the raw
-  // meta.json keys so an older daemon still renders something sensible.
   var raw = data.meta || {};
-  var meta = {
-    title: data.title || raw.title,
-    created: data.created || raw.created,
-    duration_s: (data.duration_s !== undefined && data.duration_s !== null) ? data.duration_s
-      : (raw.audio_duration_s !== undefined ? raw.audio_duration_s : raw.recording_duration_s),
-    mode: data.mode || raw.cleanup_mode,
-    backend: data.backend || raw.cleanup_backend
-  };
 
-  $('note-title').textContent = meta.title || data.name || name;
+  // No note.md: the editor holds the transcript. Deliberate for a raw recording,
+  // a failed cleanup when a mode was actually asked for (and never timed).
+  var transcript = data.transcript || '';
+  loadedText = data.note || transcript;
+  var cleanupFailed = !data.note && !!transcript && !!raw.cleanup_mode &&
+    (raw.cleanup_seconds === null || raw.cleanup_seconds === undefined);
+  $('note-warning').hidden = !cleanupFailed;
 
-  var bits = [];
-  if (meta.created) bits.push(fmtCreated(meta.created));
-  if (meta.duration_s !== null && meta.duration_s !== undefined) {
-    bits.push(fmtDuration(meta.duration_s));
-  }
-  if (meta.mode) bits.push(meta.mode);
-  if (meta.backend) bits.push(meta.backend);
-  $('note-meta').textContent = bits.join(' · ');
-
-  loadedText = data.note || '';
   editor.value = loadedText;
-  $('note-transcript').querySelector('pre').textContent = data.transcript || '';
+  $('note-raw').textContent = transcript;
+
+  var heading = headingOf(loadedText);
+  titleEditable = heading !== null;
+  $('note-title').textContent = heading !== null ? heading : (data.title || data.name || name);
+
+  renderNoteMeta(data);
 
   var audio = $('note-audio');
   if (data.audio_url) {
@@ -1622,14 +1978,13 @@ async function loadNote(name) {
     audio.hidden = true;
   }
 
-  var path = data.path || '';
-  $('note-path').textContent = path;
-  $('note-folder').hidden = !path;
+  $('note-path').textContent = data.path || '';
+  $('note-path').hidden = !data.path;
 
   renderVersions(data.versions || []);
-  selectIfPresent($('regenerate-mode'), meta.mode);
+  selectIfPresent($('regenerate-mode'), data.mode || raw.cleanup_mode);
   updateProcessState();
-  detail.hidden = false;
+  setStage('note');
 }
 
 /* Manual edit -> a new version. */
@@ -1645,10 +2000,12 @@ async function saveNote() {
     var data = await putJSON('/api/notes/' + encodeURIComponent(name) + '/note',
                              { text: text });
     if (!stillCurrent(token)) return;
-    notesLoaded = false;
+    loadedText = text;              // the daemon has it: nothing is pending any more
     await loadNote(name);
+    await loadNotes();
     if (currentNote && currentNote.name === name) {
-      flash($('note-save-status'), 'saved as v' + (data.version || '?'));
+      flash($('note-save-status'),
+            'saved ' + fmtTime(new Date().toISOString()) + ' · v' + (data.version || '?'));
     }
   } catch (e) {
     if (stillCurrent(token)) status.textContent = errText(e);
@@ -1661,36 +2018,31 @@ async function saveNote() {
  * Regenerate re-runs cleanup from the raw transcript; revise applies an
  * instruction to the current note. Both write a new version. */
 
-/* Apply a {title, note, version} reply to the detail. */
-async function applyProcessed(data, status, token) {
+/* Apply a {title, note, version} reply to the stage. */
+async function applyProcessed(data, token) {
   if (!stillCurrent(token)) return;   // the user is looking at another note now
 
   // The reply is the newest version, whatever was on screen before it landed.
   viewingVersion = null;
-  $('note-save-status').textContent = '';
-  if (data.title) $('note-title').textContent = data.title;
   loadedText = data.note || '';
   $('note-editor').value = loadedText;
-  currentNote.note = loadedText;
   $('revise-instructions').value = '';
-  updateProcessState();
 
-  // Refetch: the list item's title, #note-meta and the version list all moved.
-  notesLoaded = false;
-  await loadNotes(token.name);
+  // Refetch: the row's title, #note-meta and the version list all moved.
+  await loadNote(token.name);
+  await loadNotes();
   // loadNote() moved the generation on, so match on the name alone here.
   if (currentNote && currentNote.name === token.name) {
-    status.textContent = 'done — v' + (data.version || '?');
+    say('done — v' + (data.version || '?'));
   }
 }
 
 async function regenerateNote() {
   if (!currentNote || !currentNote.name || processing || viewingVersion !== null) return;
   if (!confirmDiscard()) return;
-  var status = $('process-status');
   var token = noteToken();
   setProcessing(true);
-  status.textContent = 'regenerating…';
+  say('regenerating…');
   try {
     var body = { mode: $('regenerate-mode').value };
     var backend = $('pick-backend').value;
@@ -1699,9 +2051,9 @@ async function regenerateNote() {
     if (instructions) body.instructions = instructions;
     var data = await postJSON(
       '/api/notes/' + encodeURIComponent(token.name) + '/reclean', body);
-    await applyProcessed(data, status, token);
+    await applyProcessed(data, token);
   } catch (e) {
-    if (stillCurrent(token)) status.textContent = errText(e);
+    if (stillCurrent(token)) say(errText(e));
   } finally {
     setProcessing(false);
   }
@@ -1712,19 +2064,18 @@ async function reviseNote() {
   var instructions = $('revise-instructions').value.trim();
   if (!instructions) return;
   if (!confirmDiscard()) return;
-  var status = $('process-status');
   var token = noteToken();
   setProcessing(true);
-  status.textContent = 'revising…';
+  say('revising…');
   try {
     var body = { instructions: instructions };
     var backend = $('pick-backend').value;
     if (backend) body.backend = backend;
     var data = await postJSON(
       '/api/notes/' + encodeURIComponent(token.name) + '/revise', body);
-    await applyProcessed(data, status, token);
+    await applyProcessed(data, token);
   } catch (e) {
-    if (stillCurrent(token)) status.textContent = errText(e);
+    if (stillCurrent(token)) say(errText(e));
   } finally {
     setProcessing(false);
   }
@@ -1759,6 +2110,12 @@ async function revealNote() {
 
 /* ----------------------------------------------------------------- settings */
 
+/* "default_mode" -> "Default mode": the design's row name, from the key itself. */
+function settingName(key) {
+  var words = String(key).replace(/_/g, ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 function makeControl(setting) {
   var control;
   if (setting.kind === 'choice') {
@@ -1769,10 +2126,7 @@ function makeControl(setting) {
       choices = choices.concat([setting.value]);
     }
     choices.forEach(function (choice) {
-      var opt = document.createElement('option');
-      opt.value = String(choice);
-      opt.textContent = String(choice);
-      control.appendChild(opt);
+      addOption(control, String(choice), String(choice));
     });
     control.value = setting.value === null || setting.value === undefined
       ? '' : String(setting.value);
@@ -1784,6 +2138,7 @@ function makeControl(setting) {
   } else {
     control = document.createElement('input');
     control.type = 'text';
+    control.className = 'mono';
     control.value = setting.value === null || setting.value === undefined
       ? '' : String(setting.value);
     control.spellcheck = false;
@@ -1796,47 +2151,41 @@ function makeControl(setting) {
 
 function renderSettings(settings) {
   settingsRows = [];
-  var tbody = $('settings-table').querySelector('tbody');
+  var tbody = $('settings-table');
   tbody.innerHTML = '';
 
   settings.forEach(function (setting) {
     var tr = document.createElement('tr');
 
-    var keyCell = document.createElement('td');
-    var code = document.createElement('code');
-    code.textContent = setting.key;
-    keyCell.appendChild(code);
-    tr.appendChild(keyCell);
+    var nameCell = document.createElement('td');
+    nameCell.appendChild(el('strong', null, settingName(setting.key)));
+    nameCell.appendChild(el('code', null, setting.env || setting.key.toUpperCase()));
+    tr.appendChild(nameCell);
 
-    var descCell = document.createElement('td');
-    descCell.textContent = setting.description || '';
-    tr.appendChild(descCell);
+    tr.appendChild(el('td', null, setting.description || ''));
 
     var valueCell = document.createElement('td');
-    var control = makeControl(setting);
-    valueCell.appendChild(control);
-
-    var hint = null;
+    var why = null;
     if (setting.editable === false) {
-      control.disabled = true;
-      hint = 'set ' + (setting.env || setting.key.toUpperCase()) + ' and restart the daemon';
+      why = 'set ' + (setting.env || setting.key.toUpperCase()) + ' and restart the daemon';
     } else if (setting.source === 'env') {
-      control.disabled = true;
-      hint = 'overridden by ' + (setting.env || setting.key.toUpperCase());
+      why = 'overridden by ' + (setting.env || setting.key.toUpperCase());
     }
-    if (hint) {
-      var hintEl = document.createElement('p');
-      hintEl.className = 'row-hint';
-      hintEl.textContent = hint;
-      valueCell.appendChild(hintEl);
+
+    var control = null;
+    if (why) {
+      var value = setting.value === null || setting.value === undefined ? '' : String(setting.value);
+      valueCell.appendChild(el('code', null, value));
+      valueCell.appendChild(el('span', 'why', why));
+    } else {
+      control = makeControl(setting);
+      valueCell.appendChild(control);
     }
     tr.appendChild(valueCell);
 
     var sourceCell = document.createElement('td');
-    var badge = document.createElement('span');
-    badge.className = 'badge badge-' + (setting.source || 'default');
-    badge.textContent = setting.source || 'default';
-    sourceCell.appendChild(badge);
+    var source = setting.source || 'default';
+    sourceCell.appendChild(el('span', source === 'env' ? 'badge badge-env' : 'badge', source));
     tr.appendChild(sourceCell);
 
     tbody.appendChild(tr);
@@ -1848,7 +2197,7 @@ function changedSettings() {
   var payload = {};
   var count = 0;
   settingsRows.forEach(function (row) {
-    if (row.control.disabled) return;
+    if (!row.control || row.control.disabled) return;
     var value = row.control.value;
     if (value === row.control.dataset.original) return;
     if (row.setting.kind === 'int') {
@@ -1887,7 +2236,7 @@ async function saveSettings() {
     renderSettings(settings);
     applySettingsToPicks(settings);
     status.textContent = '';
-    flash(status, 'saved');
+    flash(status, 'saved · restart the daemon for model changes');
   } catch (e) {
     status.textContent = errText(e);
   } finally {
@@ -1897,13 +2246,17 @@ async function saveSettings() {
 
 /* Vocabulary -------------------------------------------------------------- */
 
+function vocabCount() {
+  return $('vocab').value.split('\n').filter(function (line) { return line.trim(); }).length;
+}
+
 async function loadVocab() {
   var status = $('vocab-status');
   status.textContent = 'loading…';
   try {
     var data = await getJSON('/api/vocab');
     $('vocab').value = data.text || '';
-    status.textContent = '';
+    status.textContent = vocabCount() + ' entries';
   } catch (e) {
     vocabLoaded = false;   // let the next visit retry
     status.textContent = errText(e);
@@ -1918,7 +2271,7 @@ async function saveVocab() {
   try {
     await putJSON('/api/vocab', { text: $('vocab').value });
     status.textContent = '';
-    flash(status, 'saved');
+    flash(status, 'saved ' + fmtTime(new Date().toISOString()) + ' · ' + vocabCount() + ' entries');
   } catch (e) {
     status.textContent = errText(e);
   } finally {
@@ -1928,24 +2281,42 @@ async function saveVocab() {
 
 /* ------------------------------------------------------------------- wiring */
 
-function typingInAField(el) {
-  if (!el) return false;
-  var tag = (el.tagName || '').toLowerCase();
+function typingInAField(elx) {
+  if (!elx) return false;
+  var tag = (elx.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'select' || tag === 'textarea' || tag === 'button') return true;
-  return !!el.isContentEditable;
+  return !!elx.isContentEditable;
+}
+
+/* New note: the idle stage, and nothing of the last note left on it. */
+function newNote() {
+  if (takeActive()) return;
+  if (!confirmDiscard()) return;
+  // The audio behind #retry lives in this tab and nowhere else.
+  if (lastUpload && !window.confirm('Discard the recording that failed to upload?')) return;
+  lastUpload = null;
+  retryDetail('');
+  closeSidebarOverlay();
+  revertEditor();
+  closeNote();
+  clearBanners();
+  say('');
+  setView('note');
+  setStage('idle');
+  resetLivePane();
+  recElapsedMs = 0;
+  paintTimer();
+  setLiveView($('live-toggle').checked);
+  setTransport('ready');
 }
 
 function wire() {
-  TABS.forEach(function (t) {
-    var el = $(t.tab);
-    if (el) el.addEventListener('click', function () {
-      // Leaving the notes view hides the editor — ask before losing edits.
-      if (currentTab === 'notes' && t.name !== 'notes') {
-        if (!confirmDiscard()) return;
-        revertEditor();   // the prompt said "discard", so actually discard them
-      }
-      showTab(t.name);
-    });
+  $('sidebar-toggle').addEventListener('click', toggleSidebar);
+  $('new-note').addEventListener('click', newNote);
+  $('notes-search').addEventListener('input', function () { renderNotes(filteredNotes()); });
+  $('nav-settings').addEventListener('click', function () {
+    setView(currentView() === 'settings' ? 'note' : 'settings');
+    closeSidebarOverlay();
   });
 
   // blur after a click so a later Space toggles pause instead of re-clicking the button
@@ -1958,33 +2329,54 @@ function wire() {
     uploadRecording(lastUpload.blob, lastUpload.format);
   });
 
-  ['pick-mode', 'pick-backend', 'pick-language', 'live-toggle'].forEach(function (id) {
+  ['pick-mode', 'pick-backend', 'pick-language'].forEach(function (id) {
     $(id).addEventListener('change', savePicks);
   });
-
-  $('copy').addEventListener('click', function () {
-    copyText($('result-text').value, $('copy-status'));
+  $('live-toggle').addEventListener('change', function () {
+    savePicks();
+    if (!takeActive()) setLiveView($('live-toggle').checked);
   });
+
   $('live-copy').addEventListener('click', function () {
     copyText(liveText(), $('live-copy-status'));
   });
+
+  $('note-title').addEventListener('input', onTitleInput);
+  // An <h1> the browser may fill with <div>s and <br>s is not a heading line:
+  // Enter commits the edit, and a paste arrives as text.
+  $('note-title').addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter') return;
+    ev.preventDefault();
+    ev.currentTarget.blur();
+  });
+  $('note-title').addEventListener('paste', function (ev) {
+    if (!ev.clipboardData) return;
+    ev.preventDefault();
+    var text = String(ev.clipboardData.getData('text/plain') || '').replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    var inserted = false;
+    try { inserted = document.execCommand('insertText', false, text); } catch (e) { inserted = false; }
+    if (!inserted) $('note-title').textContent = ($('note-title').textContent + text).trim();
+    onTitleInput();
+  });
+  $('note-editor').addEventListener('input', updateSaveState);
+  $('note-save').addEventListener('click', saveNote);
   $('note-copy').addEventListener('click', function () {
     var token = noteToken();
     copyText($('note-editor').value, $('note-copy-status'),
              function () { return stillCurrent(token); });
   });
-
-  $('result-open').addEventListener('click', function () {
-    if (!lastNoteName) return;
-    notesLoaded = true;   // keep showTab() from starting a second, nameless load
-    showTab('notes');
-    loadNotes(lastNoteName);
+  $('note-raw-copy').addEventListener('click', function () {
+    var token = noteToken();
+    copyText($('note-raw').textContent, $('note-raw-status'),
+             function () { return stillCurrent(token); });
   });
-
-  $('notes-refresh').addEventListener('click', function () { loadNotes(); });
-
-  $('note-editor').addEventListener('input', updateSaveState);
-  $('note-save').addEventListener('click', saveNote);
+  $('note-raw-toggle').addEventListener('click', function () {
+    setRaw($('note').dataset.raw !== 'shown');
+  });
+  ['note', 'raw', 'audio'].forEach(function (name) {
+    $('note-tab-' + name).addEventListener('click', function () { pickNoteTab(name); });
+  });
 
   $('regenerate').addEventListener('click', regenerateNote);
   $('revise').addEventListener('click', reviseNote);
@@ -2026,6 +2418,11 @@ function wire() {
     ev.returnValue = '';
   });
 
+  // Notes made elsewhere while this tab was in the background.
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) refreshNotesIfIdle();
+  });
+
   // Space toggles pause while a recording is active.
   document.addEventListener('keydown', function (ev) {
     if (ev.code !== 'Space' && ev.key !== ' ') return;
@@ -2039,12 +2436,16 @@ function wire() {
 
 function init() {
   wire();
+  syncSidebarToggle();
   initLiveToggle();
+  setStage('idle');
   setTransport('ready');
+  setRaw(true);           // the drawer is open by default, and owns its own label
+  renderVersions([]);
   updateProcessState();   // nothing is open yet: save/regenerate/revise stay off
   paintTimer();
-  showTab(lsGet(LS_TAB) || 'record');
   boot();
+  window.setInterval(checkHealth, HEALTH_POLL_MS);
 }
 
 if (document.readyState === 'loading') {

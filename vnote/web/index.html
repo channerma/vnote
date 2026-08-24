@@ -1,192 +1,248 @@
 <!DOCTYPE html>
-<html lang="en">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>vnote</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css" />
 <script src="/static/app.js" defer></script>
+</head>
+<body>
 
-<header class="topbar">
-  <h1>vnote</h1>
-  <p id="daemon-info" class="daemon-info">connecting…</p>
-</header>
+<!--
+  vnote — layout 1a (stage + drawer), from docs/design/handoff.
+  All contract ids appear exactly once. No behaviour lives in this file:
+  every runtime value below is filled by app.js.
 
-<nav class="tabs" aria-label="Views">
-  <button type="button" id="tab-record" class="tab">Record</button>
-  <button type="button" id="tab-notes" class="tab">Notes</button>
-  <button type="button" id="tab-settings" class="tab">Settings</button>
-</nav>
+  State is CSS-driven from the attributes app.js sets:
+    <div class="app" data-view="note|settings" [data-daemon="down"] [data-sidebar="collapsed"]>
+    <section id="view-note" data-state="idle|recording|paused|processing|note"
+             data-live="on|off" [data-starting="true"] [data-retry="true"]>
+    <article id="note" class="note" data-raw="shown|hidden">
+    <aside id="sidebar" [data-open="true"]>        off-canvas below 860px
+  Plus `hidden` on #mic-help, #retry-wrap, #note-warning and #notes-empty / #notes-list.
+-->
 
-<main>
+<div class="app" id="app" data-view="note">
 
-  <!-- ---------------------------------------------------------------- Record -->
-  <section id="view-record" class="view">
-
-    <div class="picks">
-      <label class="pick">
-        <span>Mode</span>
-        <select id="pick-mode">
-          <option value="edit">Edit — reorganize into headings and lists (default)</option>
-          <option value="light">Light — fix fillers and grammar only</option>
-          <option value="summary">Summary — condense</option>
-          <option value="dictation">Dictation — plain text, fast</option>
-          <option value="raw">Raw — transcript only, no LLM</option>
-        </select>
-      </label>
-      <label class="pick">
-        <span>Backend</span>
-        <select id="pick-backend"></select>
-      </label>
-      <label class="pick">
-        <span>Language</span>
-        <input type="text" id="pick-language" placeholder="auto" autocomplete="off" spellcheck="false">
-      </label>
-      <label class="pick pick-toggle">
-        <input type="checkbox" id="live-toggle">
-        <span>Live transcript</span>
-      </label>
+  <aside id="sidebar">
+    <div class="side-head">
+      <span class="brand">vnote</span>
+      <button id="sidebar-toggle" class="icon-btn" type="button" aria-expanded="true" aria-label="Hide sidebar" title="Hide sidebar">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
+      </button>
     </div>
 
-    <div class="recorder">
-      <button type="button" id="record" class="big">● Record</button>
-      <button type="button" id="pause" disabled>⏸ Pause</button>
-      <button type="button" id="stop" disabled>■ Stop</button>
-      <span id="timer" class="timer">0:00</span>
+    <div class="side-actions">
+      <button id="new-note" class="btn btn-primary btn-wide" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ico"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        <span>New note</span>
+      </button>
+      <input id="notes-search" type="search" placeholder="Search notes" autocomplete="off" />
+      <!-- stats strip: delete this one div to remove it -->
+      <div class="stats"><span id="stats-notes"></span><span id="stats-minutes"></span></div>
     </div>
 
-    <p id="rec-status" class="status">ready</p>
-    <button type="button" id="retry" hidden>Retry upload</button>
-    <p class="hint">Space pauses and resumes while recording (unless you are typing in a field).</p>
+    <div id="notes-list"></div>
 
-    <div id="live" class="card live" hidden>
-      <div class="live-pane">
-        <div id="live-committed" class="live-committed"></div><span id="live-tail" class="live-tail"></span>
-      </div>
-      <p class="hint">
-        A preview, transcribed in pieces as you talk. On Stop the whole recording is
-        transcribed again in one pass — that pass, not this text, becomes the note.
-      </p>
-      <div class="row">
-        <button type="button" id="live-copy">Copy live text</button>
-        <span id="live-copy-status" class="status inline"></span>
-      </div>
+    <div id="notes-empty" hidden>
+      <strong>No notes yet</strong>
+      <p>Press New note and talk. Everything stays in <code id="notes-empty-dir">the notes folder</code> on this machine.</p>
     </div>
 
-    <div id="result" class="card" hidden>
-      <h2 id="result-title"></h2>
-      <p id="result-warning" class="warning" hidden></p>
-      <textarea id="result-text" class="mono" readonly rows="18"></textarea>
-      <div class="row">
-        <button type="button" id="copy">Copy</button>
-        <span id="copy-status" class="status inline"></span>
-        <button type="button" id="result-open">Open in Notes</button>
-      </div>
+    <div class="side-foot">
+      <button id="nav-settings" class="link-btn" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ico"><circle cx="12" cy="12" r="3"></circle><circle cx="12" cy="12" r="9"></circle></svg>
+        <span>Settings</span>
+      </button>
+      <div id="daemon-info">connecting…</div>
     </div>
+  </aside>
 
-  </section>
+  <main class="stage">
 
-  <!-- ----------------------------------------------------------------- Notes -->
-  <section id="view-notes" class="view" hidden>
+    <section id="view-note" data-state="idle" data-live="on">
 
-    <div class="row">
-      <button type="button" id="notes-refresh">Refresh</button>
-    </div>
+      <!-- transport / status bar -->
+      <header class="topbar">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="rec-status">New note</span>
+        <span id="timer">0:00</span>
+        <div class="transport">
+          <button id="record" class="btn btn-primary" type="button">
+            <span class="rec-dot" aria-hidden="true"></span><span>Record</span>
+          </button>
+          <button id="pause" class="btn btn-secondary" type="button">Pause</button>
+          <button id="stop" class="btn btn-primary" type="button">Stop</button>
+        </div>
+        <div class="topbar-right">
+          <span id="live-copy-status" class="inline-status" role="status"></span>
+          <button id="live-copy" class="btn btn-secondary btn-sm" type="button">Copy text</button>
+        </div>
+      </header>
 
-    <ul id="notes-list" class="notes-list"></ul>
+      <div class="progress" aria-hidden="true"><span></span></div>
+      <p id="process-status" role="status"></p>
 
-    <div id="note-detail" class="card" hidden>
-      <h2 id="note-title"></h2>
-      <p id="note-meta" class="meta"></p>
-      <audio id="note-audio" controls preload="none"></audio>
-      <textarea id="note-editor" class="mono" rows="18" spellcheck="false"
-                aria-label="Note text (Markdown)"></textarea>
-      <div class="row">
-        <button type="button" id="note-save">Save</button>
-        <span id="note-save-status" class="status inline"></span>
-        <button type="button" id="note-copy">Copy</button>
-        <span id="note-copy-status" class="status inline"></span>
-      </div>
-
-      <div class="reprocess">
-        <div class="row">
-          <label class="pick inline-pick">
-            <span>Mode</span>
-            <select id="regenerate-mode">
-              <option value="edit">Edit</option>
-              <option value="light">Light</option>
-              <option value="summary">Summary</option>
-              <option value="dictation">Dictation</option>
+      <!-- idle: the invitation and the per-recording picks -->
+      <div class="idle">
+        <h1>Ready when you are.</h1>
+        <p class="lede">2 to 7 minutes of thinking out loud is the sweet spot. <kbd>Space</kbd> pauses and resumes while you record.</p>
+        <hr class="rule" />
+        <div class="picks">
+          <p class="field">
+            <label for="pick-mode">Mode</label>
+            <select id="pick-mode">
+              <option value="light">light — fix fillers and grammar</option>
+              <option value="edit">edit — headings and lists</option>
+              <option value="summary">summary — condense</option>
+              <option value="dictation">dictation — plain text, fast</option>
+              <option value="raw">raw — no LLM</option>
             </select>
-          </label>
-          <button type="button" id="regenerate">Regenerate from transcript</button>
+          </p>
+          <p class="field">
+            <label for="pick-backend">Backend</label>
+            <select id="pick-backend"></select>
+          </p>
+          <p class="field">
+            <label for="pick-language">Language</label>
+            <select id="pick-language"></select>
+          </p>
+          <label class="check"><input id="live-toggle" type="checkbox" /> <span>Show live transcript</span></label>
         </div>
-        <div class="row">
-          <input type="text" id="revise-instructions" class="grow"
-                 placeholder="make it shorter · turn the second half into a checklist"
-                 aria-label="Instruction for Revise and Regenerate"
-                 autocomplete="off" spellcheck="false">
-          <button type="button" id="revise">Revise</button>
+        <p class="hint">These apply to this recording only; the defaults come from Settings.</p>
+      </div>
+
+      <!-- edge states -->
+      <div id="mic-help" class="banner" hidden>
+        <strong>The browser will not hand over the microphone.</strong>
+        <p>Either permission was denied for this origin, or the page is not on a secure context. Open <code>http://localhost:8760</code> — not the WSL IP — and allow the mic from the address-bar icon.</p>
+      </div>
+      <div class="banner" id="retry-wrap" hidden>
+        <strong>Upload failed — the recording is still here.</strong>
+        <p>The audio is held in this tab and nothing has been lost. <span id="retry-detail"></span> <button id="retry" class="btn btn-primary btn-sm" type="button">Retry upload</button></p>
+      </div>
+
+      <!-- live transcript is the whole stage while recording -->
+      <div id="live">
+        <div class="live-inner">
+          <div class="micro">Live transcript</div>
+          <p class="live-text"><span id="live-committed"></span> <span id="live-tail"></span></p>
         </div>
-        <p class="hint">An instruction here also steers Regenerate.</p>
-        <p id="process-status" class="status"></p>
+        <div class="big-timer" id="big-timer" aria-hidden="true">0:00</div>
       </div>
 
-      <div id="note-versions" class="row" hidden>
-        <label class="pick inline-pick">
-          <span>Version</span>
-          <select id="version-select"></select>
-        </label>
-        <button type="button" id="version-restore">Restore</button>
+      <!-- the finished note -->
+      <article class="note tab-note" id="note" data-raw="shown">
+        <header class="note-head">
+          <div class="note-head-main">
+            <h1 id="note-title" contenteditable="true" spellcheck="false"></h1>
+            <div id="note-meta"></div>
+          </div>
+          <div class="note-head-actions">
+            <select id="version-select" aria-label="Version"></select>
+            <button id="version-restore" class="btn btn-secondary btn-sm" type="button">Restore</button>
+            <button id="note-continue" class="btn btn-pending btn-sm" type="button" disabled title="Coming: appends more audio to this note">
+              <span class="rec-dot" aria-hidden="true"></span><span>Continue recording</span>
+            </button>
+          </div>
+        </header>
+
+        <div id="note-warning" hidden>
+          <strong>Cleanup failed</strong> — this is the raw transcript, unedited. The audio and transcript are saved.
+        </div>
+
+        <!-- phone only: the stacked panes become Note / Raw / Audio tabs -->
+        <div class="note-tabs" role="tablist" aria-label="Note panes">
+          <button id="note-tab-note" class="note-tab is-active" type="button" role="tab" aria-selected="true">Note</button>
+          <button id="note-tab-raw" class="note-tab" type="button" role="tab" aria-selected="false">Raw</button>
+          <button id="note-tab-audio" class="note-tab" type="button" role="tab" aria-selected="false">Audio</button>
+        </div>
+
+        <div class="note-body">
+          <div class="pane pane-note">
+            <div class="pane-head">
+              <span class="micro">Note · Markdown</span>
+              <span id="note-save-status" class="inline-status" role="status"></span>
+              <span id="note-copy-status" class="inline-status" role="status"></span>
+              <button id="note-save" class="btn btn-primary btn-sm" type="button">Save</button>
+              <button id="note-copy" class="btn btn-secondary btn-sm" type="button">Copy</button>
+            </div>
+            <textarea id="note-editor" spellcheck="false" aria-label="Note, Markdown"></textarea>
+          </div>
+
+          <div class="pane pane-raw">
+            <div class="pane-head">
+              <span class="micro">Raw transcript</span>
+              <span id="note-raw-status" class="inline-status" role="status"></span>
+              <button id="note-raw-copy" class="btn btn-secondary btn-sm" type="button">Copy</button>
+              <button id="note-raw-toggle" class="link-btn accent" type="button">Hide</button>
+            </div>
+            <div id="note-raw"></div>
+          </div>
+        </div>
+
+        <footer class="note-foot">
+          <div class="reprocess">
+            <p class="field">
+              <label for="regenerate-mode">Regenerate from raw</label>
+              <select id="regenerate-mode">
+                <option value="light">light</option>
+                <option value="edit">edit</option>
+                <option value="summary">summary</option>
+                <option value="dictation">dictation</option>
+              </select>
+            </p>
+            <button id="regenerate" class="btn btn-secondary" type="button">Regenerate</button>
+            <span class="vrule" aria-hidden="true"></span>
+            <p class="field grow">
+              <label for="revise-instructions">Revise this note</label>
+              <input id="revise-instructions" type="text" placeholder="turn the second half into a checklist" autocomplete="off" spellcheck="false" />
+            </p>
+            <button id="revise" class="btn btn-primary" type="button">Revise</button>
+          </div>
+          <div class="artefacts">
+            <audio id="note-audio" controls preload="none"></audio>
+            <code id="note-path"></code>
+            <button id="note-path-copy" class="btn btn-secondary btn-sm" type="button">Copy path</button>
+            <button id="note-reveal" class="link-btn accent" type="button">Open folder</button>
+            <span id="note-path-status" class="inline-status" role="status"></span>
+          </div>
+        </footer>
+      </article>
+    </section>
+
+    <section id="view-settings">
+      <header class="topbar topbar-plain">
+        <span class="micro">Settings</span>
+        <span id="settings-status" class="inline-status" role="status"></span>
+        <button id="settings-save" class="btn btn-primary btn-sm" type="button">Save</button>
+      </header>
+
+      <div class="settings-scroll">
+        <table class="settings">
+          <thead>
+            <tr><th>Setting</th><th>What it does</th><th>Value</th><th>Source</th></tr>
+          </thead>
+          <tbody id="settings-table"></tbody>
+        </table>
+
+        <hr class="rule" />
+
+        <div class="vocab-block">
+          <div class="vocab-head">
+            <h2>Vocabulary</h2>
+            <span id="vocab-status" class="inline-status" role="status"></span>
+            <button id="vocab-save" class="btn btn-secondary btn-sm" type="button">Save vocabulary</button>
+          </div>
+          <p class="hint">One entry per line. A bare word biases transcription toward it. <code>wrong -&gt; right</code> replaces it afterwards, so it fixes what the model insists on hearing.</p>
+          <textarea id="vocab" spellcheck="false" aria-label="Vocabulary"></textarea>
+        </div>
       </div>
+    </section>
 
-      <div id="note-folder" class="row folder" hidden>
-        <code id="note-path" class="path"></code>
-        <button type="button" id="note-path-copy">Copy path</button>
-        <button type="button" id="note-reveal">Open folder</button>
-        <span id="note-path-status" class="status inline"></span>
-      </div>
+  </main>
+</div>
 
-      <div class="row">
-        <button type="button" id="note-continue" disabled>Continue recording (coming)</button>
-      </div>
-
-      <details id="note-transcript">
-        <summary>Raw transcript</summary>
-        <pre></pre>
-      </details>
-    </div>
-
-  </section>
-
-  <!-- -------------------------------------------------------------- Settings -->
-  <section id="view-settings" class="view" hidden>
-
-    <h2>Settings</h2>
-    <table id="settings-table" class="settings-table">
-      <thead>
-        <tr><th>Key</th><th>Description</th><th>Value</th><th>Source</th></tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-    <div class="row">
-      <button type="button" id="settings-save">Save settings</button>
-      <span id="settings-status" class="status inline"></span>
-    </div>
-
-    <h2>Vocabulary</h2>
-    <p class="hint">
-      One entry per line. A bare line is a <strong>hotword</strong> that biases transcription
-      toward that spelling. A line of the form <code>wrong -&gt; right</code> is a
-      <strong>whole-word correction</strong> applied after transcription.
-      Edits apply to the next recording — no restart needed.
-    </p>
-    <textarea id="vocab" class="mono" rows="12" spellcheck="false"></textarea>
-    <div class="row">
-      <button type="button" id="vocab-save">Save vocabulary</button>
-      <span id="vocab-status" class="status inline"></span>
-    </div>
-
-  </section>
-
-</main>
+</body>
 </html>

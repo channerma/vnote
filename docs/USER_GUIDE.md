@@ -78,6 +78,12 @@ ollama pull llama3.2:3b            # lightest / fastest — also a good `dictati
 The daemon serves a single page at **http://127.0.0.1:8760**. Nothing else to install,
 no build step, and the page never talks to anything but the daemon.
 
+The page is a **sidebar and a stage**: the sidebar lists your notes by day (with a search
+box and **New note**), and the stage is either the current recording — the live transcript
+fills it — or the note you opened, with the processed Markdown beside its raw transcript.
+**Settings** lives at the bottom of the sidebar. Dark mode is the primary look; light
+follows your system preference.
+
 ```bash
 vnote --serve --open        # load the models once, open the page in your browser
 vnote --serve               # same, without launching a browser — open the URL yourself
@@ -153,9 +159,13 @@ apply to the next recording, no restart.
 
 ### Restyling the page
 
-`vnote/web/index.html` is markup and CSS only — no JavaScript. `vnote/web/app.js` finds
-its elements by id (the full list is the comment at the top of that file). Any page that
-keeps those ids — including an export from a design tool — can replace `index.html` as is.
+`vnote/web/index.html` is markup only — no JavaScript. `vnote/web/app.js` finds its
+elements by id (the full list is the comment at the top of that file) and drives the
+look through a few data attributes (`data-view`, `data-state`, `data-live`, `data-raw`,
+`data-daemon`) that the CSS reacts to. The shipped page is the Claude Design handoff
+recorded under `docs/design/handoff/` (layout "stage + drawer"; `HANDOFF.md` there is
+the design spec), minus its web-font import — the page makes no external requests. Any
+page that keeps the ids and attributes can replace it as is.
 
 ---
 

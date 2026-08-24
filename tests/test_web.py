@@ -57,3 +57,19 @@ def test_page_makes_no_external_requests():
 def test_worklet_stays_in_its_scope():
     code = "\n".join(line for line in WORKLET.splitlines() if not line.lstrip().startswith(("*", "//", "/*")))
     assert not re.search(r"\b(document|window|fetch|localStorage)\b", code)
+
+
+def test_stub_dom_smoke_harness():
+    """Runs app.js against a fake DOM/fetch/AudioContext (tests/web/smoke.js) when node is available."""
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    proc = subprocess.run([node, str(Path(__file__).parent / "web" / "smoke.js")],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    assert "all checks passed" in proc.stdout

@@ -5,6 +5,7 @@
     vnote --light / --summary  cleanup intensity (default: --edit)
     vnote --raw                transcript only, skip the LLM cleanup
     vnote --backend claude-code  clean up with Claude Code (uses your subscription)
+    vnote --backend opencode     clean up with opencode (uses its configured model)
     vnote --redo DIR           re-run cleanup on a saved note (skips transcription)
     vnote --promote [TAKE]     turn a dictated flow take into its own note folder
     vnote --serve              keep models warm in a localhost daemon (faster runs)
@@ -41,9 +42,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     mode.add_argument("--edit", action="store_const", const="edit", dest="mode", help="editorial cleanup (default)")
     mode.add_argument("--summary", action="store_const", const="summary", dest="mode", help="condensed rewrite")
     p.add_argument("--raw", action="store_true", help="skip the LLM cleanup; keep only the transcript")
-    p.add_argument("--backend", choices=("ollama", "claude-code", "claude"), default=None,
+    p.add_argument("--backend", choices=("ollama", "claude-code", "opencode", "claude"), default=None,
                    help="cleanup backend: ollama (local), claude-code (your Claude "
-                        "subscription), claude (metered API). Default: your saved first-run choice")
+                        "subscription), opencode (your opencode provider), claude (metered API). "
+                        "Default: your saved first-run choice")
     p.add_argument("--model", help="override the cleanup model name")
     p.add_argument("--language", help="force transcription language (e.g. 'en'); default: auto-detect")
     p.add_argument("--no-clipboard", action="store_true", help="do not copy the result to the clipboard")
@@ -91,6 +93,8 @@ def _show_config() -> int:
     print(f"  ollama_model: {config.ollama_model()}")
     print(f"  claude_model: {CLAUDE_MODEL} (--backend claude only)")
     print(f"  claude_code : {config.CLAUDE_CODE_BIN} (--backend claude-code)")
+    print(f"  opencode    : {config.OPENCODE_BIN} (--backend opencode; "
+          f"model {config.opencode_model() or 'opencode default'})")
     print(f"  dictation   : {config.dictation_model()} (vnote-flow --clean)")
     print(f"  whisper     : {config.WHISPER_MODEL}")
     print(f"  ollama_host : {config.OLLAMA_HOST}")
@@ -174,6 +178,8 @@ def _resolved_model(backend: str, model: str | None) -> str:
         return config.ollama_model()
     if backend == "claude-code":
         return "claude-code (session default)"  # the CLI picks; vnote doesn't pin it
+    if backend == "opencode":
+        return config.opencode_model() or "opencode (session default)"
     return CLAUDE_MODEL
 
 

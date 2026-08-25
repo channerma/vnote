@@ -1,6 +1,8 @@
 """Tests for the transcript-cleanup prompts, parser and backend dispatch (no network)."""
 
+import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -91,10 +93,10 @@ def test_dictation_model_resolution_order(tmp_path, monkeypatch):
 # --- claude-code backend (subscription CLI; no network, no API key) -----------
 
 
-def test_clean_rejects_unknown_backend_and_names_all_three():
+def test_clean_rejects_unknown_backend_and_names_them_all():
     with pytest.raises(ValueError, match="unknown backend") as exc:
         clean("x", backend="bogus")
-    for name in ("ollama", "claude-code", "claude"):
+    for name in ("ollama", "claude-code", "opencode", "claude"):
         assert name in str(exc.value)
 
 
@@ -176,3 +178,173 @@ def test_claude_code_timeout_is_reported(monkeypatch):
     monkeypatch.setattr(cleanup.subprocess, "run", boom)
     with pytest.raises(RuntimeError, match="timed out"):
         clean("x", backend="claude-code")
+
+
+# --- opencode backend (whatever provider/model opencode is configured with) ---
+
+
+def _oc_stream(*events: dict) -> str:
+    """opencode's `--format json` output: one JSON event per line."""
+    return "\n".join(json.dumps(e) for e in events) + "\n"
+
+
+def _oc_text(text: str) -> dict:
+    return {"type": "text", "part": {"type": "text", "text": text}}
+
+
+def _fake_oc_run(recorder, *, stdout=None, returncode=0, stderr=""):
+    """Stand in for the opencode CLI, capturing the sandbox it was pointed at.
+
+    The agent file is read *during* the call because the sandbox is a
+    TemporaryDirectory — by the time the test body resumes it is gone.
+    """
+    if stdout is None:
+        stdout = _oc_stream(_oc_text("TITLE: T\n---\nbody"))
+
+    def run(cmd, **kwargs):
+        recorder["cmd"] = cmd
+        recorder["input"] = kwargs.get("input")
+        sandbox = Path(cmd[cmd.index("--dir") + 1])
+        recorder["agent"] = (sandbox / ".opencode" / "agent" / "vnote.md").read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+
+    return run
+
+
+def test_opencode_missing_cli_explains_how_to_fix(monkeypatch):
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: None)
+    with pytest.raises(RuntimeError, match="opencode CLI") as exc:
+        clean("hello", backend="opencode")
+    assert "VNOTE_OPENCODE_BIN" in str(exc.value)
+
+
+def test_opencode_runs_a_tool_free_agent_in_a_sandbox(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_oc_run(rec))
+
+    result = clean("um so the parser broke", mode="edit", backend="opencode")
+
+    assert rec["cmd"][0] == "/usr/bin/opencode"
+    assert "run" in rec["cmd"]
+    assert rec["cmd"][rec["cmd"].index("--agent") + 1] == "vnote"
+    # JSON, not the pretty stream: it is parseable and it separates `text` parts
+    # from a thinking model's `reasoning` parts.
+    assert rec["cmd"][rec["cmd"].index("--format") + 1] == "json"
+    # Tools off: a pure text transform needs no filesystem/network access.
+    for tool in ("write", "edit", "bash", "read"):
+        assert f"{tool}: false" in rec["agent"]
+    # The agent body carries vnote's own system prompt (opencode has no flag for it).
+    assert "TITLE:" in rec["agent"]
+    # No --model unless asked: don't override the user's opencode config.
+    assert "--model" not in rec["cmd"]
+    # Transcript travels on stdin, not argv (argv caps out on long notes).
+    assert "um so the parser broke" in rec["input"]
+    assert not any("um so the parser broke" in part for part in rec["cmd"])
+    assert (result.title, result.body) == ("T", "body")
+
+
+def test_opencode_runs_in_a_scratch_dir_not_the_users_project(monkeypatch, tmp_path):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_oc_run(rec))
+    monkeypatch.chdir(tmp_path)
+    clean("x", backend="opencode")
+    sandbox = Path(rec["cmd"][rec["cmd"].index("--dir") + 1])
+    assert sandbox != tmp_path and tmp_path not in sandbox.parents
+    # …and it is cleaned up once the call returns.
+    assert not sandbox.exists()
+
+
+def test_opencode_passes_model_only_when_given(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_oc_run(rec))
+    clean("x", backend="opencode", model="local/qwen")
+    assert rec["cmd"][rec["cmd"].index("--model") + 1] == "local/qwen"
+
+
+def test_opencode_model_falls_back_to_the_saved_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("VNOTE_OPENCODE_MODEL", raising=False)
+    config.save_config({"backend": "opencode", "opencode_model": "local/saved"})
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_oc_run(rec))
+    clean("x", backend="opencode")
+    assert rec["cmd"][rec["cmd"].index("--model") + 1] == "local/saved"
+
+
+def test_opencode_pure_is_on_by_default_and_can_be_turned_off(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_oc_run(rec))
+    monkeypatch.delenv("VNOTE_OPENCODE_PURE", raising=False)
+    clean("x", backend="opencode")
+    assert "--pure" in rec["cmd"]
+    # Escape hatch for users whose provider comes from an opencode plugin.
+    monkeypatch.setenv("VNOTE_OPENCODE_PURE", "0")
+    clean("x", backend="opencode")
+    assert "--pure" not in rec["cmd"]
+
+
+def test_opencode_joins_text_parts_and_ignores_reasoning_and_noise(monkeypatch):
+    rec: dict = {}
+    stream = (
+        "opencode banner line\n"  # not an event; must not break the parse
+        + _oc_stream(
+            {"type": "step_start", "part": {}},
+            {"type": "reasoning", "part": {"type": "reasoning", "text": "SECRET SCRATCHPAD"}},
+            _oc_text("TITLE: Split\n---\nfirst "),
+            _oc_text("second"),
+            {"type": "step_finish", "part": {}},
+        )
+    )
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_oc_run(rec, stdout=stream))
+    result = clean("x", backend="opencode")
+    assert (result.title, result.body) == ("Split", "first second")
+    assert "SECRET" not in result.body
+
+
+def test_opencode_dictation_mode_returns_plain_text(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(
+        cleanup.subprocess, "run", _fake_oc_run(rec, stdout=_oc_stream(_oc_text("cleaned words\n")))
+    )
+    result = clean("raw words", mode="dictation", backend="opencode")
+    assert result.body == "cleaned words"  # no TITLE framing parsed in dictation mode
+
+
+def test_opencode_nonzero_exit_surfaces_stderr(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(
+        cleanup.subprocess, "run",
+        _fake_oc_run(rec, returncode=1, stdout="", stderr="no provider configured"),
+    )
+    with pytest.raises(RuntimeError, match="no provider configured"):
+        clean("x", backend="opencode")
+
+
+def test_opencode_stream_without_text_parts_is_an_error(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(
+        cleanup.subprocess, "run",
+        _fake_oc_run(rec, stdout=_oc_stream({"type": "step_finish", "part": {}})),
+    )
+    with pytest.raises(RuntimeError, match="empty response"):
+        clean("x", backend="opencode")
+
+
+def test_opencode_timeout_is_reported(monkeypatch):
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+
+    def boom(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 600)
+
+    monkeypatch.setattr(cleanup.subprocess, "run", boom)
+    with pytest.raises(RuntimeError, match="timed out"):
+        clean("x", backend="opencode")

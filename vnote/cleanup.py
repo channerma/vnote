@@ -4,22 +4,40 @@ Pluggable backends, all sharing one prompt and one response parser:
 
 - ``ollama``      local, offline, no account (the zero-setup default).
 - ``claude-code`` the Claude Code CLI — uses your Claude subscription, no API key.
+- ``opencode``    the opencode CLI — whatever provider/model opencode is already
+                  configured with (local MLX/llama.cpp, or a hosted provider).
 - ``claude``      the Anthropic API — needs the ``claude`` extra and a metered
                   ``ANTHROPIC_API_KEY``.
+
+The two CLI backends (``claude-code``, ``opencode``) shell out to an *agent* CLI
+for what is really a pure text transform, so both take care to disable tools: the
+model gets no filesystem, shell or network access, and cannot wander off editing
+the user's files.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
-from .config import CLAUDE_CODE_BIN, CLAUDE_MODEL, OLLAMA_HOST, dictation_model, ollama_model
+from .config import (
+    CLAUDE_CODE_BIN,
+    CLAUDE_MODEL,
+    OLLAMA_HOST,
+    OPENCODE_BIN,
+    dictation_model,
+    ollama_model,
+    opencode_model,
+)
 
 # --- prompt construction -----------------------------------------------------
 
@@ -137,10 +155,14 @@ def clean(
         # No default model: let the Claude Code CLI use whatever the user's own
         # setup selects, so vnote never pins their subscription to one model.
         return _clean_claude_code(transcript, mode, model, tone)
+    if backend == "opencode":
+        # Same reasoning as claude-code: no default model, so opencode keeps
+        # using whichever provider/model the user already selected.
+        return _clean_opencode(transcript, mode, model or opencode_model(), tone)
     if backend == "claude":
         return _clean_claude(transcript, mode, model or CLAUDE_MODEL, tone)
     raise ValueError(
-        f"unknown backend: {backend!r} (expected 'ollama', 'claude-code' or 'claude')"
+        f"unknown backend: {backend!r} (expected 'ollama', 'claude-code', 'opencode' or 'claude')"
     )
 
 
@@ -265,6 +287,139 @@ def _clean_claude_code(
     if not proc.stdout.strip():
         raise RuntimeError("empty response from Claude Code")
     return _finish(proc.stdout, transcript, mode)
+
+
+# --- opencode CLI (whatever provider/model opencode is configured with) ---
+
+_OPENCODE_TIMEOUT_S = 600
+
+# Tools opencode may expose to an agent. vnote needs none of them — this is a
+# pure text transform — and leaving them on invites the model to "helpfully"
+# read or write files. Listed explicitly rather than relying on a deny-by-default:
+# unknown keys are ignored, so naming a tool opencode drops later is harmless,
+# while a tool we forget to name would stay enabled.
+_OPENCODE_TOOLS_OFF = (
+    "write", "edit", "patch", "bash", "read", "grep", "glob", "list",
+    "webfetch", "task", "todowrite", "todoread",
+)
+
+
+def opencode_bin() -> str | None:
+    """Path to the opencode executable, or None if it isn't installed."""
+    return shutil.which(OPENCODE_BIN)
+
+
+def _opencode_pure() -> bool:
+    """Whether to pass ``--pure`` (skip external plugins). Default on.
+
+    Isolation is the point of this path, but a user whose provider or auth comes
+    from an opencode *plugin* needs those loaded — ``VNOTE_OPENCODE_PURE=0``.
+    """
+    return os.environ.get("VNOTE_OPENCODE_PURE", "").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _write_opencode_agent(sandbox: Path, mode: str) -> None:
+    """Write a throwaway, tool-free opencode agent whose prompt is vnote's own.
+
+    opencode has no ``--system-prompt`` flag; the supported way to set one is an
+    agent definition, which it picks up from ``<dir>/.opencode/agent/*.md``. So
+    the sandbox *is* the configuration: a scratch directory holding one agent and
+    nothing else. Running there also means the model sees an empty project rather
+    than whatever the user happened to `cd` into.
+    """
+    agent_dir = sandbox / ".opencode" / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    tools = "\n".join(f"  {name}: false" for name in _OPENCODE_TOOLS_OFF)
+    agent_dir.joinpath("vnote.md").write_text(
+        "---\n"
+        "description: vnote transcript cleanup (pure text transform)\n"
+        "mode: primary\n"
+        "temperature: 0.3\n"
+        "tools:\n"
+        f"{tools}\n"
+        "---\n"
+        f"{_system_for(mode)}\n",
+        encoding="utf-8",
+    )
+
+
+def _opencode_text(stdout: str) -> str:
+    """Concatenate the assistant text from opencode's ``--format json`` stream.
+
+    The stream is JSON-lines of typed events. Only ``text`` parts are collected,
+    which conveniently drops ``reasoning`` parts — several models opencode can be
+    pointed at are thinking models, and their scratchpad must not land in a note.
+    """
+    chunks = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue  # banner or stray log line, not an event
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("type") == "text":
+            text = (event.get("part") or {}).get("text")
+            if text:
+                chunks.append(text)
+    return "".join(chunks)
+
+
+def _clean_opencode(
+    transcript: str, mode: str, model: str | None = None, tone: str | None = None
+) -> CleanResult:
+    """Clean up via the opencode CLI, using the provider/model it's configured with.
+
+    Like the claude-code backend: tools disabled, prompt on stdin (argv would cap
+    out on a long transcript), and no model pinned unless the user asked for one.
+    """
+    exe = opencode_bin()
+    if exe is None:
+        raise RuntimeError(
+            f"The opencode backend needs the opencode CLI on PATH (looked for {OPENCODE_BIN!r}).\n"
+            "    Install it:              https://opencode.ai\n"
+            "    Or point vnote at it:    VNOTE_OPENCODE_BIN=/path/to/opencode\n"
+            "    Or use the local backend:  --backend ollama"
+        )
+
+    # ignore_cleanup_errors: on Windows a file opencode still holds open would
+    # otherwise turn a successful cleanup into a crash at teardown.
+    with tempfile.TemporaryDirectory(prefix="vnote-opencode-", ignore_cleanup_errors=True) as tmp:
+        sandbox = Path(tmp)
+        _write_opencode_agent(sandbox, mode)
+        cmd = [exe, "run", "--dir", str(sandbox), "--agent", "vnote", "--format", "json"]
+        if _opencode_pure():
+            cmd.insert(1, "--pure")
+        if model:
+            cmd += ["--model", model]
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=_build_user_prompt(transcript, mode, tone),
+                capture_output=True,
+                text=True,
+                timeout=_OPENCODE_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"opencode timed out after {_OPENCODE_TIMEOUT_S}s") from exc
+        except OSError as exc:
+            raise RuntimeError(f"Could not run opencode ({exe}): {exc}") from exc
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:500] or f"exit {proc.returncode}"
+        raise RuntimeError(
+            f"opencode failed: {detail}\n"
+            "    Check its providers are set up:  opencode models"
+        )
+    content = _opencode_text(proc.stdout)
+    if not content.strip():
+        detail = (proc.stderr or "").strip()[:300]
+        raise RuntimeError(
+            "empty response from opencode" + (f": {detail}" if detail else "")
+            + "\n    Is a model configured and reachable?  opencode models"
+        )
+    return _finish(content, transcript, mode)
 
 
 # --- Claude (optional metered API backend) ---

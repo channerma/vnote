@@ -85,6 +85,10 @@ CLAUDE_MODEL = os.environ.get("VNOTE_CLAUDE_MODEL", "claude-sonnet-5")
 # Subscription backend (`--backend claude-code`): the CLI to shell out to. The
 # model is deliberately not pinned here — Claude Code uses the user's own choice.
 CLAUDE_CODE_BIN = os.environ.get("VNOTE_CLAUDE_CODE_BIN", "claude")
+# Subscription/agent backend (`--backend opencode`): the CLI to shell out to.
+# Like claude-code, the model is left unpinned by default so opencode uses the
+# provider/model the user already configured (`opencode models` lists them).
+OPENCODE_BIN = os.environ.get("VNOTE_OPENCODE_BIN", "opencode")
 
 # --- warm daemon (`vnote --serve`) ---
 DAEMON_HOST = os.environ.get("VNOTE_DAEMON_HOST", "127.0.0.1")
@@ -133,6 +137,16 @@ def backend() -> str:
 def ollama_model() -> str:
     """Resolve the Ollama cleanup model."""
     return os.environ.get("VNOTE_OLLAMA_MODEL") or load_config().get("ollama_model") or BUILTIN_OLLAMA_MODEL
+
+
+def opencode_model() -> str | None:
+    """Resolve the opencode cleanup model as ``provider/model``.
+
+    ``None`` means "don't pass ``-m``" — opencode then uses whatever default the
+    user configured, so vnote never overrides their provider choice. Run
+    ``opencode models`` to see the valid names.
+    """
+    return os.environ.get("VNOTE_OPENCODE_MODEL") or load_config().get("opencode_model") or None
 
 
 def dictation_model() -> str:

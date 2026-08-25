@@ -23,10 +23,41 @@ Speak, and get clean Markdown back — transcribed locally with
 | **WSL2** (Windows) | `parec` via WSLg | CUDA | `clip.exe` | **primary — tested** |
 | **Native Linux** | `parec` / `pw-record` / `sounddevice` | CUDA | `wl-copy` / `xclip` / `xsel` | **tested** |
 | Windows (native) | `sounddevice` | CUDA | `clip.exe` | untested — should work |
-| macOS | `sounddevice` | CPU only | `pbcopy` | untested — CPU-only, slower |
+| macOS (Apple Silicon) | `sounddevice` | CPU only | `pbcopy` | **tested** — CPU-only, slower |
 | any | — (file mode) | CUDA / CPU | best-effort | processing audio files works everywhere |
 
 Processing an existing file (`vnote memo.m4a`) needs no audio setup at all.
+
+<details>
+<summary><b>macOS notes</b> — model choice, permissions, alternatives</summary>
+
+CTranslate2 (faster-whisper's backend) has no Metal/MPS build, so transcription runs on
+**CPU**. That is the one real ceiling on macOS — tools built on whisper.cpp do use Metal
+and are markedly faster here. Apple Silicon is quick enough anyway, but the default
+`large-v3-turbo` is the slowest option. Measured on an M-series Mac with the 11-second `.testdata/jfk.flac`, models
+already downloaded:
+
+| `VNOTE_WHISPER_MODEL` | time | notes |
+|---|---|---|
+| `base` | 1.3 s | fine for flow dictation |
+| `small` | 2.8 s | good balance |
+| `large-v3-turbo` (default) | 10.1 s | best accuracy, ~realtime |
+
+So for long-form notes the default is fine; for **flow** dictation, where you wait on every
+utterance, drop down:
+
+```bash
+export VNOTE_WHISPER_MODEL=small
+```
+
+Mic recording and the flow hotkey both need macOS permissions, granted to *the terminal or
+app that launches vnote* (System Settings → Privacy & Security):
+
+- **Microphone** — for `vnote` with no file argument.
+- **Accessibility** — for `vnote-flow`, which needs to read a global hotkey and inject
+  keystrokes into other apps. Without it the hotkey silently never fires.
+
+</details>
 
 ## Install
 
@@ -39,6 +70,8 @@ You also need:
 - **A cleanup backend** — one of:
   - **[Claude Code](https://claude.com/product/claude-code)** — best quality, uses your
     Claude subscription, no API key. Nothing to download.
+  - **[opencode](https://opencode.ai)** — reuses whatever provider you already set it up
+    with (a local MLX/llama.cpp server, or a hosted one). No extra key for vnote.
   - **[Ollama](https://ollama.com)** — local, offline, free: `ollama pull qwen2.5:14b-instruct`
     (~10 GB VRAM; lighter options exist).
 - On **WSL**, the recorder: `sudo apt install -y pulseaudio-utils`.
@@ -64,14 +97,20 @@ You can dictate formatting as you talk — *"make that a bulleted list"*, *"scra
 *"put a heading here"* — and the cleanup follows along.
 
 First run asks which cleanup backend to use (and, for Ollama, which model size) and saves
-your choice — re-run it any time with `vnote --setup`. It suggests Claude Code when that
-CLI is installed, Ollama otherwise. Override per run with `--backend`:
+your choice — re-run it any time with `vnote --setup`. It suggests whichever CLI you
+actually have: Claude Code, then opencode, then Ollama. Override per run with `--backend`:
 
 ```bash
 vnote --backend claude-code   # your Claude subscription (no API key)
+vnote --backend opencode      # opencode's configured provider/model
 vnote --backend ollama        # local and offline
 vnote --backend claude        # Anthropic API, billed per token
 ```
+
+Both CLI backends run with **every tool disabled** — cleanup is a pure text transform, so
+the model gets no access to your files (opencode additionally runs in a scratch directory
+rather than your current project). Details in the
+[User Guide](docs/USER_GUIDE.md#the-opencode-backend).
 
 See the [User Guide](docs/USER_GUIDE.md) for every flag.
 

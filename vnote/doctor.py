@@ -93,6 +93,18 @@ def _check_backend(backend: str) -> tuple[str, str]:
                 f"({config.CLAUDE_CODE_BIN!r}) is not on PATH"
             )
         return OK, f"claude-code backend: CLI at {exe} (uses your Claude subscription)"
+    if backend == "opencode":
+        from .cleanup import opencode_bin
+
+        exe = opencode_bin()
+        if exe is None:
+            return BAD, (
+                f"opencode backend selected but the opencode CLI "
+                f"({config.OPENCODE_BIN!r}) is not on PATH"
+            )
+        model = config.opencode_model()
+        which = f"model `{model}`" if model else "opencode's own default model"
+        return OK, f"opencode backend: CLI at {exe} ({which}; `opencode models` lists them)"
     # claude (metered API)
     try:
         import anthropic  # noqa: F401

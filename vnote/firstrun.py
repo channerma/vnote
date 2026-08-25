@@ -1,9 +1,9 @@
-"""One-time interactive setup: pick a cleanup backend (and Ollama model).
+"""One-time interactive setup: pick a cleanup backend (and its model).
 
-Three backends are offered. Claude Code is the suggested default *when its CLI is
-actually installed* — it is the best cleanup available without an API key — and
-Ollama is the fallback suggestion otherwise, so a fresh machine is never steered
-toward something it can't run.
+Four backends are offered, and the suggested default is whichever the machine can
+actually run: Claude Code first (best cleanup with no API key), then opencode if
+*its* CLI is installed, then Ollama. A fresh machine is never steered toward
+something it can't run.
 
 Runs only on an interactive terminal, only when nothing has been chosen yet, and
 never when the choice is already forced by ``$VNOTE_BACKEND`` or ``--backend``.
@@ -33,6 +33,33 @@ def claude_code_available() -> bool:
     from .cleanup import claude_code_bin
 
     return claude_code_bin() is not None
+
+
+def opencode_available() -> bool:
+    """True if the opencode CLI is on PATH (so we can offer it as a default)."""
+    from .cleanup import opencode_bin
+
+    return opencode_bin() is not None
+
+
+def opencode_models() -> list[str]:
+    """Model ids opencode knows about (``provider/model``), or [] if it can't say.
+
+    Purely for the menu — an empty list just means "offer opencode's own default",
+    which is what vnote uses anyway when no model is pinned.
+    """
+    from .cleanup import opencode_bin
+
+    exe = opencode_bin()
+    if exe is None:
+        return []
+    try:
+        out = subprocess.run(
+            [exe, "models"], capture_output=True, text=True, timeout=30, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [line.strip() for line in out.splitlines() if "/" in line and not line.startswith(" ")]
 
 
 def should_run(backend_flag: str | None) -> bool:
@@ -108,18 +135,29 @@ def run(backend_flag: str | None, *, force: bool = False) -> None:
 
     print("\nFirst run — let's pick how vnote cleans up your transcripts.\n")
     have_cc = claude_code_available()
+    have_oc = opencode_available()
+    missing = "   [CLI not found on PATH]"
     choices = [
         ("claude-code",
          "Claude Code — top-quality cleanup on your Claude subscription, no API key"
-         + ("" if have_cc else "   [CLI not found on PATH]")),
+         + ("" if have_cc else missing)),
+        ("opencode",
+         "opencode — whichever provider/model opencode is already set up with"
+         + ("" if have_oc else missing)),
         ("ollama",
          "Local (Ollama) — private, offline, free (needs a one-time model download)"),
         ("claude",
          "Anthropic API — same models, billed per token (needs ANTHROPIC_API_KEY)"),
     ]
-    # Prefer the subscription when it's actually installed; otherwise local-first.
+    # Suggest whichever CLI is actually installed; fall back to local-first.
+    if have_cc:
+        suggested_backend = 0
+    elif have_oc:
+        suggested_backend = 1
+    else:
+        suggested_backend = 2
     backend_idx = _ask(
-        "Cleanup backend:", [label for _, label in choices], default=0 if have_cc else 1
+        "Cleanup backend:", [label for _, label in choices], default=suggested_backend
     )
     backend = choices[backend_idx][0]
 
@@ -138,6 +176,19 @@ def run(backend_flag: str | None, *, force: bool = False) -> None:
         cfg["ollama_model"] = tag
         print(f"\n✓ Using Ollama with {tag}.")
         print(f"  Pull it once if you haven't:  ollama pull {tag}")
+    elif backend == "opencode":
+        # Pinning a model is optional: with none saved, vnote omits `-m` and
+        # opencode keeps using the default the user already chose for it.
+        models = opencode_models()
+        if models:
+            options = ["opencode's own default (recommended — follows your opencode config)"] + models
+            idx = _ask("\nWhich model should vnote ask opencode for?", options, default=0)
+            if idx > 0:
+                cfg["opencode_model"] = models[idx - 1]
+        print(f"\n✓ Using opencode ({cfg.get('opencode_model') or 'its own default model'}).")
+        if not have_oc:
+            print("  Install the CLI first:  https://opencode.ai")
+        print("  Check its providers are signed in:  opencode models")
     elif backend == "claude-code":
         print("\n✓ Using Claude Code — cleanup runs on your Claude subscription.")
         if not have_cc:

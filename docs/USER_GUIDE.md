@@ -55,15 +55,39 @@ The first time you run `vnote` interactively it asks which cleanup backend to us
 for Ollama, which model size (pre-selected from your detected GPU memory). Your choice is
 saved to `~/.config/vnote/config.json`.
 
-The backend menu offers three options, and pre-selects **Claude Code** when that CLI is on
-your PATH (Ollama otherwise, so a machine without it is never steered somewhere it can't
-go):
+The backend menu offers four options and pre-selects whichever your machine can actually
+run — **Claude Code** if that CLI is on your PATH, else **opencode** if *its* CLI is, else
+**Ollama** — so a machine is never steered somewhere it can't go:
 
 | Backend | Auth | Notes |
 |---|---|---|
 | `claude-code` | your Claude **subscription** | Best quality, no API key, nothing to download. Needs the [Claude Code CLI](https://claude.com/product/claude-code); run `claude` once to sign in. |
+| `opencode` | whatever opencode already uses | Reuses your [opencode](https://opencode.ai) provider setup — a local MLX/llama.cpp server, or a hosted provider. No separate key for vnote. |
 | `ollama` | none | Private, offline, free. One-time model download. |
 | `claude` | `ANTHROPIC_API_KEY` | Same models, **billed per token**. Needs the `[claude]` extra. |
+
+### The opencode backend
+
+vnote shells out to `opencode run` for what is really a pure text transform, so it takes
+care not to hand the model your machine:
+
+- It runs in a **throwaway scratch directory**, not your current project.
+- That directory holds a generated agent (`.opencode/agent/vnote.md`) with **every tool
+  disabled** — no read, write, edit, bash, or webfetch — whose system prompt is vnote's own.
+- Output is read from `--format json`, and only `text` parts are kept. If you point it at a
+  thinking model, the reasoning never reaches your note.
+- `--pure` skips opencode's external plugins. If your provider or auth *comes* from a
+  plugin, set `VNOTE_OPENCODE_PURE=0`.
+
+By default no model is pinned, so opencode keeps using whatever you configured for it. To
+pin one, choose it during `vnote --setup`, or set `VNOTE_OPENCODE_MODEL` to an id from
+`opencode models` (they look like `provider/model`):
+
+```bash
+opencode models                                   # list the ids you can use
+vnote --backend opencode                          # opencode's own default model
+vnote --backend opencode --model local/my-model   # pin one for this run
+```
 
 - Delete that file to run setup again, or `vnote --setup` to re-run it explicitly.
 - Override any choice with a flag or a `VNOTE_*` environment variable.
@@ -92,7 +116,7 @@ vnote memo.m4a             # process an existing audio file
 | `--edit` | editorial cleanup — reorganize into headings/lists (**default**) |
 | `--summary` | condensed rewrite |
 | `--raw` | transcript only, no LLM |
-| `--backend {ollama,claude-code,claude}` | cleanup backend — see [First run & setup](#first-run--setup) |
+| `--backend {ollama,claude-code,opencode,claude}` | cleanup backend — see [First run & setup](#first-run--setup) |
 | `--model NAME` | override the cleanup model name |
 | `--language CODE` | force transcription language (e.g. `en`); default: auto-detect |
 | `--no-clipboard` | don't touch the clipboard |
@@ -111,7 +135,8 @@ vnote memo.m4a             # process an existing audio file
 `--redo` is handy for trying a different cleanup intensity without re-transcribing (the
 slow part) — e.g. `vnote --redo voice-notes/2026-07-06-1432-… --summary`.
 
-**No GPU?** `--backend claude-code` runs cleanup through your Claude subscription and needs
+**No GPU?** `--backend claude-code` (or `--backend opencode`) runs cleanup through an
+already-configured CLI and needs
 no local model at all; transcription falls back to CPU automatically — slower, but it works.
 
 ---
@@ -168,7 +193,7 @@ vnote-flow                           # hotkey loop (default: ctrl+shift+space)
 | `--vad` | auto-stop after a pause — no second key press |
 | `--vad-silence S` | seconds of silence that end an utterance (default `1.0`) |
 | `--clean [MODE]` | LLM cleanup before pasting; bare = `dictation` (light). Also `light`/`edit`/`summary` |
-| `--backend {ollama,claude-code,claude}` | cleanup backend for `--clean` (runs daemon-side) |
+| `--backend {ollama,claude-code,opencode,claude}` | cleanup backend for `--clean` (runs daemon-side) |
 | `--model NAME` | override the cleanup model for `--clean` |
 | `--tone TEXT` | free-text tone hint for `--clean` (see [Tone](#tone--per-app-tone)) |
 | `--language CODE` | force transcription language |
@@ -188,10 +213,15 @@ fast.
 
 **Backend choice matters more in flow mode than for notes.** You are waiting on the paste,
 so latency is felt directly: a small local model returns in about a second, while
-`--backend claude-code` spends several seconds per utterance (it launches the CLI each
-time). Claude Code is the better pick for notes; a small Ollama model is usually the
-better pick for dictation. `--backend` is per-run, so you can mix — a saved default of
-`claude-code` with `vnote-flow --clean --backend ollama` for typing.
+`--backend claude-code` and `--backend opencode` spend several seconds per utterance (they
+launch the CLI each time). Either is the better pick for notes; a small Ollama model is
+usually the better pick for dictation. `--backend` is per-run, so you can mix — a saved
+default of `claude-code` with `vnote-flow --clean --backend ollama` for typing.
+
+One more reason to prefer a local model for dictation: because each opencode cleanup runs
+in a fresh scratch directory, opencode records it as a new session. That is harmless for
+occasional notes, but a day of heavy dictation leaves a lot of one-line sessions behind —
+`opencode session` manages them if it ever bothers you.
 
 ---
 
@@ -382,9 +412,12 @@ directory is auto-loaded (see `.env.example`).
 |---|---|
 | `VNOTE_DIR` | `./voice-notes` |
 | `VNOTE_WHISPER_MODEL` | `large-v3-turbo` |
-| `VNOTE_BACKEND` | `ollama` (`ollama` \| `claude-code` \| `claude`) |
+| `VNOTE_BACKEND` | `ollama` (`ollama` \| `claude-code` \| `opencode` \| `claude`) |
 | `VNOTE_OLLAMA_MODEL` | `qwen2.5:14b-instruct` |
 | `VNOTE_CLAUDE_CODE_BIN` | `claude` (path to the Claude Code CLI; `--backend claude-code`) |
+| `VNOTE_OPENCODE_BIN` | `opencode` (path to the opencode CLI; `--backend opencode`) |
+| `VNOTE_OPENCODE_MODEL` | — (unset = opencode's own default; `opencode models` lists ids) |
+| `VNOTE_OPENCODE_PURE` | on (`0` = let opencode load its external plugins) |
 | `VNOTE_CLAUDE_MODEL` | `claude-sonnet-5` (`--backend claude` only) |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` |
 | `VNOTE_DAEMON_HOST` | `127.0.0.1` |

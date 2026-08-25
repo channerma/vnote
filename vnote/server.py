@@ -7,7 +7,7 @@ guaranteed concurrency-safe).
 
 Routes: ``GET /`` and ``/static/*`` serve the page in ``vnote/web/``; ``/api/*``
 is what that page talks to (docs/planning/PHASE8.md has the contract, PHASE9.md
-the editing/revise/versions/reveal additions);
+the editing/revise/versions/reveal additions, PHASE10.md the style registry);
 ``/transcribe``, ``/clean``, ``/revise`` and ``/stream/*`` are the per-step
 endpoints the CLI uses when a daemon is up.
 """
@@ -27,9 +27,9 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-from . import __version__, config, output, stream, versions
+from . import __version__, config, output, stream, styles, versions
 from .audio import BYTES_PER_S, wav_bytes
 
 _infer_lock = threading.Lock()
@@ -289,9 +289,14 @@ def _note_detail(session: Path) -> dict:
     except (OSError, ValueError):
         pass  # best-effort: a broken meta.json or an unwritable folder must not fail the read
     audio = _audio_file(session)
+    meta = _read_meta(session)
+    mode = meta.get("cleanup_mode") or meta.get("mode")
     return {
         **_summary(session),
-        "meta": _read_meta(session),
+        "meta": meta,
+        # the style this note was made with was deleted or renamed: the page says so
+        # in the Regenerate select and falls back to the default style
+        "style_missing": bool(mode) and styles.get(mode) is None,
         "note": _read_text(session / "note.md"),
         "transcript": _read_text(session / "transcript.txt") or "",
         # the kept copy of Whisper's output is the whole record of an edit: no meta flag
@@ -344,27 +349,50 @@ def _preserve_upload(tmp: Path) -> Path | None:
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
+def _styles_payload() -> dict:
+    """GET /api/styles: the dropdown's groups, the editor's folder, and any warnings."""
+    reg = styles.load()
+    return {"groups": reg.groups(), "problems": reg.problems, "mine_dir": str(styles.mine_dir())}
+
+
+def _style_payload(name: str) -> dict | None:
+    """GET /api/styles/<name>: the file as it is on disk, plus what the parser made of it."""
+    style = styles.get(name)
+    if style is None:
+        return None
+    return {**style.as_dict(), "text": _read_text(style.path) or "",
+            "mine": style.source == "mine"}
+
+
 def _one(query: dict[str, list[str]], key: str, default: str | None = None) -> str | None:
     values = query.get(key)
     return values[0] if values and values[0] != "" else default
 
 
-def _note_options(query: dict[str, list[str]]) -> tuple[str, str, str | None, bool]:
-    """``(mode, backend, model, raw)`` from the query params /api/note and /stream/finish share."""
+def _bad_style(name: str) -> _BadRequest:
+    return _BadRequest(f"bad style: {name!r} (one of {', '.join(styles.names())})")
+
+
+def _note_options(query: dict[str, list[str]]) -> tuple[str, str | None, str | None, bool]:
+    """``(mode, backend, model, raw)`` from the query params /api/note and /stream/finish share.
+
+    ``mode`` is a style name (the param keeps its old name — see styles.py). A backend
+    that is absent or blank stays None: the style's own ``backend:`` line decides, then
+    the setting.
+    """
     raw = (_one(query, "raw") or "0").lower() in ("1", "true", "yes")
-    if raw:  # no LLM runs, so a bad saved default mode/backend must not block a raw recording
-        mode, backend = "edit", config.BUILTIN_BACKEND
-    else:
-        mode = _one(query, "mode") or config.default_mode()
-        if mode not in config.MODES:
-            raise _BadRequest(f"bad mode: {mode!r} (one of {', '.join(config.MODES)})")
-        backend = _one(query, "backend") or config.backend()
-        if backend not in config.setting("backend").choices:
-            raise _BadRequest(f"bad backend: {backend!r}")
+    if raw:  # no LLM runs, so a bad saved default style/backend must not block a raw recording
+        return config.DEFAULT_STYLE, None, None, True
+    mode = _one(query, "mode") or config.default_style()
+    if styles.get(mode) is None:
+        raise _bad_style(mode)
+    backend = _one(query, "backend")
+    if backend is not None and backend not in config.setting("backend").choices:
+        raise _BadRequest(f"bad backend: {backend!r}")
     return mode, backend, _one(query, "model"), raw
 
 
-def _note_from_audio(tmp: Path, *, mode: str, backend: str, model: str | None, language: str | None,
+def _note_from_audio(tmp: Path, *, mode: str, backend: str | None, model: str | None, language: str | None,
                      raw: bool, source: str, extra: dict) -> tuple[int, dict]:
     """``tmp`` (an audio file we own) → a finished note folder → ``(status, payload)``.
 
@@ -410,7 +438,7 @@ class _Handler(BaseHTTPRequestHandler):
     # --- response helpers ---
 
     def _send(self, code: int, payload: dict) -> None:
-        body = json.dumps(payload).encode()
+        body = b"" if code == 204 else json.dumps(payload).encode()  # 204 carries no body
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -519,6 +547,14 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"settings": config.describe()})
             if path == "/api/vocab":
                 return self._send(200, {"text": _read_text(config.vocab_file()) or ""})
+            if path == "/api/styles":
+                return self._send(200, _styles_payload())
+            m = re.fullmatch(r"/api/styles/([^/]+)", path)
+            if m:
+                payload = _style_payload(unquote(m.group(1)))
+                if payload is None:
+                    return self._send(404, {"error": f"no such style: {unquote(m.group(1))}"})
+                return self._send(200, payload)
             if path == "/api/notes":
                 return self._send(200, {"notes": _list_notes()})
             m = re.fullmatch(r"/api/notes/([^/]+)/versions/(\d+)", path)
@@ -571,6 +607,9 @@ class _Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/notes/([^/]+)/transcript", path)
             if m:
                 return self._api_save_transcript(m.group(1))
+            m = re.fullmatch(r"/api/styles/([^/]+)", path)
+            if m:
+                return self._api_save_style(unquote(m.group(1)))
             if path == "/api/vocab":
                 text = self._read_json().get("text")
                 if not isinstance(text, str):
@@ -582,6 +621,20 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "not found"})
         except _BadRequest as exc:
             self._send(400, {"error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
+
+    # --- DELETE (styles) ---
+
+    def do_DELETE(self) -> None:
+        if self._cross_site():
+            return self._send(403, {"error": "cross-site request refused"})
+        try:
+            path = urlparse(self.path).path
+            m = re.fullmatch(r"/api/styles/([^/]+)", path)
+            if m:
+                return self._api_delete_style(unquote(m.group(1)))
+            self._send(404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001
             self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
 
@@ -669,6 +722,35 @@ class _Handler(BaseHTTPRequestHandler):
         versions.write_transcript(session, text)
         self._send(200, {"transcript": text, "transcript_edited": True})
 
+    def _api_save_style(self, name: str) -> None:
+        """PUT a style file into Mine — a new one, or the override copy of a built-in."""
+        text = self._read_json().get("text")
+        if not isinstance(text, str):
+            return self._send(400, {"error": "body must be {\"text\": \"...\"}"})
+        if not styles.NAME_RE.fullmatch(name):  # before the name is joined to a path
+            return self._send(400, {"error": f"bad style name {name!r}"})
+        existed = (styles.mine_dir() / f"{name}.md").is_file()
+        try:
+            style = styles.write(name, text)
+        except ValueError as exc:  # a bad name, a bad front matter, an empty body
+            return self._send(400, {"error": str(exc)})
+        except OSError as exc:
+            return self._send(500, {"error": f"could not write the style: {exc}"})
+        self._send(200 if existed else 201, {"saved": style.name, "path": str(style.path)})
+
+    def _api_delete_style(self, name: str) -> None:
+        try:
+            styles.delete(name)
+        except ValueError as exc:
+            return self._send(400, {"error": str(exc)})
+        except FileNotFoundError as exc:
+            return self._send(404, {"error": str(exc)})
+        except PermissionError as exc:  # a built-in or another folder's file: not ours to remove
+            return self._send(403, {"error": str(exc)})
+        except OSError as exc:
+            return self._send(500, {"error": f"could not delete the style: {exc}"})
+        self._send(204, {})
+
     def _api_revise(self, name: str) -> None:
         """Rewrite the *current* note per a free-text instruction — a new version (op ``revise``)."""
         session = _session_path(name)
@@ -715,11 +797,11 @@ class _Handler(BaseHTTPRequestHandler):
         if session is None:
             return self._send(404, {"error": f"no such note: {name}"})
         data = self._read_json()
-        mode = data.get("mode") or config.default_mode()
-        if mode not in config.MODES:
-            return self._send(400, {"error": f"bad mode: {mode!r} (one of {', '.join(config.MODES)})"})
-        backend = data.get("backend") or config.backend()
-        if backend not in config.setting("backend").choices:
+        mode = data.get("mode") or config.default_style()  # a style name; the field keeps its name
+        if styles.get(mode) is None:
+            return self._send(400, {"error": f"bad style: {mode!r} (one of {', '.join(styles.names())})"})
+        backend = data.get("backend") or None  # blank = the style's backend, then the setting
+        if backend is not None and backend not in config.setting("backend").choices:
             return self._send(400, {"error": f"bad backend: {backend!r}"})
         from . import cleanup, pipeline
 
@@ -827,8 +909,8 @@ class _Handler(BaseHTTPRequestHandler):
 
                 result = clean(
                     data["transcript"],
-                    mode=data.get("mode", "edit"),
-                    backend=data.get("backend", "ollama"),
+                    mode=data.get("mode") or config.DEFAULT_STYLE,
+                    backend=data.get("backend"),
                     model=data.get("model"),
                     tone=data.get("tone"),
                     instructions=data.get("instructions"),
@@ -847,7 +929,7 @@ class _Handler(BaseHTTPRequestHandler):
                 result = revise(
                     note,
                     instructions,
-                    backend=data.get("backend", "ollama"),
+                    backend=data.get("backend"),
                     model=data.get("model"),
                 )
                 self._send(200, {"title": result.title, "body": result.body})

@@ -91,12 +91,9 @@
         <hr class="rule" />
         <div class="picks">
           <p class="field">
-            <label for="pick-mode">Mode</label>
+            <label for="pick-mode">Style</label>
+            <!-- filled from /api/styles: one optgroup per source, plus "raw" -->
             <select id="pick-mode">
-              <option value="light">light — fix fillers and grammar</option>
-              <option value="edit">edit — headings and lists</option>
-              <option value="summary">summary — condense</option>
-              <option value="dictation">dictation — plain text, fast</option>
               <option value="raw">raw — no LLM</option>
             </select>
           </p>
@@ -192,12 +189,8 @@
           <div class="reprocess">
             <p class="field">
               <label for="regenerate-mode">Regenerate from raw</label>
-              <select id="regenerate-mode">
-                <option value="light">light</option>
-                <option value="edit">edit</option>
-                <option value="summary">summary</option>
-                <option value="dictation">dictation</option>
-              </select>
+              <!-- filled from /api/styles (no "raw" — Regenerate always runs the LLM) -->
+              <select id="regenerate-mode"></select>
             </p>
             <button id="regenerate" class="btn btn-secondary" type="button">Regenerate</button>
             <span class="vrule" aria-hidden="true"></span>
@@ -243,6 +236,31 @@
           </div>
           <p class="hint">One entry per line. A bare word biases transcription toward it. <code>wrong -&gt; right</code> replaces it afterwards, so it fixes what the model insists on hearing.</p>
           <textarea id="vocab" spellcheck="false" aria-label="Vocabulary"></textarea>
+        </div>
+
+        <hr class="rule" />
+
+        <div class="styles-block">
+          <div class="vocab-head">
+            <h2>Styles</h2>
+            <span id="style-status" class="inline-status" role="status"></span>
+            <button id="style-new" class="btn btn-secondary btn-sm" type="button">New</button>
+            <button id="style-duplicate" class="btn btn-secondary btn-sm" type="button">Duplicate</button>
+            <button id="style-delete" class="btn btn-secondary btn-sm" type="button">Delete</button>
+            <button id="style-save" class="btn btn-primary btn-sm" type="button">Save style</button>
+          </div>
+          <p class="hint">A style is one Markdown file: an optional front matter block (<code>description</code>, <code>output: note</code> or <code>plain</code>, and optionally <code>backend</code> and <code>model</code>) and then the instruction the model gets. Saving writes it to your own styles folder, which overrides the built-in of the same name.</p>
+          <div id="styles-problems" class="banner" hidden></div>
+          <div class="styles-editor">
+            <ul id="styles-list"></ul>
+            <div class="style-pane">
+              <p class="field">
+                <label for="style-name">File name</label>
+                <input id="style-name" type="text" spellcheck="false" autocomplete="off" />
+              </p>
+              <textarea id="style-text" spellcheck="false" aria-label="Style file"></textarea>
+            </div>
+          </div>
         </div>
       </div>
     </section>

@@ -5,8 +5,13 @@ import subprocess
 
 import pytest
 
-from vnote import cleanup, config
+from vnote import cleanup, config, styles
 from vnote.cleanup import _build_user_prompt, _finish, _parse_response, clean, revise
+
+
+def _style(name: str):
+    """The built-in style of that name — the prompt helpers take a Style, not a name."""
+    return styles.get(name)
 
 
 def test_parse_full_title_and_body():
@@ -42,51 +47,86 @@ def test_parse_empty_everything_yields_placeholder_title():
     assert r.body == ""
 
 
-def test_build_user_prompt_includes_mode_instruction_and_transcript():
-    prompt = _build_user_prompt("hello there", "light")
+def test_build_user_prompt_includes_the_style_body_and_transcript():
+    prompt = _build_user_prompt("hello there", _style("light"))
     assert "hello there" in prompt
     assert "filler" in prompt.lower()  # the 'light' instruction mentions filler words
 
 
-# --- dictation mode (plain-text output, no title framing) ------------------
+# --- output: plain (no title framing) ---------------------------------------
 
 
-def test_dictation_finish_is_plain_text_not_title_framed():
-    r = _finish("TITLE: looks like a title\n---\nbut dictation takes it verbatim", "orig words here", "dictation")
+def test_plain_output_finish_is_not_title_framed():
+    r = _finish("TITLE: looks like a title\n---\nbut dictation takes it verbatim", "orig words here",
+                _style("dictation"))
     assert r.body == "TITLE: looks like a title\n---\nbut dictation takes it verbatim"
     assert r.title == "orig words here"  # fallback title from the transcript; flow ignores it
 
 
-def test_note_modes_still_parse_title_framing():
-    r = _finish("TITLE: A Note\n---\nbody", "x", "edit")
+def test_note_output_still_parses_title_framing():
+    r = _finish("TITLE: A Note\n---\nbody", "x", _style("edit"))
     assert (r.title, r.body) == ("A Note", "body")
 
 
 def test_dictation_prompt_mentions_spoken_commands():
-    prompt = _build_user_prompt("x", "dictation")
+    prompt = _build_user_prompt("x", _style("dictation"))
     assert "scratch that" in prompt
 
 
 def test_tone_lands_in_the_prompt():
-    assert "Write in a casual tone." in _build_user_prompt("x", "dictation", tone="casual")
-    assert "tone" not in _build_user_prompt("x", "light")  # no tone -> no tone sentence
+    assert "Write in a casual tone." in _build_user_prompt("x", _style("dictation"), tone="casual")
+    assert "tone" not in _build_user_prompt("x", _style("light"))  # no tone -> no tone sentence
 
 
-def test_clean_rejects_unknown_mode():
-    with pytest.raises(ValueError, match="unknown mode"):
+def test_clean_rejects_an_unknown_style():
+    with pytest.raises(ValueError, match="unknown style"):
         clean("x", mode="bogus")
 
 
-def test_dictation_model_resolution_order(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    monkeypatch.delenv("VNOTE_DICTATION_MODEL", raising=False)
-    monkeypatch.delenv("VNOTE_OLLAMA_MODEL", raising=False)
+# --- the style decides the prompt, the contract and the model ------------------
 
-    assert config.dictation_model() == config.ollama_model()  # falls back to the note model
-    config.save_config({"dictation_model": "qwen2.5:3b-instruct"})
-    assert config.dictation_model() == "qwen2.5:3b-instruct"
-    monkeypatch.setenv("VNOTE_DICTATION_MODEL", "llama3.2:3b")
-    assert config.dictation_model() == "llama3.2:3b"
+
+def _record_complete(monkeypatch):
+    """Capture what clean() hands the backend, without running one."""
+    rec: dict = {}
+
+    def fake(backend, system, user, model):
+        rec.update(backend=backend, system=system, user=user, model=model)
+        return "TITLE: T\n---\nbody"
+
+    monkeypatch.setattr(cleanup, "_complete", fake)
+    return rec
+
+
+def test_clean_uses_the_style_body_and_the_note_contract(monkeypatch):
+    rec = _record_complete(monkeypatch)
+    clean("transcript here", mode="summary")
+    assert styles.get("summary").body in rec["user"]
+    assert "TITLE:" in rec["system"]  # output: note keeps the title contract
+
+
+def test_a_plain_style_gets_the_plain_preamble_and_no_title_parsing(monkeypatch):
+    rec = _record_complete(monkeypatch)
+    result = clean("orig words here", mode="dictation")
+    assert "no title line" in rec["system"] and "TITLE:" not in rec["system"]
+    assert result.body == "TITLE: T\n---\nbody"  # taken verbatim, not parsed
+    assert result.title == "orig words here"      # derived from the transcript instead
+
+
+def test_backend_and_model_precedence_is_explicit_then_style_then_settings(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    styles.write("housestyle", "---\nbackend: claude-code\nmodel: tiny:1b\n---\nDo it.")
+    rec = _record_complete(monkeypatch)
+
+    clean("x", mode="housestyle")
+    assert (rec["backend"], rec["model"]) == ("claude-code", "tiny:1b")  # the style's own lines
+
+    clean("x", mode="housestyle", backend="ollama", model="big:14b")
+    assert (rec["backend"], rec["model"]) == ("ollama", "big:14b")  # an explicit pick wins
+
+    clean("x", mode="edit")  # a style with neither: the settings decide
+    assert (rec["backend"], rec["model"]) == (config.backend(), None)
+    styles._invalidate()
 
 
 # --- claude-code backend (subscription CLI; no network, no API key) -----------
@@ -142,12 +182,12 @@ def test_claude_code_passes_model_only_when_given(monkeypatch):
     assert rec["cmd"][rec["cmd"].index("--model") + 1] == "claude-opus-5"
 
 
-def test_claude_code_dictation_mode_returns_plain_text(monkeypatch):
+def test_claude_code_plain_style_returns_plain_text(monkeypatch):
     rec: dict = {}
     monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
     monkeypatch.setattr(cleanup.subprocess, "run", _fake_run(rec, stdout="cleaned words\n"))
     result = clean("raw words", mode="dictation", backend="claude-code")
-    assert result.body == "cleaned words"  # no TITLE framing parsed in dictation mode
+    assert result.body == "cleaned words"  # no TITLE framing parsed for output: plain
 
 
 def test_claude_code_nonzero_exit_surfaces_stderr(monkeypatch):
@@ -183,19 +223,19 @@ def test_claude_code_timeout_is_reported(monkeypatch):
 
 
 def test_instructions_land_at_the_end_of_the_user_prompt():
-    prompt = _build_user_prompt("x", "edit", instructions="keep the numbers exact")
+    prompt = _build_user_prompt("x", _style("edit"), instructions="keep the numbers exact")
     assert prompt.rstrip().endswith("keep the numbers exact")
     assert "take precedence" in prompt
 
 
-def test_instructions_work_in_dictation_mode_too():
-    prompt = _build_user_prompt("x", "dictation", instructions="british spelling")
+def test_instructions_work_for_a_plain_style_too():
+    prompt = _build_user_prompt("x", _style("dictation"), instructions="british spelling")
     assert "british spelling" in prompt
 
 
 def test_no_instructions_paragraph_when_none_or_blank():
-    assert "Additional instructions" not in _build_user_prompt("x", "edit")
-    assert "Additional instructions" not in _build_user_prompt("x", "edit", instructions="   ")
+    assert "Additional instructions" not in _build_user_prompt("x", _style("edit"))
+    assert "Additional instructions" not in _build_user_prompt("x", _style("edit"), instructions="   ")
 
 
 def test_instructions_reach_the_backend_prompt(monkeypatch):
@@ -241,7 +281,8 @@ def test_revise_rejects_blank_instruction_and_unknown_backend():
         revise("# T\n\nbody", "shorter", backend="bogus")
 
 
-def test_revise_ollama_uses_the_note_model_not_the_dictation_model(monkeypatch):
+def test_revise_ollama_uses_the_note_model(monkeypatch):
+    """Revise is style-agnostic: no style's model: line can pull it onto a small model."""
     rec: dict = {}
 
     def fake(system, user, model):
@@ -249,7 +290,6 @@ def test_revise_ollama_uses_the_note_model_not_the_dictation_model(monkeypatch):
         return "TITLE: T\n---\nbody"
 
     monkeypatch.setattr(cleanup, "_ollama_complete", fake)
-    monkeypatch.setattr(cleanup, "dictation_model", lambda: "tiny:1b")
     monkeypatch.setattr(cleanup, "ollama_model", lambda: "big:14b")
 
     assert revise("# T\n\nbody", "shorter").title == "T"

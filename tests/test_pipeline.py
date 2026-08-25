@@ -428,3 +428,26 @@ def test_committed_results_report_their_own_text(tmp_path):
 
     restored = pipeline.restore(d, 1)
     assert restored.version == 3 and restored.note_text == "# One\n\nbody one\n"
+
+
+def test_revise_of_a_plain_note_whose_style_is_gone_keeps_it_plain(tmp_path, monkeypatch):
+    """A deleted style cannot say whether the note has a heading — the note itself can."""
+    monkeypatch.setattr(output, "NOTES_DIR", tmp_path)
+    session = tmp_path / "2026-08-25-1200-plain"
+    session.mkdir()
+    (session / "meta.json").write_text(
+        json.dumps({"title": "Plain", "cleanup_mode": "retired-style", "versions": []}), encoding="utf-8")
+    (session / "note.md").write_text("just the body, no heading\n", encoding="utf-8")
+    (session / "transcript.txt").write_text("raw words\n", encoding="utf-8")
+
+    def fake_revise(note_text, instructions, backend=None, model=None):
+        return CleanResult(title="Plain", body="a shorter body")
+
+    result = pipeline.revise(session, revise_fn=fake_revise, instructions="shorter", backend="ollama")
+    assert result.note_text == "a shorter body\n"  # no "# Plain" grew out of the missing style
+    assert versions.heading_title((session / "note.md").read_text(encoding="utf-8")) is None
+
+    # ... and a note that does carry one keeps it
+    (session / "note.md").write_text("# Plain\n\nbody\n", encoding="utf-8")
+    result = pipeline.revise(session, revise_fn=fake_revise, instructions="shorter", backend="ollama")
+    assert result.note_text.startswith("# Plain\n\n")

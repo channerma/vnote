@@ -6,7 +6,7 @@ from vnote.cli import _parse_args
 
 def test_defaults():
     a = _parse_args([])
-    assert a.mode is None  # resolved in main(): flag > saved default_mode > edit
+    assert a.mode is None  # resolved in main(): flag > saved default_style > edit
     assert a.backend is None  # resolved later from saved choice / env / built-in
     assert a.raw is False
     assert a.no_clipboard is False
@@ -20,6 +20,8 @@ def test_mode_flags_are_mutually_exclusive_values():
     assert _parse_args(["--summary"]).mode == "summary"
     assert _parse_args(["--edit"]).mode == "edit"
     assert _parse_args(["--dictation"]).mode == "dictation"
+    assert _parse_args(["--style", "email"]).mode == "email"
+    assert _parse_args(["--mode", "email"]).mode == "email"  # the pre-0.7.0 name still works
 
 
 def test_backend_and_audio_and_flags():
@@ -42,24 +44,24 @@ def test_resolved_model_per_backend(tmp_path, monkeypatch):
 
 
 
-def test_bad_saved_mode_is_a_clear_error_not_a_traceback(monkeypatch, capsys):
-    monkeypatch.setenv("VNOTE_MODE", "bogus")
+def test_bad_saved_style_is_a_clear_error_not_a_traceback(monkeypatch, capsys):
+    monkeypatch.setenv("VNOTE_MODE", "bogus")  # the retired name still selects the style
     assert cli.main([]) == 2  # fails before any recording is attempted
     err = capsys.readouterr().err
-    assert "unknown cleanup mode 'bogus'" in err and "VNOTE_MODE" in err
+    assert "unknown cleanup style 'bogus'" in err and "VNOTE_MODE" in err
     assert cli.main(["--config"]) == 0  # utility actions still run so you can see the bad value
 
 
 def test_setup_keeps_other_saved_settings(monkeypatch, capsys):
     from vnote import firstrun
 
-    config.save_config({"default_mode": "summary", "language": "en"})
+    config.save_config({"default_style": "summary", "language": "en"})
     monkeypatch.setattr(firstrun, "claude_code_available", lambda: True)
     monkeypatch.setattr(firstrun, "_ask", lambda prompt, options, default: 0)  # pick claude-code
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     firstrun.run(None, force=True)
-    assert config.load_config() == {"default_mode": "summary", "language": "en", "backend": "claude-code"}
+    assert config.load_config() == {"default_style": "summary", "language": "en", "backend": "claude-code"}
 
 
 def test_instructions_flag_parses():

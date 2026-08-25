@@ -107,15 +107,25 @@ def daemon_addr() -> tuple[str, int]:
 
 
 
-# Cleanup intensity modes (``dictation`` = plain text, no title, small fast model).
-MODES = ("light", "edit", "summary", "dictation")
-DEFAULT_MODE = "edit"
+# The style used when nothing picks one. Styles themselves live in Markdown files
+# (see styles.py); this is only the name of one of them.
+DEFAULT_STYLE = "edit"
 
 
 def vocab_file() -> Path:
     """The custom-vocabulary file: ``$VNOTE_VOCAB`` or ``<config dir>/vocab.txt``."""
     env = os.environ.get("VNOTE_VOCAB")
     return Path(env).expanduser() if env else config_dir() / "vocab.txt"
+
+
+def styles_dirs() -> list[Path]:
+    """Extra style folders from ``$VNOTE_STYLES_DIRS`` (an ``os.pathsep`` list), in order.
+
+    Each one overrides the built-ins and the ones before it; Mine
+    (``<config dir>/styles``) is always searched and is where the editor writes.
+    """
+    raw = os.environ.get("VNOTE_STYLES_DIRS", "")
+    return [Path(part).expanduser() for part in raw.split(os.pathsep) if part.strip()]
 
 
 # --- the settings registry ---------------------------------------------------
@@ -140,10 +150,10 @@ SETTINGS: tuple[Setting, ...] = (
         "choice", ("ollama", "claude-code", "claude"),
     ),
     Setting(
-        "default_mode", "VNOTE_MODE", DEFAULT_MODE,
-        "Cleanup mode used when none is picked: light (fix fillers and grammar only), edit (reorganize into "
-        "headings and lists), summary (condense), dictation (plain text on a small fast model).",
-        "choice", MODES,
+        "default_style", "VNOTE_STYLE", DEFAULT_STYLE,
+        "Cleanup style used when none is picked. A style is a Markdown file holding the instruction the "
+        "model gets; the choices are whatever the style folders hold (edit them in Settings).",
+        "choice",  # choices are dynamic — see choices_for()
     ),
     Setting(
         "language", "VNOTE_LANGUAGE", "",
@@ -151,11 +161,8 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting(
         "ollama_model", "VNOTE_OLLAMA_MODEL", BUILTIN_OLLAMA_MODEL,
-        "Ollama model for note cleanup (light / edit / summary). Pull it once: ollama pull <model>.",
-    ),
-    Setting(
-        "dictation_model", "VNOTE_DICTATION_MODEL", "",
-        "Ollama model for dictation mode — ideally small and fast, e.g. llama3.2:3b. Blank = same as ollama_model.",
+        "Ollama model for note cleanup. Pull it once: ollama pull <model>. A style can name its own model "
+        "instead (a model: line in the style file).",
     ),
     Setting("ollama_host", "OLLAMA_HOST", "http://127.0.0.1:11434", "Where Ollama listens."),
     Setting(
@@ -187,6 +194,13 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting("daemon_port", "VNOTE_DAEMON_PORT", 8760, "Port the daemon listens on.", "int", editable=False),
     Setting(
+        "styles_dirs", "VNOTE_STYLES_DIRS", "",
+        "Extra folders of style files, separated by the platform's path separator. Each one overrides the "
+        "built-in styles and the folders before it. Your own styles live in <config dir>/styles and are "
+        "edited below.",
+        "path", editable=False,
+    ),
+    Setting(
         "vocab", "VNOTE_VOCAB", str(Path.home() / ".config" / "vnote" / "vocab.txt"),
         "Custom-vocabulary file: hotwords to bias transcription and whole-word corrections. Edit its contents "
         "in the web UI or any editor; changes apply to the next recording.",
@@ -202,8 +216,13 @@ _STARTUP_VALUES = {
     "notes_dir": lambda: str(NOTES_DIR),
     "daemon_host": lambda: DAEMON_HOST,
     "daemon_port": lambda: DAEMON_PORT,
+    "styles_dirs": lambda: os.pathsep.join(str(p) for p in styles_dirs()),
     "vocab": lambda: str(vocab_file()),
 }
+
+# Retired names still honoured on the way in (never written back): 0.6.x called
+# styles "modes", so a config file or an environment from then still picks the style.
+_DEPRECATED: dict[str, tuple[str, str]] = {"default_style": ("default_mode", "VNOTE_MODE")}
 
 
 def setting(key: str) -> Setting:
@@ -213,6 +232,16 @@ def setting(key: str) -> Setting:
         raise ValueError(f"unknown setting: {key}") from None
 
 
+def choices_for(key: str) -> tuple[str, ...]:
+    """A choice setting's options. ``default_style`` has no fixed list — the style
+    registry is the list, and it changes whenever a style file is added or removed."""
+    if key == "default_style":
+        from . import styles
+
+        return tuple(styles.names())
+    return setting(key).choices
+
+
 def _coerce(s: Setting, raw: object) -> object:
     if s.kind == "int":
         try:
@@ -220,8 +249,10 @@ def _coerce(s: Setting, raw: object) -> object:
         except (TypeError, ValueError):
             raise ValueError(f"{s.key} must be an integer, got {raw!r}") from None
     value = str(raw).strip()
-    if s.kind == "choice" and value not in s.choices:
-        raise ValueError(f"{s.key} must be one of {', '.join(s.choices)}; got {value!r}")
+    if s.kind == "choice":
+        choices = choices_for(s.key)
+        if value not in choices:
+            raise ValueError(f"{s.key} must be one of {', '.join(choices)}; got {value!r}")
     if s.key == "ollama_host" and not value.startswith(("http://", "https://")):
         raise ValueError(f"ollama_host must start with http:// or https://; got {value!r}")
     # Ollama reads a bare number as seconds (-1 = until it exits) and anything else with
@@ -233,13 +264,21 @@ def _coerce(s: Setting, raw: object) -> object:
     return value
 
 
+def _retired(key: str) -> tuple[str, str] | None:
+    """(old config key, old env var) for a setting that was renamed, or None."""
+    return _DEPRECATED.get(key)
+
+
 def source(key: str) -> str:
     """Where the effective value comes from: ``env`` | ``file`` | ``default``."""
     s = setting(key)
-    if os.environ.get(s.env, "") != "":
+    old = _retired(key)
+    if os.environ.get(s.env, "") != "" or (old and os.environ.get(old[1], "") != ""):
         return "env"
-    if s.editable and load_config().get(key) not in (None, ""):
-        return "file"
+    if s.editable:
+        cfg = load_config()
+        if cfg.get(key) not in (None, "") or (old and cfg.get(old[0]) not in (None, "")):
+            return "file"
     return "default"
 
 
@@ -248,10 +287,14 @@ def get(key: str) -> object:
     s = setting(key)
     if not s.editable:
         return _STARTUP_VALUES[key]()
-    env = os.environ.get(s.env, "")
+    old = _retired(key)
+    env = os.environ.get(s.env, "") or (os.environ.get(old[1], "") if old else "")
     if env != "":
         return _coerce(s, env) if s.kind == "int" else env
-    file = load_config().get(key)
+    cfg = load_config()
+    file = cfg.get(key)
+    if file in (None, "") and old:
+        file = cfg.get(old[0])
     if file not in (None, ""):
         if s.kind == "int":
             try:
@@ -276,8 +319,9 @@ def describe() -> list[dict]:
             "source": source(s.key),
             "editable": s.editable,
         }
-        if s.choices:
-            row["choices"] = list(s.choices)
+        choices = choices_for(s.key)
+        if choices:
+            row["choices"] = list(choices)
         out.append(row)
     return out
 
@@ -293,14 +337,20 @@ def update(changes: dict) -> list[str]:
     saved: list[str] = []
     for key, raw in changes.items():
         s = setting(key)
+        old = _retired(key)
         if not s.editable:
             raise ValueError(f"{key} is set when the daemon starts — set {s.env} and restart")
-        if os.environ.get(s.env, "") != "":
-            raise ValueError(f"{key} is overridden by {s.env} in the environment; unset it to change it here")
+        for env in (s.env, old[1] if old else None):
+            # The retired env var still resolves the value (see get()), so a write here
+            # would be accepted and then do nothing — say so instead.
+            if env and os.environ.get(env, "") != "":
+                raise ValueError(f"{key} is overridden by {env} in the environment; unset it to change it here")
         if raw is None or (isinstance(raw, str) and raw.strip() == ""):
             cfg.pop(key, None)  # blank / null = back to the built-in default
         else:
             cfg[key] = _coerce(s, raw)
+        if old:
+            cfg.pop(old[0], None)  # ... and the retired name never outlives a deliberate write
         saved.append(key)
     save_config(cfg)
     return saved
@@ -319,16 +369,9 @@ def ollama_model() -> str:
     return str(get("ollama_model"))
 
 
-def dictation_model() -> str:
-    """Resolve the model for `dictation` cleanup — ideally small and fast (a warm 3B).
-
-    Falls back to the regular note-cleanup model so dictation works with no extra setup.
-    """
-    return str(get("dictation_model")) or ollama_model()
-
-
-def default_mode() -> str:
-    return str(get("default_mode"))
+def default_style() -> str:
+    """The style name used when nothing picks one (may name a style that no longer exists)."""
+    return str(get("default_style"))
 
 
 def language() -> str | None:

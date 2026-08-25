@@ -64,10 +64,11 @@ the model gets (what `_MODE_INSTRUCTIONS[mode]` holds today).
 
 ```markdown
 ---
-description: a Claude Code session prompt   # the dropdown line
-output: plain                                 # note | plain (default note)
-backend: claude-code                          # optional; blank = the Settings default
-model:                                        # optional; blank = the backend's default
+# the dropdown line (a description is prose: no trailing-# comments on this one)
+description: a Claude Code session prompt
+output: plain            # note | plain (default note)
+backend: claude-code     # optional; blank = the Settings default
+model:                   # optional; blank = the backend's default
 ---
 Turn the spoken brief into a session prompt in the speaker's voice …
 ```

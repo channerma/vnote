@@ -19,44 +19,17 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from . import config
-from .config import dictation_model, ollama_model
+from . import config, styles
+from .config import ollama_model
+from .styles import Style
 
 # --- prompt construction -----------------------------------------------------
 
-_MODE_INSTRUCTIONS = {
-    "light": (
-        "Lightly clean the transcript: remove filler words (um, uh, you know, like), "
-        "false starts and accidental repetitions; fix grammar, punctuation and capitalization; "
-        "correct obvious mis-transcriptions using context. Keep the speaker's wording, content "
-        "and order intact. Do not reorganize."
-    ),
-    "edit": (
-        "Edit the transcript into a clean, well-organized note: remove filler words, false starts "
-        "and repetitions; fix grammar and punctuation; correct obvious mis-transcriptions; group "
-        "related thoughts into paragraphs; add headings or bullet lists where the content naturally "
-        "calls for it; smooth transitions. Preserve all of the speaker's points and detail — do not "
-        "summarize anything away and do not invent content."
-    ),
-    "summary": (
-        "Rewrite the transcript as a tight, well-organized note: everything in 'edit' mode, plus "
-        "cut tangents and trim verbose passages so the result is noticeably more concise than the "
-        "original while keeping every substantive point. Use headings and bullets freely."
-    ),
-    # Flow-mode dictation: the output is typed straight into whatever app has focus,
-    # so it must be fast (small model), faithful, and plain — no title, no structure.
-    "dictation": (
-        "Clean the dictated fragment: remove filler words (um, uh, you know) and false starts; fix "
-        "punctuation, capitalization and obvious mis-transcriptions. Apply any spoken formatting or "
-        "editing commands ('period', 'comma', 'quote ... unquote', 'scratch that') instead of writing "
-        "them out literally. Do not reorganize, summarize, or add anything; keep the speaker's wording."
-    ),
-}
-
-_DICTATION_SYSTEM = (
-    "You clean up dictated text so it can be typed directly into the app the speaker is using. "
-    "Follow the user's editing instructions exactly. "
-    "Respond with the cleaned text and nothing else — no title line, no preamble, no code fences."
+# The two output contracts a style picks between (`output:` in its front matter).
+_PLAIN_SYSTEM = (
+    "You rework a spoken, dictated transcript into text the speaker can paste straight into "
+    "whatever they are writing. Follow the instructions below exactly. "
+    "Respond with the text and nothing else — no title line, no preamble, no code fences."
 )
 
 _SYSTEM = (
@@ -85,9 +58,9 @@ _REVISE_SYSTEM = (
 
 
 def _build_user_prompt(
-    transcript: str, mode: str, tone: str | None = None, instructions: str | None = None
+    transcript: str, style: Style, tone: str | None = None, instructions: str | None = None
 ) -> str:
-    instruction = _MODE_INSTRUCTIONS[mode]
+    instruction = style.body
     if tone:
         instruction += f" Write in a {tone} tone."
     prompt = f"{instruction}\n\nTRANSCRIPT:\n\"\"\"\n{transcript}\n\"\"\""
@@ -111,8 +84,8 @@ def _split_heading(note_text: str) -> tuple[str, str]:
     return "", note_text.strip()
 
 
-def _system_for(mode: str) -> str:
-    return _DICTATION_SYSTEM if mode == "dictation" else _SYSTEM
+def _system_for(style: Style) -> str:
+    return _PLAIN_SYSTEM if style.output == "plain" else _SYSTEM
 
 
 def _fallback_title(transcript: str) -> str:
@@ -120,9 +93,9 @@ def _fallback_title(transcript: str) -> str:
     return " ".join(words[:6]) if words else "voice note"
 
 
-def _finish(raw: str, transcript: str, mode: str) -> CleanResult:
-    """Turn a backend response into a CleanResult, per mode's output contract."""
-    if mode == "dictation":  # plain text out, no TITLE/--- framing to parse
+def _finish(raw: str, transcript: str, style: Style) -> CleanResult:
+    """Turn a backend response into a CleanResult, per the style's output contract."""
+    if style.output == "plain":  # no TITLE/--- framing to parse; the title is derived
         return CleanResult(title=_fallback_title(transcript), body=raw.strip() or transcript)
     return _parse_response(raw, transcript)
 
@@ -156,29 +129,35 @@ class CleanResult:
 
 def clean(
     transcript: str,
-    mode: str = "edit",
-    backend: str = "ollama",
+    mode: str = config.DEFAULT_STYLE,
+    backend: str | None = None,
     model: str | None = None,
     tone: str | None = None,
     instructions: str | None = None,
 ) -> CleanResult:
-    if mode not in _MODE_INSTRUCTIONS:
-        raise ValueError(f"unknown mode: {mode!r} (expected one of {', '.join(_MODE_INSTRUCTIONS)})")
+    """Clean ``transcript`` with the named style.
+
+    ``mode`` keeps its name — every caller passes ``mode=`` — but it holds a *style*
+    name now (styles.py). ``backend``/``model`` are the explicit picks: leave them
+    None and the style's own lines apply, then the settings.
+    """
+    style = styles.get(mode)
+    if style is None:
+        raise ValueError(f"unknown style: {mode!r} (expected one of {', '.join(styles.names())})")
     raw = _complete(
-        backend,
-        _system_for(mode),
-        _build_user_prompt(transcript, mode, tone, instructions),
-        model,
-        for_mode=mode,
+        backend or style.backend or config.backend(),
+        _system_for(style),
+        _build_user_prompt(transcript, style, tone, instructions),
+        model or style.model,
     )
-    return _finish(raw, transcript, mode)
+    return _finish(raw, transcript, style)
 
 
 def revise(
     note_text: str,
     instructions: str,
     *,
-    backend: str = "ollama",
+    backend: str | None = None,
     model: str | None = None,
 ) -> CleanResult:
     """Rework an existing note per a free-text instruction ("make it shorter").
@@ -191,11 +170,10 @@ def revise(
         raise ValueError("revise needs a non-empty instruction")
     heading, body = _split_heading(note_text)
     raw = _complete(
-        backend,
+        backend or config.backend(),
         _REVISE_SYSTEM,
         _build_revise_prompt(body, instructions.strip()),
         model,
-        for_mode=None,
     )
     result = _parse_response(raw, heading or note_text)
     if heading and result.title == _fallback_title(heading):
@@ -204,15 +182,10 @@ def revise(
     return result
 
 
-def _complete(backend: str, system: str, user: str, model: str | None, *, for_mode: str | None) -> str:
-    """Run one prompt through the chosen backend; returns the raw model text.
-
-    `for_mode` is only consulted to pick Ollama's default model — flow-mode
-    dictation gets the small, fast one.
-    """
+def _complete(backend: str, system: str, user: str, model: str | None) -> str:
+    """Run one prompt through the chosen backend; returns the raw model text."""
     if backend == "ollama":
-        default = dictation_model() if for_mode == "dictation" else ollama_model()
-        return _ollama_complete(system, user, model or default)
+        return _ollama_complete(system, user, model or ollama_model())
     if backend == "claude-code":
         # No default model: let the Claude Code CLI use whatever the user's own
         # setup selects, so vnote never pins their subscription to one model.

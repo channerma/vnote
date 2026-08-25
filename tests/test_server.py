@@ -269,13 +269,13 @@ def test_stream_finish_writes_the_note_from_the_daemon_held_audio(notes_dir):
     assert sess.sid not in server._registry.sessions
 
 
-def test_stream_finish_rejects_a_bad_mode(live_server):
+def test_stream_finish_rejects_a_bad_style(live_server):
     # A rejected Stop must not take the recording with it: the options are validated
-    # while the session is still alive, so the user can fix the mode and stop again.
+    # while the session is still alive, so the user can fix the style and stop again.
     sess = daemon.StreamSession()
     sess.append(SPEECH_SAMPLE * 8_000)
     status, _, body = _request("POST", f"/stream/finish?sid={sess.sid}&note=1&mode=nope", b"")
-    assert status == 400 and b"bad mode" in body
+    assert status == 400 and b"bad style" in body
 
     live = server._registry.sessions.get(sess.sid)
     assert live is not None and live.pcm_path().read_bytes() == SPEECH_SAMPLE * 8_000
@@ -552,7 +552,7 @@ def test_api_note_rejects_bad_requests(notes_dir):
     status, _, _ = _request("POST", "/api/note?format=webm", b"", {"Content-Type": "application/octet-stream"})
     assert status == 400
     status, _, body = _request("POST", "/api/note?format=webm&mode=loud", b"x")
-    assert status == 400 and b"bad mode" in body
+    assert status == 400 and b"bad style" in body
     status, _, body = _request("POST", "/api/note?format=../x", b"x")
     assert status == 400 and b"bad format" in body
     status, _, body = _request("POST", "/api/note?backend=gpt", b"x")
@@ -613,6 +613,126 @@ def test_vocab_get_and_put(live_server, clean_env):
     assert data["text"] == "Dymola\njason -> JSON\n"
     status, data = _send_json("PUT", "/api/vocab", {"text": 5})
     assert status == 400
+
+
+# --- styles: the registry behind the dropdowns and the Settings editor ---------
+
+
+@pytest.fixture
+def styles_env(clean_env):
+    """A config dir of this test's own, and no registry cache from another test."""
+    from vnote import styles
+
+    styles._invalidate()
+    yield styles
+    styles._invalidate()
+
+
+def test_styles_list_groups_the_registry(live_server, styles_env):
+    styles_env.write("terse", "---\ndescription: short\n---\nBe brief.")
+    status, data = _get_json("/api/styles")
+    assert status == 200
+    assert data["mine_dir"] == str(styles_env.mine_dir()) and data["problems"] == []
+    assert [g["label"] for g in data["groups"]] == ["Mine", "Built-in"]
+    assert [s["name"] for s in data["groups"][0]["styles"]] == ["terse"]
+    built_in = {s["name"]: s for s in data["groups"][1]["styles"]}
+    assert built_in["dictation"]["output"] == "plain" and built_in["prompt"]["backend"] == "claude-code"
+    assert built_in["edit"]["body"] and built_in["edit"]["path"].endswith("edit.md")
+
+
+def test_style_get_put_and_delete(live_server, styles_env):
+    status, data = _get_json("/api/styles/edit")
+    assert status == 200 and data["mine"] is False and data["source"] == "builtin"
+    assert data["text"].startswith("---")
+
+    status, data = _send_json("PUT", "/api/styles/terse", {"text": "---\ndescription: short\n---\nBe brief."})
+    assert status == 201 and data["saved"] == "terse"
+    assert (styles_env.mine_dir() / "terse.md").is_file()
+    status, data = _get_json("/api/styles/terse")
+    assert status == 200 and data["mine"] is True and "Be brief." in data["text"]
+
+    status, data = _send_json("PUT", "/api/styles/terse", {"text": "even shorter"})
+    assert status == 200  # an existing file: an update, not a creation
+
+    status, _, body = _request("DELETE", "/api/styles/terse")
+    assert status == 204 and body == b""
+    assert not (styles_env.mine_dir() / "terse.md").exists()
+
+
+def test_style_writes_and_deletes_are_refused_where_they_should_be(live_server, styles_env):
+    status, data = _get_json("/api/styles/nope")
+    assert status == 404 and "no such style" in data["error"]
+    status, data = _send_json("PUT", "/api/styles/Not%20A%20Name", {"text": "body"})
+    assert status == 400 and "bad style name" in data["error"]  # the name is unquoted, then checked
+    status, data = _send_json("PUT", "/api/styles/terse", {"text": "---\noutput: sideways\n---\nbody"})
+    assert status == 400 and "bad output" in data["error"]
+    status, data = _send_json("PUT", "/api/styles/terse", {"text": 5})
+    assert status == 400
+
+    status, _, body = _request("DELETE", "/api/styles/light")  # a built-in is not ours to remove
+    assert status == 403 and b"not in your styles folder" in body
+    assert styles_env.get("light") is not None
+    status, _, body = _request("DELETE", "/api/styles/never-existed")
+    assert status == 404
+
+
+def test_editing_a_built_in_writes_the_override_copy(live_server, styles_env):
+    status, _ = _send_json("PUT", "/api/styles/edit", {"text": "---\ndescription: my edit\n---\nMy way."})
+    assert status == 201
+    status, data = _get_json("/api/styles")
+    mine = {s["name"] for s in data["groups"][0]["styles"]}
+    assert data["groups"][0]["label"] == "Mine" and mine == {"edit"}
+    assert "edit" not in {s["name"] for s in data["groups"][-1]["styles"]}  # once, under the winner
+
+
+def test_note_options_take_a_style_name_and_leave_the_backend_open():
+    mode, backend, model, raw = server._note_options({"mode": ["light"]})
+    assert (mode, backend, raw) == ("light", None, False)  # blank backend = the style's, then the setting
+    mode, backend, _model, _raw = server._note_options({"mode": ["light"], "backend": ["claude-code"]})
+    assert backend == "claude-code"
+    with pytest.raises(server._BadRequest, match="bad style"):
+        server._note_options({"mode": ["gone"]})
+    with pytest.raises(server._BadRequest, match="bad backend"):
+        server._note_options({"mode": ["light"], "backend": ["gpt"]})
+
+
+def test_reclean_records_the_style_and_its_output_shape(notes_dir):
+    d = _make_session(notes_dir, "2026-08-25-1300-styled", meta={"title": "Old", "cleanup_mode": "edit"},
+                      note="# Old\n\nold body\n", audio=None)
+    status, data = _send_json("POST", "/api/notes/2026-08-25-1300-styled/reclean", {"mode": "email"})
+    assert status == 200, data
+    # email is `output: plain`: the note has no heading, and the style name is recorded
+    assert data["note"] == "Fake body.\n"
+    meta = _json.loads((d / "meta.json").read_text(encoding="utf-8"))
+    assert meta["versions"][-1]["mode"] == "email"
+    status, data = _send_json("POST", "/api/notes/2026-08-25-1300-styled/reclean", {"mode": "gone"})
+    assert status == 400 and "bad style" in data["error"]
+
+
+def test_reclean_uses_the_styles_backend_unless_one_is_picked(notes_dir):
+    d = _make_session(notes_dir, "2026-08-25-1400-backend", meta={"title": "Old", "cleanup_mode": "edit"},
+                      note="# Old\n\nold body\n", audio=None)
+    # `prompt` names claude-code in its front matter, and nothing here overrides it
+    status, data = _send_json("POST", "/api/notes/2026-08-25-1400-backend/reclean", {"mode": "prompt"})
+    assert status == 200, data
+    assert _seen["clean"][2] == "claude-code"
+    meta = _json.loads((d / "meta.json").read_text(encoding="utf-8"))
+    assert meta["versions"][-1]["backend"] == "claude-code"
+    status, data = _send_json("POST", "/api/notes/2026-08-25-1400-backend/reclean",
+                              {"mode": "prompt", "backend": "ollama"})
+    assert status == 200 and _seen["clean"][2] == "ollama"  # an explicit pick still wins
+
+
+def test_note_detail_flags_a_style_that_is_gone(notes_dir):
+    _make_session(notes_dir, "2026-08-25-1500-gone", meta={"title": "G", "cleanup_mode": "retired"})
+    status, data = _get_json("/api/notes/2026-08-25-1500-gone")
+    assert status == 200 and data["style_missing"] is True
+    _make_session(notes_dir, "2026-08-25-1501-here", meta={"title": "H", "cleanup_mode": "edit"})
+    status, data = _get_json("/api/notes/2026-08-25-1501-here")
+    assert data["style_missing"] is False
+    _make_session(notes_dir, "2026-08-25-1502-raw", meta={"title": "R", "cleanup_mode": None})
+    status, data = _get_json("/api/notes/2026-08-25-1502-raw")
+    assert data["style_missing"] is False  # a raw note never had one
 
 
 def test_note_detail_carries_the_list_fields_top_level(notes_dir):
@@ -680,14 +800,14 @@ def test_api_note_cleanup_http_failure_keeps_the_transcript(notes_dir, monkeypat
     assert not (notes_dir / data["name"] / "note.md").exists()
 
 
-def test_raw_recording_ignores_a_bad_default_mode(notes_dir, monkeypatch):
-    monkeypatch.setenv("VNOTE_MODE", "bogus")
+def test_raw_recording_ignores_a_bad_default_style(notes_dir, monkeypatch):
+    monkeypatch.setenv("VNOTE_STYLE", "bogus")
     status, _, body = _request("POST", "/api/note?format=webm&raw=1", b"WEBMDATA",
                                {"Content-Type": "application/octet-stream"})
     assert status == 200, body
     status, _, body = _request("POST", "/api/note?format=webm", b"WEBMDATA",
                                {"Content-Type": "application/octet-stream"})
-    assert status == 400 and b"bad mode" in body
+    assert status == 400 and b"bad style" in body
 
 
 def test_language_auto_overrides_the_saved_default(notes_dir):

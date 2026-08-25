@@ -56,7 +56,7 @@ vnote --serve --open        # loads the models once, opens http://127.0.0.1:8760
 
 - **Record** → talk → **Pause** / **Resume** (or Space) → **Stop**. With **Live transcript**
   on, the words appear as you speak and stay copyable — while paused, and while the note is
-  being cleaned up after Stop. Pick the cleanup mode (light / edit / summary / dictation /
+  being cleaned up after Stop. Pick the cleanup style (light / edit / summary / dictation /
   raw) and the backend per recording.
 - The note appears with a **Copy** button; it is also saved under `voice-notes/`.
 - **Notes**: every note you've made, newest first — play the audio, copy, **edit** the
@@ -80,7 +80,9 @@ vnote memo.m4a         # …or process an existing audio file
 
 You get a cleaned note on your clipboard and saved under `voice-notes/`. The default cleanup
 reorganizes into headings and lists; `--light` only fixes grammar and fillers, `--summary`
-condenses, `--dictation` gives plain text from a small fast model, `--raw` skips the LLM.
+condenses, `--dictation` gives plain text with no title, `--raw` skips the LLM. Those are
+just the built-in styles — a style is a Markdown file of instructions you can edit in the
+web UI or add to; `--style NAME` picks any of them.
 You can dictate formatting as you talk — *"make that a bulleted list"*, *"scratch that"* — and
 the cleanup follows along. `--redo DIR --summary` re-cleans a saved note without
 re-transcribing.

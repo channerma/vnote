@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import config, output, versions
+from . import config, output, styles, versions
 
 
 class EmptyTranscriptError(ValueError):
@@ -24,10 +24,25 @@ class TranscriptionError(RuntimeError):
     """The transcription backend failed; the original exception is chained."""
 
 
-def resolved_model(backend: str, model: str | None) -> str:
-    """The model name to record in meta.json for a finished cleanup."""
+def resolved_backend(mode: str | None, backend: str | None) -> str:
+    """Which backend a cleanup will actually use: an explicit pick > the style's > the setting."""
+    if backend:
+        return backend
+    style = styles.get(mode)
+    return (style.backend if style else None) or config.backend()
+
+
+def resolved_model(backend: str, model: str | None, mode: str | None = None) -> str:
+    """The model name to record in meta.json for a finished cleanup.
+
+    Same precedence as the backend: what the caller asked for, else the style's
+    ``model:`` line, else whatever that backend falls back to.
+    """
     if model:
         return model
+    style = styles.get(mode)
+    if style and style.model:
+        return style.model
     if backend == "ollama":
         return config.ollama_model()
     if backend == "claude-code":
@@ -56,10 +71,23 @@ def _no_stage(event: str, **info: object) -> None:
     pass
 
 
-def note_markdown(title: str, body: str, mode: str) -> str:
-    """The note as it goes to the clipboard / note.md: titled Markdown, or plain text for dictation."""
+def wants_heading(mode: str | None) -> bool:
+    """Does this style's output carry a '# Title' heading? A style that is gone: yes."""
+    style = styles.get(mode)
+    return style is None or style.output == "note"
+
+
+def note_markdown(title: str, body: str, mode: str, *, heading: bool | None = None) -> str:
+    """The note as it goes to the clipboard / note.md: titled Markdown, or the body alone
+    when the style's output is ``plain``. ``mode`` holds a style name.
+
+    ``heading`` overrides the style's answer, for a caller that knows better than a
+    style that is no longer there (see :func:`revise`).
+    """
     body = body.strip() + "\n"
-    return body if mode == "dictation" else f"# {title}\n\n{body}"
+    if heading is None:
+        heading = wants_heading(mode)
+    return f"# {title}\n\n{body}" if heading else body
 
 
 def _fallback_title(transcript: str) -> str:
@@ -72,8 +100,8 @@ def make_note(
     *,
     transcribe_fn,
     clean_fn,
-    mode: str = "edit",
-    backend: str,
+    mode: str = config.DEFAULT_STYLE,
+    backend: str | None = None,
     model: str | None = None,
     language: str | None = None,
     raw: bool = False,
@@ -121,6 +149,9 @@ def make_note(
     if raw:
         title = _fallback_title(transcript)
     else:
+        # The style may name its own backend; an explicit pick still wins, and what
+        # actually ran is what meta.json records.
+        backend = resolved_backend(mode, backend)
         on_stage("cleaning", backend=backend, mode=mode)
         t0 = time.monotonic()
         try:
@@ -135,7 +166,7 @@ def make_note(
             title = result.title
             note_body = result.body
             cleanup_backend = backend
-            cleanup_model = resolved_model(backend, model)
+            cleanup_model = resolved_model(backend, model, mode)
 
     session_dir = output.make_session_dir(title, when=started)
     meta = {
@@ -162,7 +193,7 @@ def make_note(
         note_md=note_body,
         title=title,
         meta=meta,
-        heading=mode != "dictation",
+        heading=wants_heading(mode),
     )
 
     note_text = transcript if note_body is None else note_markdown(title, note_body, mode)
@@ -222,7 +253,7 @@ def reclean(
     *,
     clean_fn,
     mode: str,
-    backend: str,
+    backend: str | None = None,
     model: str | None = None,
     instructions: str | None = None,
 ) -> RecleanResult:
@@ -239,13 +270,14 @@ def reclean(
     if not transcript:
         raise EmptyTranscriptError("transcript is empty")
 
+    backend = resolved_backend(mode, backend)  # the style's backend unless the caller picked one
     result = clean_fn(transcript, mode=mode, backend=backend, model=model, instructions=instructions)
     note_text = note_markdown(result.title, result.body, mode)
     version: int | None = None
     if session_dir is not None:
         version, _ = versions.commit(
             session_dir, note_text, op="regenerate", title=result.title, mode=mode,
-            backend=backend, model=resolved_model(backend, model), instructions=instructions,
+            backend=backend, model=resolved_model(backend, model, mode), instructions=instructions,
         )
     return RecleanResult(session_dir=session_dir, title=result.title, note_text=note_text,
                          transcript=transcript, version=version)
@@ -290,7 +322,7 @@ def revise(
     *,
     revise_fn,
     instructions: str,
-    backend: str,
+    backend: str | None = None,
     model: str | None = None,
 ) -> RecleanResult:
     """Rewrite the *current note* per ``instructions`` — a new version (``op: "revise"``).
@@ -305,9 +337,14 @@ def revise(
     if not instructions or not instructions.strip():
         raise ValueError("instructions are empty")
     meta = versions.read_meta(session_dir)
-    result = revise_fn(note_path.read_text(encoding="utf-8"), instructions, backend=backend, model=model)
-    note_text = versions.normalized(note_markdown(result.title, result.body,
-                                                  mode=meta.get("cleanup_mode") or "edit"))
+    backend = backend or config.backend()  # revise is style-agnostic: no style backend to consult
+    current = note_path.read_text(encoding="utf-8")
+    result = revise_fn(current, instructions, backend=backend, model=model)
+    mode = meta.get("cleanup_mode") or "edit"
+    # A style that has since been deleted cannot say whether this note carries a heading.
+    # The note itself can — revising must not grow a "# Title" the note never had.
+    heading = None if styles.get(mode) else versions.heading_title(current) is not None
+    note_text = versions.normalized(note_markdown(result.title, result.body, mode=mode, heading=heading))
     version, _ = versions.commit(
         session_dir, note_text, op="revise", title=result.title, mode=meta.get("cleanup_mode"),
         backend=backend, model=resolved_model(backend, model), instructions=instructions,

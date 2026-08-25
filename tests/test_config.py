@@ -74,16 +74,70 @@ def test_registry_keys_and_env_names_are_unique():
 
 def test_get_and_source_follow_env_over_file_over_default(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("VNOTE_STYLE", raising=False)
+    monkeypatch.delenv("VNOTE_MODE", raising=False)  # the retired name resolves too (see get())
+    assert config.get("default_style") == "edit"
+    assert config.source("default_style") == "default"
+    config.save_config({"default_style": "summary"})
+    assert config.get("default_style") == "summary"
+    assert config.source("default_style") == "file"
+    monkeypatch.setenv("VNOTE_STYLE", "light")
+    assert config.get("default_style") == "light"
+    assert config.source("default_style") == "env"
+    assert config.default_style() == "light"
+
+
+def test_the_retired_mode_names_still_select_the_style(tmp_path, monkeypatch):
+    """0.6.x wrote default_mode / VNOTE_MODE; both still pick the style, and are never written back."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("VNOTE_STYLE", raising=False)
     monkeypatch.delenv("VNOTE_MODE", raising=False)
-    assert config.get("default_mode") == "edit"
-    assert config.source("default_mode") == "default"
     config.save_config({"default_mode": "summary"})
-    assert config.get("default_mode") == "summary"
-    assert config.source("default_mode") == "file"
-    monkeypatch.setenv("VNOTE_MODE", "light")
-    assert config.get("default_mode") == "light"
-    assert config.source("default_mode") == "env"
-    assert config.default_mode() == "light"
+    assert config.default_style() == "summary" and config.source("default_style") == "file"
+    config.save_config({"default_mode": "summary", "default_style": "light"})
+    assert config.default_style() == "light"  # the current name wins
+    monkeypatch.setenv("VNOTE_MODE", "dictation")
+    assert config.default_style() == "dictation" and config.source("default_style") == "env"
+    monkeypatch.setenv("VNOTE_STYLE", "email")
+    assert config.default_style() == "email"
+
+
+def test_update_clears_the_retired_key_so_blank_really_means_default(tmp_path, monkeypatch):
+    """An upgraded config.json still holds default_mode; leaving it there would keep
+    winning after a write, and 'back to default' would silently do nothing."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("VNOTE_MODE", raising=False)
+    config.save_config({"default_mode": "summary", "language": "en"})
+
+    config.update({"default_style": "light"})
+    assert config.load_config() == {"default_style": "light", "language": "en"}
+    assert config.default_style() == "light"
+
+    config.save_config({"default_mode": "summary", "default_style": "light"})
+    config.update({"default_style": ""})  # blank = back to the built-in default
+    assert config.load_config() == {}
+    assert config.default_style() == config.DEFAULT_STYLE
+    assert config.source("default_style") == "default"
+
+
+def test_update_refuses_a_write_the_retired_env_var_would_swallow(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("VNOTE_MODE", "dictation")
+    assert config.source("default_style") == "env"
+    with pytest.raises(ValueError, match="overridden by VNOTE_MODE"):
+        config.update({"default_style": "light"})
+    assert not config.config_file().exists()
+
+
+def test_update_validates_the_style_against_the_registry(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert config.update({"default_style": "summary"}) == ["default_style"]
+    with pytest.raises(ValueError, match="default_style must be one of"):
+        config.update({"default_style": "no-such-style"})
 
 
 def test_language_blank_means_auto(tmp_path, monkeypatch):
@@ -129,6 +183,11 @@ def test_describe_rows_carry_the_contract_fields(tmp_path, monkeypatch):
         assert {"key", "env", "value", "default", "description", "kind", "source", "editable"} <= set(row)
         assert row["source"] in ("env", "file", "default")
     assert rows["backend"]["choices"] == ["ollama", "claude-code", "claude"]
+    # default_style has no fixed list: the choices are whatever the style files say
+    from vnote import styles
+
+    assert rows["default_style"]["choices"] == styles.names()
+    assert "edit" in rows["default_style"]["choices"]
     assert rows["whisper_model"]["editable"] is False
     assert rows["whisper_model"]["value"] == config.WHISPER_MODEL  # the live constant, not a re-read
     assert rows["daemon_port"]["value"] == config.DAEMON_PORT
@@ -145,8 +204,8 @@ def test_every_setting_env_var_is_documented():
 
 
 def test_update_blank_or_null_restores_the_default_for_any_kind():
-    config.save_config({"backend": "claude", "default_mode": "summary", "language": "en"})
-    config.update({"backend": "", "default_mode": None})
+    config.save_config({"backend": "claude", "default_style": "summary", "language": "en"})
+    config.update({"backend": "", "default_style": None})
     assert config.load_config() == {"language": "en"}
     assert config.backend() == "ollama" and config.source("backend") == "default"
 
@@ -173,8 +232,8 @@ def test_update_checks_the_keep_alive_duration(tmp_path, monkeypatch):
 
 
 def test_file_values_are_coerced_not_trusted():
-    config.save_config({"default_mode": 5, "language": 7})
-    assert config.get("default_mode") == "5"  # a string, so consumers can validate and name it
+    config.save_config({"default_style": 5, "language": 7})
+    assert config.get("default_style") == "5"  # a string, so consumers can validate and name it
     assert config.language() == "7"
 
 

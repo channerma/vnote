@@ -82,8 +82,8 @@ def transcribe_bytes(data: bytes, fmt: str = "wav", language: str | None = None)
 
 def clean(
     transcript: str,
-    mode: str = "edit",
-    backend: str = "ollama",
+    mode: str = config.DEFAULT_STYLE,   # a style name (styles.py); the field keeps its old name
+    backend: str | None = None,         # None = the style's backend, then the setting
     model: str | None = None,
     tone: str | None = None,
     instructions: str | None = None,
@@ -103,7 +103,7 @@ def clean(
 def revise(
     note_text: str,
     instructions: str,
-    backend: str = "ollama",
+    backend: str | None = None,
     model: str | None = None,
 ) -> CleanResult:
     """Rework an existing note per a free-text instruction (see cleanup.revise)."""

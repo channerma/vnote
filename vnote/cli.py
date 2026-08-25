@@ -2,8 +2,9 @@
 
     vnote                      record from mic, Enter to stop, transcribe + clean
     vnote memo.m4a             process an existing audio file
-    vnote --light / --summary  cleanup intensity (default: your default_mode setting, else --edit)
-    vnote --dictation          plain text from a small fast model — for pasting somewhere
+    vnote --style NAME         clean up with that style (default: your default_style setting, else edit)
+    vnote --light / --summary  shortcuts for the built-in styles of those names
+    vnote --dictation          = --style dictation: plain text, no title — for pasting somewhere
     vnote --raw                transcript only, skip the LLM cleanup
     vnote --backend claude-code  clean up with Claude Code (uses your subscription)
     vnote --redo DIR           re-run cleanup on a saved note (skips transcription)
@@ -22,8 +23,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__, config, firstrun, pipeline
-from .config import MODES
+from . import __version__, config, firstrun, pipeline, styles
 from .pipeline import EmptyTranscriptError, TranscriptionError
 from .pipeline import resolve_redo as _resolve_redo  # noqa: F401  (kept for tests/back-compat)
 from .pipeline import resolved_model as _resolved_model  # noqa: F401  (kept for tests/back-compat)
@@ -37,13 +37,18 @@ def _say(*args: object) -> None:
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="vnote", description="Local voice notes: record -> transcribe -> tidy up.")
     p.add_argument("audio", nargs="?", help="existing audio file to process; omit to record from the mic")
+    # `mode` is the dest a style name lands in — it is what pipeline/cleanup still call it.
     mode = p.add_mutually_exclusive_group()
-    mode.add_argument("--light", action="store_const", const="light", dest="mode", help="light cleanup (faithful)")
+    mode.add_argument("--style", metavar="NAME", dest="mode",
+                      help="cleanup style: a Markdown file of instructions (vnote --config shows where "
+                           "they live; edit them in the web UI). Default: your default_style setting")
+    mode.add_argument("--mode", metavar="NAME", dest="mode", help=argparse.SUPPRESS)  # pre-0.7.0 name
+    mode.add_argument("--light", action="store_const", const="light", dest="mode", help="= --style light")
     mode.add_argument("--edit", action="store_const", const="edit", dest="mode",
-                      help="editorial cleanup (the built-in default; see the default_mode setting)")
-    mode.add_argument("--summary", action="store_const", const="summary", dest="mode", help="condensed rewrite")
+                      help="= --style edit (the built-in default; see the default_style setting)")
+    mode.add_argument("--summary", action="store_const", const="summary", dest="mode", help="= --style summary")
     mode.add_argument("--dictation", action="store_const", const="dictation", dest="mode",
-                      help="plain text from a small fast model — no title, no structure")
+                      help="= --style dictation: plain text, no title, no structure")
     p.add_argument("--raw", action="store_true", help="skip the LLM cleanup; keep only the transcript")
     p.add_argument("--backend", choices=("ollama", "claude-code", "claude"), default=None,
                    help="cleanup backend: ollama (local), claude-code (your Claude "
@@ -73,7 +78,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--config", action="store_true", dest="show_config", help="print resolved configuration and exit")
     p.add_argument("--setup", action="store_true", help="(re-)run the interactive first-run setup and exit")
     p.add_argument("--version", action="version", version=f"vnote {__version__}")
-    p.set_defaults(mode=None)  # resolved in main(): flag > saved default_mode > edit
+    p.set_defaults(mode=None)  # resolved in main(): flag > saved default_style > edit
     return p.parse_args(argv)
 
 
@@ -97,11 +102,16 @@ def _show_config() -> int:
     for row in config.describe():
         value = row["value"]
         if value in ("", None):
-            value = {"language": "(auto)", "dictation_model": "(same as ollama_model)"}.get(row["key"], "(default)")
+            value = {"language": "(auto)", "styles_dirs": "(none)"}.get(row["key"], "(default)")
         if row["key"] == "vocab":
             value = f"{value} {'(exists)' if Path(str(value)).exists() else '(none yet — add hotwords in the web UI)'}"
         note = "" if row["editable"] else "  [bound at start — set the env var and restart]"
         print(f"  {row['key']:<16}: {value}  <- {row['source']}{note}")
+    reg = styles.load()
+    print(f"  {'styles':<16}: {', '.join(reg.names()) or '(none found)'}")
+    print(f"  {'  yours':<16}: {styles.mine_dir()}")
+    for problem in reg.problems:
+        print(f"  {'  problem':<16}: {problem}")
     return 0
 
 
@@ -194,16 +204,22 @@ def main(argv: list[str] | None = None) -> int:
 
         return server.serve(open_browser=args.open_editor)
 
-    # First-run setup (interactive TTY only; a no-op otherwise), then resolve the
-    # backend: explicit --backend flag > saved choice / env > built-in default.
+    # First-run setup (interactive TTY only; a no-op otherwise), then resolve the style.
     firstrun.run(args.backend)
-    backend = args.backend or config.backend()
-    args.mode = args.mode or config.default_mode()
-    if args.mode not in MODES:  # a bad saved/env default must not become a traceback
-        where = "VNOTE_MODE" if config.source("default_mode") == "env" else f"default_mode in {config.config_file()}"
-        print(f"error: unknown cleanup mode {args.mode!r} (from {where}); expected one of {', '.join(MODES)}",
-              file=sys.stderr)
+    picked = args.mode is not None  # a --style/--light/... on this run, rather than the saved default
+    args.mode = args.mode or config.default_style()
+    if styles.get(args.mode) is None:  # a deleted style (or a typo) must not become a traceback
+        if picked:
+            where = "--style"
+        elif config.source("default_style") == "env":
+            where = "VNOTE_STYLE" if os.environ.get("VNOTE_STYLE") else "VNOTE_MODE"
+        else:
+            where = f"default_style in {config.config_file()}"
+        print(f"error: unknown cleanup style {args.mode!r} (from {where}); "
+              f"expected one of {', '.join(styles.names())}", file=sys.stderr)
         return 2
+    # The backend: an explicit --backend > the style's own backend: line > the setting.
+    backend = pipeline.resolved_backend(args.mode, args.backend)
     args.language = args.language or config.language()
 
     if args.redo:

@@ -30,7 +30,12 @@ class El {
     };
   }
   get childNodes() { return this.children; }
-  get options() { return this.children.filter(c => c.tagName === 'option'); }
+  // a <select> reaches the options inside its <optgroup>s too
+  get options() {
+    return this.children.reduce((out, c) => out.concat(
+      c.tagName === 'optgroup' ? c.children.filter(o => o.tagName === 'option')
+                               : (c.tagName === 'option' ? [c] : [])), []);
+  }
   get lastChild() { return this.children[this.children.length - 1]; }
   get textContent() {
     return this.children.length ? this.children.map(c => c.textContent).join('') : this._text;
@@ -58,18 +63,8 @@ const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
 const byId = {};
 for (const id of ids) { const el = new El('div'); el.id = id; byId[id] = el; }
 
-// the markup's own <option>s: only id-bearing elements are built above, and
-// selectIfPresent() only sets a value the select actually offers
-['light', 'edit', 'summary', 'dictation', 'raw'].forEach(v => {
-  const opt = new El('option');
-  opt.value = v;
-  byId['pick-mode'].appendChild(opt);
-});
-['light', 'edit', 'summary', 'dictation'].forEach(v => {   // Regenerate cannot run "raw"
-  const opt = new El('option');
-  opt.value = v;
-  byId['regenerate-mode'].appendChild(opt);
-});
+// #pick-mode and #regenerate-mode are filled from /api/styles at boot (the markup
+// only carries the "raw" entry, which app.js re-adds itself).
 
 // the live text lives inside the #live scroller (livePane())
 const inner = new El('div');
@@ -77,6 +72,8 @@ inner.appendChild(byId['live-committed']);
 inner.appendChild(byId['live-tail']);
 byId['live'].appendChild(inner);
 
+const styleNames = id => byId[id].options.map(o => o.value);
+const styleGroupLabels = id => byId[id].children.filter(c => c.tagName === 'optgroup').map(c => c.label);
 const state = () => byId['view-note'].dataset.state;
 const liveMode = () => byId['view-note'].dataset.live;
 const rows = () => byId['notes-list'].children.filter(c => c.dataset && c.dataset.name !== undefined);
@@ -201,9 +198,11 @@ const win = {
   setTimeout, clearTimeout, setInterval, clearInterval,
   AudioWorklet: function () {}, AudioContext: FakeAudioContext,
   addEventListener(t, f) { (win._on = win._on || {})[t] = f; },
-  confirm: () => confirmAnswer
+  confirm: () => confirmAnswer,
+  prompt: () => promptAnswer
 };
 let confirmAnswer = true;
+let promptAnswer = '';
 
 class FakeMediaRecorder {
   static isTypeSupported() { return true; }
@@ -273,6 +272,43 @@ let noteDetail = () => ({
     { n: 2, op: 'revise', instructions: 'shorter', created: iso(0, 14, 32) }
   ]
 });
+const MINE_DIR = '/home/x/.config/vnote/styles';
+const styleFile = (name, extra) => Object.assign(
+  { name, description: name + ' does things', output: 'note', backend: null, model: null,
+    source: 'builtin', path: '/pkg/vnote/styles/' + name + '.md', body: 'do ' + name }, extra || {});
+let styleGroups = () => [
+  { label: 'Mine', source: 'mine', dir: MINE_DIR,
+    styles: [styleFile('email', { source: 'mine', path: MINE_DIR + '/email.md', output: 'plain',
+                                  description: 'an email draft' })] },
+  { label: 'work', source: '/work/styles', dir: '/work/styles',
+    styles: [styleFile('standup', { source: '/work/styles', path: '/work/styles/standup.md' })] },
+  { label: 'Built-in', source: 'builtin', dir: '/pkg/vnote/styles',
+    styles: ['light', 'edit', 'summary', 'dictation'].map(n => styleFile(n)) }
+];
+let styleProblems = [];
+let putStyle = null;      // the last PUT /api/styles/<name> body
+let deletedStyle = null;
+
+function styleRoutes() {
+  const routes = {
+    '/api/styles': async () => ({ body: { groups: styleGroups(), problems: styleProblems, mine_dir: MINE_DIR } })
+  };
+  ['email', 'standup', 'light', 'edit', 'summary', 'dictation', 'terse', 'edit-copy'].forEach(name => {
+    routes['/api/styles/' + name] = async (url, opts) => {
+      const method = (opts && opts.method) || 'GET';
+      if (method === 'PUT') { putStyle = { name, text: JSON.parse(opts.body).text }; return { body: { saved: name } }; }
+      if (method === 'DELETE') { deletedStyle = name; return { status: 204, body: null }; }
+      const listed = styleGroups().reduce((out, g) => out.concat(g.styles), []).find(s => s.name === name);
+      if (!listed) return { status: 404, body: { error: 'no such style: ' + name } };
+      return { body: Object.assign({}, listed, {
+        text: '---\ndescription: ' + listed.description + '\n---\n' + listed.body,
+        mine: listed.source === 'mine'
+      }) };
+    };
+  });
+  return routes;
+}
+
 function baseRoutes() {
   return {
     '/health': async () => ({ body: { version: '0.5.0', whisper_model: 'large-v3-turbo', device: 'cuda',
@@ -293,7 +329,8 @@ function baseRoutes() {
     '/api/notes/n1/versions/1': async () => ({ body: { text: '# A note\n\nv1 body' } }),
     '/api/notes/n1/restore': async () => ({ body: { version: 4 } }),
     '/api/notes/n1/revise': async () => ({ body: { title: 'A note', note: '# A note\n\nshorter', version: 3 } }),
-    '/api/vocab': async () => ({ body: { text: 'vnote\nollama' } })
+    '/api/vocab': async () => ({ body: { text: 'vnote\nollama' } }),
+    ...styleRoutes()
   };
 }
 
@@ -964,21 +1001,21 @@ const appendCalls = () => calls.filter(c => c.url.startsWith('/stream/append'));
 
   console.log('\n24l. settings rows and the vocabulary editor');
   G.renderSettings([
-    { key: 'default_mode', env: 'VNOTE_MODE', value: 'edit', kind: 'choice',
-      choices: ['light', 'edit'], source: 'file', description: 'the default mode', editable: true },
+    { key: 'default_style', env: 'VNOTE_STYLE', value: 'edit', kind: 'choice',
+      choices: ['light', 'edit'], source: 'file', description: 'the default style', editable: true },
     { key: 'whisper_model', env: 'VNOTE_WHISPER_MODEL', value: 'large-v3-turbo', kind: 'str',
       source: 'env', description: 'loaded at start-up', editable: false }
   ]);
   const trs = $('settings-table').children;
   ok(trs.length === 2, 'one row per setting', trs.length);
-  ok(trs[0].children[0].textContent === 'Default modeVNOTE_MODE', 'name over the env var', trs[0].children[0].textContent);
+  ok(trs[0].children[0].textContent === 'Default styleVNOTE_STYLE', 'name over the env var', trs[0].children[0].textContent);
   ok(trs[0].children[2].children[0].tagName === 'select', 'an editable choice is a select');
   ok(trs[1].children[2].textContent.indexOf('restart the daemon') !== -1,
      'a start-up setting says what to do instead', trs[1].children[2].textContent);
   ok(trs[1].children[3].textContent === 'env', 'the source badge');
   ok(G.changedSettings() === null, 'nothing changed -> nothing to save');
   trs[0].children[2].children[0].value = 'light';
-  eq(G.changedSettings(), { default_mode: 'light' }, 'only the changed, editable rows are sent');
+  eq(G.changedSettings(), { default_style: 'light' }, 'only the changed, editable rows are sent');
   G.setView('settings');
   await sleep(20);
   ok($('app').dataset.view === 'settings', 'the settings view is selected');
@@ -1151,6 +1188,180 @@ const appendCalls = () => calls.filter(c => c.url.startsWith('/stream/append'));
   ok($('note-path').hidden === false, 'the chip is back with the note');
 
   /* ------------------------------------------------------ the worklet itself */
+  console.log('\n24u. the style dropdowns are the registry, grouped by source');
+  routes = baseRoutes();
+  routes['/api/settings'] = async () => ({ body: { settings: [
+    { key: 'default_style', value: 'summary', kind: 'choice', choices: ['edit', 'summary'] },
+    { key: 'backend', value: 'claude-code', choices: ['ollama', 'claude-code'], kind: 'choice' },
+    { key: 'ollama_model', value: 'qwen2.5:14b', kind: 'str' }
+  ] } });
+  delete store['vnote.picks'];
+  await G.boot();
+  eq(styleGroupLabels('pick-mode'), ['Mine', 'work', 'Built-in'], 'one optgroup per source, Mine first');
+  eq(styleNames('pick-mode'), ['email', 'standup', 'light', 'edit', 'summary', 'dictation', 'raw'],
+     'every style once, and raw last and ungrouped');
+  eq(styleNames('regenerate-mode'), ['email', 'standup', 'light', 'edit', 'summary', 'dictation'],
+     'Regenerate cannot run raw');
+  ok($('pick-mode').options[0].title === 'an email draft', 'the description is the option tooltip',
+     $('pick-mode').options[0].title);
+  ok($('pick-mode').value === 'summary', 'the daemon\u2019s default_style is the selection', $('pick-mode').value);
+  ok($('pick-backend').options[0].value === '' && $('pick-backend').options[0].textContent === 'style default',
+     'the backend picker leads with "style default"');
+  ok($('pick-backend').value === '', 'and that is what it starts on', $('pick-backend').value);
+
+  store['vnote.picks'] = JSON.stringify({ mode: 'standup', backend: '', language: '', live: true, process: true });
+  await G.boot();
+  ok($('pick-mode').value === 'standup', 'a remembered pick wins over the daemon default', $('pick-mode').value);
+  store['vnote.picks'] = JSON.stringify({ mode: 'deleted-one', backend: '', language: '', live: true, process: true });
+  await G.boot();
+  ok($('pick-mode').value === 'summary', 'a style that is gone falls back to the daemon default',
+     $('pick-mode').value);
+
+  console.log('\n24v. "style default" means no backend on the wire');
+  ok(G.noteQuery('webm') === '?format=webm&mode=summary&language=auto',
+     'no backend in the upload query', G.noteQuery('webm'));
+  ok(G.finishQuery('S9') === '?sid=S9&note=1&mode=summary&language=auto',
+     'nor in the finish query', G.finishQuery('S9'));
+  $('pick-backend').value = 'claude-code';
+  ok(G.noteQuery('webm') === '?format=webm&mode=summary&backend=claude-code&language=auto',
+     'an explicit pick travels', G.noteQuery('webm'));
+  $('pick-backend').value = '';
+  await G.loadNote('n1');
+  calls.length = 0;
+  await G.regenerateNote();
+  const regen = calls.find(c => c.url === '/api/notes/n1/reclean');
+  eq(JSON.parse(regen.body), { mode: 'edit' }, 'and reclean sends the style alone');
+
+  console.log('\n24w. a note whose style is gone');
+  const good = noteDetail;
+  noteDetail = () => Object.assign(good(), { mode: 'gone', style_missing: true,
+                                             meta: { cleanup_mode: 'gone' } });
+  await G.loadNote('n1');
+  ok($('regenerate-mode').value === '', 'the select is on the missing entry', $('regenerate-mode').value);
+  const missing = $('regenerate-mode').options.filter(o => o.value === '')[0];
+  ok(!!missing && missing.textContent === '(missing: gone)' && missing.disabled === true,
+     'which names the style and cannot be chosen', missing && missing.textContent);
+  calls.length = 0;
+  await G.regenerateNote();
+  eq(JSON.parse(calls.find(c => c.url === '/api/notes/n1/reclean').body), { mode: 'edit' },
+     'Regenerate falls back to edit');
+  noteDetail = good;
+  await G.loadNote('n1');
+  ok($('regenerate-mode').options.filter(o => o.value === '').length === 0,
+     'and the entry is gone once a healthy note is opened');
+
+  console.log('\n24x. the styles editor in Settings');
+  styleProblems = ['/work/styles/broken.md: bad output: \'notes\''];
+  await G.loadStyles();
+  ok($('styles-problems').hidden === false &&
+     /broken\.md/.test($('styles-problems').textContent), 'the registry\u2019s problems are shown');
+  styleProblems = [];
+  await G.loadStyles();
+  ok($('styles-problems').hidden === true, 'and hidden when there are none');
+  const styleRows = () => $('styles-list').children.filter(c => c.children.length &&
+                                                          c.children[0].dataset.name !== undefined);
+  eq($('styles-list').children.filter(c => c.className === 'group').map(c => c.textContent),
+     ['Mine', 'work', 'Built-in'], 'the list is grouped like the dropdown');
+  eq(styleRows().map(li => li.children[0].dataset.name),
+     ['email', 'standup', 'light', 'edit', 'summary', 'dictation'], 'one row per style');
+
+  G.setView('settings');
+  await sleep(20);
+  ok($('style-name').value === 'email' && $('style-name').readOnly === true,
+     'the first visit opens the first style, name locked', $('style-name').value);
+  ok(/description: an email draft/.test($('style-text').value), 'with its file text',
+     $('style-text').value);
+  ok($('style-delete').disabled === false, 'yours can be deleted');
+  styleRows()[3].children[0].fire('click');   // "edit", a built-in
+  await sleep(20);
+  ok($('style-name').value === 'edit', 'clicking a row opens it', $('style-name').value);
+  ok($('style-delete').disabled === true, 'a built-in cannot be deleted here');
+  ok(/built-in/.test($('style-status').textContent), 'and the status says where it comes from',
+     $('style-status').textContent);
+
+  putStyle = null;
+  calls.length = 0;
+  $('style-text').value = '---\ndescription: mine now\n---\nrewritten';
+  await G.saveStyle();
+  const putStyleCall = calls.find(c => c.method === 'PUT' && /\/api\/styles\//.test(c.url));
+  ok(!!putStyleCall && putStyleCall.url === '/api/styles/edit', 'Save PUTs the built-in into Mine',
+     putStyleCall && putStyleCall.url);
+  eq(putStyle, { name: 'edit', text: '---\ndescription: mine now\n---\nrewritten' }, 'with the editor text');
+  ok(calls.filter(c => c.url === '/api/styles').length === 1, 'and the registry is re-read once');
+
+  promptAnswer = 'Terse';
+  G.newStyle();
+  ok($('style-name').value === 'terse' && $('style-name').readOnly === false,
+     'New takes a name and leaves it editable', $('style-name').value);
+  ok(/output: note/.test($('style-text').value), 'and seeds the front matter');
+  ok($('style-delete').disabled === true, 'nothing to delete before it is saved');
+  calls.length = 0;
+  await G.saveStyle();
+  ok(!!calls.find(c => c.method === 'PUT' && c.url === '/api/styles/terse'), 'Save writes the new name');
+
+  G.selectStyle('edit');
+  await sleep(20);
+  G.duplicateStyle();
+  ok($('style-name').value === 'edit-copy' && $('style-name').readOnly === false,
+     'Duplicate offers "<name>-copy"', $('style-name').value);
+
+  await G.selectStyle('email');
+  confirmAnswer = false;
+  deletedStyle = null;
+  await G.deleteStyle();
+  ok(deletedStyle === null, 'Delete asks first');
+  confirmAnswer = true;
+  await G.deleteStyle();
+  ok(deletedStyle === 'email', 'and then removes the file', deletedStyle);
+  routes = baseRoutes();
+  await G.boot();
+
+  console.log('\n24y. a page that booted while the daemon was down picks the styles up');
+  routes = baseRoutes();
+  delete store['vnote.picks'];
+  routes['/api/styles'] = async () => ({ status: 500, body: { error: 'daemon down' } });
+  const upHealth = routes['/health'];
+  delete routes['/health'];
+  // a cold page: the selects hold only what the markup ships (this harness reuses one DOM)
+  byId['pick-mode'].innerHTML = '';
+  byId['regenerate-mode'].innerHTML = '';
+  byId['pick-mode'].appendChild(Object.assign(new El('option'), { value: 'raw' }));
+  await G.boot();
+  await G.checkHealth();
+  ok($('app').dataset.daemon === 'down', 'the shell is down', $('app').dataset.daemon);
+  eq(styleNames('pick-mode'), ['raw'], 'and #pick-mode holds nothing but raw');
+  eq(styleNames('regenerate-mode'), [], 'Regenerate has nothing to offer either');
+
+  routes = baseRoutes();                 // the daemon comes back
+  routes['/health'] = upHealth;
+  await G.checkHealth();
+  await sleep(30);                       // the refetch daemonUp() kicked off
+  ok($('app').dataset.daemon === undefined, 'the shell is up again');
+  eq(styleNames('pick-mode'), ['email', 'standup', 'light', 'edit', 'summary', 'dictation', 'raw'],
+     'the styles arrive without a reload');
+  ok($('pick-mode').value !== 'raw', 'and the pick is a style, not a silent raw note',
+     $('pick-mode').value);
+  calls.length = 0;
+  await G.checkHealth();
+  await sleep(20);
+  ok(!calls.find(c => c.url === '/api/styles'), 'a later poll does not refetch them again');
+
+  console.log('\n24z. a 0.6.x picks object does not force its backend');
+  const BACKENDS = [{ key: 'backend', value: 'ollama', choices: ['ollama', 'claude-code'], kind: 'choice' }];
+  store['vnote.picks'] = JSON.stringify({ mode: 'edit', backend: 'ollama', language: '', live: true });
+  G.applySettingsToPicks(BACKENDS);      // v1: the old page saved the *setting*, not a choice
+  ok($('pick-backend').value === '', 'an unversioned backend is ignored — the style decides',
+     $('pick-backend').value);
+  store['vnote.picks'] = JSON.stringify({ v: 2, mode: 'edit', backend: 'claude-code', language: '', live: true });
+  G.applySettingsToPicks(BACKENDS);
+  ok($('pick-backend').value === 'claude-code', 'a deliberate one is honoured', $('pick-backend').value);
+  $('pick-backend').fire('change');
+  ok(JSON.parse(store['vnote.picks']).v === 2, 'and what this page saves carries the version',
+     store['vnote.picks']);
+  delete store['vnote.picks'];
+  routes = baseRoutes();
+  await G.boot();
+
   console.log('\n25. pcm-worklet resampling');
   const posted = [];
   function makeWorklet(rate) {

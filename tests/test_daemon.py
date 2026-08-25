@@ -111,7 +111,7 @@ def test_revise_round_trip(stub_daemon):
     sent = stub_daemon.last_body["/revise"]
     assert sent["note"] == "# Kept Title\n\nlong body"
     assert sent["instructions"] == "make it shorter"
-    assert sent["backend"] == "ollama"
+    assert sent["backend"] is None  # no explicit pick: the daemon resolves it (style, then setting)
 
 
 # --- cli routing ---------------------------------------------------------------

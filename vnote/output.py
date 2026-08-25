@@ -55,7 +55,7 @@ def write_session(
 
     if note_md is not None:
         note_path = session_dir / "note.md"
-        head = f"# {title}\n\n" if heading else ""  # dictation mode: plain text, no title line
+        head = f"# {title}\n\n" if heading else ""  # a plain-output style: no title line
         note_path.write_text(f"{head}{note_md.strip()}\n", encoding="utf-8")
         written["note"] = note_path
 

@@ -8,7 +8,7 @@ is everything that page leaves out.
 - [First run & setup](#first-run--setup)
 - [Web UI](#web-ui)
 - [`vnote` — command reference](#vnote--command-reference)
-- [Cleanup modes](#cleanup-modes)
+- [Styles](#styles)
 - [Warm daemon](#warm-daemon)
 - [Custom vocabulary](#custom-vocabulary)
 - [Settings reference](#settings-reference)
@@ -68,7 +68,7 @@ Local cleanup models (pull whichever you chose):
 ```bash
 ollama pull qwen2.5:14b-instruct   # default; ~10 GB VRAM
 ollama pull qwen2.5:7b-instruct    # lighter
-ollama pull llama3.2:3b            # lightest / fastest — also a good `dictation_model`
+ollama pull llama3.2:3b            # lightest / fastest — a good `model:` line for the dictation style
 ```
 
 ---
@@ -99,10 +99,11 @@ vnote --serve               # same, without launching a browser — open the URL
 
 ### Record
 
-1. Pick the **mode** (light / edit / summary / dictation / raw — see
-   [Cleanup modes](#cleanup-modes)), the **backend**, and optionally a **language** code
-   (blank = auto-detect). Defaults come from your settings; the page remembers your last
-   picks.
+1. Pick the **style** (the dropdown groups them by where they come from, plus `raw` for
+   no LLM at all — see [Styles](#styles)), the **backend**, and optionally a **language**
+   code (blank = auto-detect). The backend list starts with **style default**: leave it
+   there and the style's own `backend:` line decides, falling back to the `backend`
+   setting. Defaults come from your settings; the page remembers your last picks.
 2. **Record** → talk → **Pause** / **Resume** whenever you need to think (Space does the
    same while a recording is active) → **Stop**.
 3. The audio goes to the daemon, which transcribes, cleans, and writes a note folder —
@@ -112,9 +113,9 @@ vnote --serve               # same, without launching a browser — open the URL
    you're looking at the raw transcript, and an **open in Notes** shortcut.
 
 **Process on stop** (on by default): turn it off and Stop writes a *raw* note — audio and
-transcript, no LLM — whatever the mode says. The note opens on the raw transcript with a
+transcript, no LLM — whatever the style says. The note opens on the raw transcript with a
 quiet "not processed" line and the Regenerate controls ready, so you can fix the transcript
-first and process it when you like. Your mode pick is remembered and is what Regenerate
+first and process it when you like. Your style pick is remembered and is what Regenerate
 offers. Like the other picks, the toggle is per browser.
 
 **Live transcript** (the "Live transcript" toggle, on by default where the browser supports
@@ -134,7 +135,7 @@ the transcript — see [Notes](#notes)).
 
 ### Notes
 
-Every note folder under `voice-notes/`, newest first — title, date, duration, mode. Open
+Every note folder under `voice-notes/`, newest first — title, date, duration, style. Open
 one to:
 
 - **Read and edit** the processed note (it's Markdown in a plain editor) and **Save** —
@@ -145,14 +146,17 @@ one to:
   and Whisper's own output is kept as `transcript.original.txt` the first
   time you save (written once, never overwritten). The next **Regenerate** reads your
   edit. Saving a transcript is not a note version: `note.md` is untouched.
-- **Regenerate** it from the raw transcript in another mode — the same thing as
+- **Regenerate** it from the raw transcript in another style — the same thing as
   `vnote --redo` — or **Revise** the note as it stands. Both read the one
   **Instructions** box ("make it shorter", "turn the second half into a checklist"):
   Regenerate appends it to the cleanup prompt, Revise applies it to the current note.
 - Pick an older **version** from the dropdown to read it, and **Restore** it (which is
   itself a new version — nothing is ever destroyed). On disk: `versions/note-<n>.md` and
-  a `versions` list in `meta.json` recording when, which operation, mode, backend and
-  instruction produced each one.
+  a `versions` list in `meta.json` recording when, which operation, style, backend and
+  instruction produced each one. (The field is still called `cleanup_mode` / `mode` — styles
+  replaced modes without touching a single note on disk.) A note made with a style you have
+  since deleted shows `(missing: <name>)` in the Regenerate dropdown and falls back to
+  `edit` until you pick another.
 - **Open folder** (best-effort: Explorer from WSL, `xdg-open` on Linux, `open` on macOS),
   with the path shown and copyable as the fallback.
 
@@ -169,6 +173,15 @@ CLI reads too. Two kinds of rows can't be edited here:
 
 The **Vocabulary** box edits your [custom vocabulary](#custom-vocabulary) file; changes
 apply to the next recording, no restart.
+
+The **Styles** block below it is the style editor: the list on the left is every style
+file the daemon found, grouped by source; click one to see its text. **Save** always
+writes to *your* folder (`~/.config/vnote/styles/`), so saving a built-in creates your
+own copy of it — which then wins, and can be deleted to get the original back. **New**
+asks for a file name and seeds the front matter, **Duplicate** copies the open one as
+`<name>-copy`, and **Delete** (your own files only) removes the file. Anything the daemon
+could not read — a folder that will not open, a file with a bad `output:` — is listed
+above the editor and skipped, never fatal.
 
 ### Restyling the page
 
@@ -195,10 +208,8 @@ script) it's Enter-only.
 
 | flag | effect |
 |---|---|
-| `--light` | faithful cleanup — de-fill + grammar only |
-| `--edit` | editorial cleanup — reorganize into headings/lists (the built-in default) |
-| `--summary` | condensed rewrite |
-| `--dictation` | plain text from a small fast model — no title, no structure |
+| `--style NAME` | clean up with that [style](#styles) (`vnote --config` lists the ones it found) |
+| `--light` · `--edit` · `--summary` · `--dictation` | shortcuts for the built-in styles of those names (`--edit` is the built-in default) |
 | `--raw` | transcript only, no LLM |
 | `--backend {ollama,claude-code,claude}` | cleanup backend — see [First run & setup](#first-run--setup) |
 | `--model NAME` | override the cleanup model name |
@@ -216,9 +227,10 @@ script) it's Enter-only.
 | `--setup` | re-run the interactive first-run setup, then exit |
 | `--version` | print the version |
 
-The mode with no flag is the `default_mode` setting (`edit` unless you changed it).
-`--redo` is handy for trying a different cleanup intensity without re-transcribing (the
-slow part) — e.g. `vnote --redo voice-notes/2026-08-24-1033-… --summary`. Every re-run
+The style with no flag is the `default_style` setting (`edit` unless you changed it);
+`--mode NAME` is still accepted as the old name for `--style`. `--redo` is handy for trying
+a different style without re-transcribing (the slow part) — e.g.
+`vnote --redo voice-notes/2026-08-24-1033-… --summary`. Every re-run
 (and every edit or revision in the web UI) is kept as a version — see
 [Web UI → Notes](#notes).
 
@@ -227,15 +239,59 @@ no local model at all; transcription falls back to CPU automatically — slower,
 
 ---
 
-## Cleanup modes
+## Styles
 
-| mode | flag | what it does |
+A **style** is one Markdown file: a small front matter block, then the instruction the
+model gets. That instruction *is* the style — there is nothing else to it.
+
+```markdown
+---
+# the description is the line the dropdown shows
+description: a Claude Code session prompt
+output: plain              # note | plain (default note)
+backend: claude-code       # optional; blank = the backend setting
+model:                     # optional; blank = the backend's default
+---
+Turn the spoken brief into a session prompt in the speaker's voice …
+```
+
+- The **file name** is the style's name: lowercase letters, digits, `-` and `_`.
+- **`output: note`** asks the model for a title and Markdown; `note.md` starts with
+  `# Title`. **`output: plain`** asks for the text alone — the title still goes in
+  `meta.json` and the sidebar, but `note.md` has no heading, which is what anything you
+  paste somewhere else wants.
+- A line starting with `#` is a comment anywhere in the front matter. After a *value*,
+  ` #` starts a comment only on `output`, `backend` and `model` — a `description` is prose,
+  so `description: sprint #12 review` keeps its `#`. Keys it does not know are ignored, so a
+  file can carry its own notes.
+- A file that will not parse is skipped and listed in Settings; the rest still load.
+
+**Where they come from**, each source overriding the one before it *by name*:
+
+1. **Built-in** — shipped inside the package (`vnote/styles/*.md`).
+2. **Mine** — `~/.config/vnote/styles/`, next to `vocab.txt`. This is where the web UI
+   writes; editing a built-in creates your copy of it here.
+3. **`VNOTE_STYLES_DIRS`** — extra folders, separated by the platform's path separator
+   (`:` on Linux/macOS). Each becomes its own dropdown group, named after the folder, and
+   a later folder wins over an earlier one. A folder that will not open is a warning in
+   Settings, not a failed start.
+
+Edits apply to the next note — no daemon restart.
+
+**The shipped six:**
+
+| style | output | what it does |
 |---|---|---|
-| light | `--light` | fixes fillers and grammar, keeps your wording and order |
-| edit | `--edit` | reorganizes into headings, lists, and tidy paragraphs (built-in default) |
-| summary | `--summary` | condenses to the key points |
-| dictation | `--dictation` | plain text, no title or structure, on the small `dictation_model` — fast, for pasting into something else |
-| raw | `--raw` | no LLM at all — just the Whisper transcript |
+| `light` | note | fixes fillers and grammar, keeps your wording and order |
+| `edit` | note | reorganizes into headings, lists, and tidy paragraphs (the built-in default) |
+| `summary` | note | condenses to the key points |
+| `dictation` | plain | plain text, no title or structure — for pasting into something else; put a small fast model in its `model:` line if you use it a lot |
+| `prompt` | plain | turns a spoken brief into the opening prompt for a coding-agent session; runs on `claude-code` unless you pick another backend |
+| `email` | plain | an email draft — subject, greeting, body, sign-off |
+
+`prompt` and `email` are first drafts on purpose: open them in Settings and make them
+yours. And `--raw` (or the `raw` entry in the page's dropdown) is not a style at all — it
+skips the LLM and keeps only the Whisper transcript.
 
 You can also dictate formatting instructions as you speak and the cleanup step follows
 them: *"make that a bulleted list"*, *"put a heading here"*, *"scratch that"*.
@@ -311,10 +367,9 @@ default. A `.env` in the current directory is auto-loaded (see `.env.example`).
 | setting | env var | default | what it does |
 |---|---|---|---|
 | `backend` | `VNOTE_BACKEND` | `ollama` | `ollama` (local, offline, free) · `claude-code` (your Claude subscription via the Claude Code CLI, no API key) · `claude` (Anthropic API, billed per token) |
-| `default_mode` | `VNOTE_MODE` | `edit` | cleanup mode when none is picked: `light` · `edit` · `summary` · `dictation` |
+| `default_style` | `VNOTE_STYLE` | `edit` | [style](#styles) used when none is picked — the choices are whatever your style folders hold. The old `default_mode` / `VNOTE_MODE` names are still read (deprecated) |
 | `language` | `VNOTE_LANGUAGE` | — | transcription language code (`en`, `de`, …); blank = auto-detect per recording |
-| `ollama_model` | `VNOTE_OLLAMA_MODEL` | `qwen2.5:14b-instruct` | Ollama model for note cleanup (`ollama pull` it once) |
-| `dictation_model` | `VNOTE_DICTATION_MODEL` | — | Ollama model for `dictation` mode — small and fast, e.g. `llama3.2:3b`; blank = same as `ollama_model` |
+| `ollama_model` | `VNOTE_OLLAMA_MODEL` | `qwen2.5:14b-instruct` | Ollama model for note cleanup (`ollama pull` it once); a style can name its own instead |
 | `ollama_host` | `OLLAMA_HOST` | `http://127.0.0.1:11434` | where Ollama listens |
 | `ollama_keep_alive` | `VNOTE_OLLAMA_KEEP_ALIVE` | `30m` | how long Ollama keeps the model loaded after a request — a duration with a unit (`30m`, `1h30m`), a bare number of seconds (`300`), or `-1` = until Ollama exits (Ollama's own default is `5m`) |
 | `claude_model` | `VNOTE_CLAUDE_MODEL` | `claude-sonnet-5` | model for the `claude` (API) backend; `claude-code` uses the CLI's own choice |
@@ -323,6 +378,7 @@ default. A `.env` in the current directory is auto-loaded (see `.env.example`).
 | `notes_dir` | `VNOTE_DIR` | `./voice-notes` | where note folders are written — **restart to apply** |
 | `daemon_host` | `VNOTE_DAEMON_HOST` | `127.0.0.1` | address the daemon binds (keep it on localhost — no auth) — **restart to apply** |
 | `daemon_port` | `VNOTE_DAEMON_PORT` | `8760` | port the daemon listens on — **restart to apply** |
+| `styles_dirs` | `VNOTE_STYLES_DIRS` | — | extra [style](#styles) folders, `:`-separated; each overrides the built-ins and the folders before it — **restart to apply** (their *contents* apply without one) |
 | `vocab` | `VNOTE_VOCAB` | `~/.config/vnote/vocab.txt` | the custom-vocabulary file (its *contents* apply without a restart) |
 
 Plus `ANTHROPIC_API_KEY` — required for `--backend claude` only (**not** for `claude-code`).
@@ -340,11 +396,15 @@ What the page talks to; handy for scripts too. JSON unless noted; errors are non
 | `GET /health` | `{status, version, device, whisper_model, uptime_s, warm, warm_error, ollama}` — `warm` is false until Whisper is loaded, `warm_error` is null unless the load failed; `ollama` is `unknown` · `skipped` (backend is not Ollama) · `starting` · `ready` · `absent` |
 | `GET /api/settings` · `PUT /api/settings` | the settings list ↔ `{key: value, …}` (editable keys only; 400 with a reason otherwise) |
 | `GET /api/vocab` · `PUT /api/vocab` | `{"text": …}` ↔ the vocabulary file |
+| `GET /api/styles` | `{groups: [{label, source, dir, styles: [{name, description, output, backend, model, body, source, path}]}], problems: [...], mine_dir}` — groups in dropdown order (Mine, each extra folder, Built-in) |
+| `GET /api/styles/<name>` | the same style fields plus `text` (the file as it is on disk) and `mine`; 404 if there is no such style |
+| `PUT /api/styles/<name>` | `{"text": …}` → 201 (created) or 200 (updated) `{saved, path}` — always written to *your* folder; 400 on a bad name or a file that will not parse |
+| `DELETE /api/styles/<name>` | 204 — your own files only; 403 for a built-in or another folder's, 404 if unknown |
 | `GET /api/notes` | newest-first `{"notes": [{name, title, created, duration_s, mode, backend, has_audio, has_note}]}` |
-| `GET /api/notes/<name>` | the same fields plus `meta`, `note`, `transcript`, `transcript_edited`, `audio_url`, `path`, `versions` |
+| `GET /api/notes/<name>` | the same fields plus `meta`, `note`, `transcript`, `transcript_edited`, `style_missing`, `audio_url`, `path`, `versions` |
 | `GET /api/notes/<name>/audio` | the audio file (`Range` supported) |
-| `POST /api/note?format=webm&mode=…&backend=…&language=…&raw=0` | body = audio bytes → a finished note: `{name, title, note, transcript, meta, cleanup_error}` |
-| `POST /api/notes/<name>/reclean` | `{mode, backend?, model?, instructions?}` → `{title, note, version}` — regenerate from the transcript |
+| `POST /api/note?format=webm&mode=…&backend=…&language=…&raw=0` | body = audio bytes → a finished note: `{name, title, note, transcript, meta, cleanup_error}`. `mode` is a style name; omit `backend` (or send it blank) to let the style decide |
+| `POST /api/notes/<name>/reclean` | `{mode, backend?, model?, instructions?}` → `{title, note, version}` — regenerate from the transcript; `mode` is a style name |
 | `POST /api/notes/<name>/revise` | `{instructions, backend?, model?}` → `{title, note, version}` — apply an instruction to the current note |
 | `PUT /api/notes/<name>/note` | `{"text": …}` → `{version, title, note}` — save a manual edit |
 | `PUT /api/notes/<name>/transcript` | `{"text": …}` → `{transcript, transcript_edited}` — rewrite `transcript.txt` (what Regenerate reads); the first write keeps Whisper's output as `transcript.original.txt`. Not a version. Empty text is allowed |
@@ -352,7 +412,7 @@ What the page talks to; handy for scripts too. JSON unless noted; errors are non
 | `POST /api/notes/<name>/restore` | `{"n": …}` → `{title, note, version}` — restores that version as a new one |
 | `POST /api/notes/<name>/reveal` | open the folder in the OS file manager (best-effort) → `{opened, path}` |
 | `POST /transcribe` | JSON `{audio_path, language?}` (shared filesystem) or the audio as an `application/octet-stream` body with `?format=` → `{transcript, meta}` |
-| `POST /clean` | `{transcript, mode?, backend?, model?, tone?, instructions?}` → `{title, body}` |
+| `POST /clean` | `{transcript, mode?, backend?, model?, tone?, instructions?}` → `{title, body}` — `mode` is a style name |
 | `POST /revise` | `{note, instructions, backend?, model?}` → `{title, body}` |
 | `POST /stream/start` | `{language?}` → `{session_id}` — opens a live session; the daemon keeps the audio |
 | `POST /stream/append?sid=` | body = raw s16le 16 kHz mono PCM → `{partial, committed, tail, seconds}`, at once: a per-session worker transcribes the uncommitted tail and commits it at a silence boundary (or after 30 s), so the request never waits on the GPU |
@@ -373,6 +433,7 @@ vnote --setup              # re-run the interactive first-run setup
 
 - **Config:** `~/.config/vnote/config.json` (`$XDG_CONFIG_HOME/vnote/config.json`)
 - **Vocabulary:** `~/.config/vnote/vocab.txt`
+- **Your styles:** `~/.config/vnote/styles/*.md`
 - **Notes:** `./voice-notes/` (or `VNOTE_DIR`)
 - **Whisper model cache:** `~/.cache/huggingface`
 

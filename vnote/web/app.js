@@ -34,8 +34,9 @@
  *     #live-copy #live-copy-status   copy the live text, from the top bar
  *     #process-status           the one status line: the processing sentence, a
  *                               live-transcript warning, a reprocess result
- *     #pick-mode                select: light edit summary dictation raw
- *     #pick-backend             select, filled from /api/settings
+ *     #pick-mode                select: the styles from /api/styles, grouped by
+ *                               source, plus "raw" (no LLM) as the last option
+ *     #pick-backend             select, filled from /api/settings; "" = the style's
  *     #pick-language            select: the configured language, the last pick,
  *                               the common ones, and auto
  *     #process-toggle           checkbox: run cleanup on Stop (off = a raw note)
@@ -60,7 +61,8 @@
  *     #note-copy #note-copy-status
  *     #note-raw #note-raw-save #note-raw-copy #note-raw-status #note-raw-toggle
  *                               the transcript, editable — Save rewrites transcript.txt
- *     #regenerate-mode #regenerate    re-run cleanup from the raw transcript
+ *     #regenerate-mode #regenerate    re-run cleanup from the raw transcript, in
+ *                               a style; a note whose style is gone shows "(missing: …)"
  *     #revise-instructions      ONE instructions box, read by both Regenerate (appended
  *                               to the cleanup prompt) and Revise
  *     #revise                   apply the instruction to the current note
@@ -72,6 +74,10 @@
  *     #settings-table           the <tbody> this file fills
  *     #settings-save #settings-status
  *     #vocab #vocab-save #vocab-status
+ *     #styles-list              the style files, grouped by source; click to open one
+ *     #styles-problems          the registry's warnings (hidden when there are none)
+ *     #style-name #style-text   the selected style's file name and full text
+ *     #style-new #style-duplicate #style-delete #style-save #style-status
  */
 
 'use strict';
@@ -81,6 +87,10 @@
 function $(id) { return document.getElementById(id); }
 
 var LS_PICKS = 'vnote.picks';
+/* Bumped when a remembered field changes meaning. v1 (0.6.x) saved whatever backend
+ * the page had *preselected* from the settings, which was never a choice the user
+ * made — reading it back would override every style's own backend: line. */
+var PICKS_VERSION = 2;
 
 function lsGet(key) {
   try { return window.localStorage.getItem(key); } catch (e) { return null; }
@@ -119,11 +129,14 @@ async function api(url, options) {
     err.status = res.status;   // callers that treat 404 as terminal look at this
     throw err;
   }
-  if (data === null) throw new Error('unexpected non-JSON response from ' + url);
+  // 204 (DELETE) carries no body by design; every other route answers JSON.
+  if (data === null && res.status !== 204) throw new Error('unexpected non-JSON response from ' + url);
   return data;
 }
 
 function getJSON(url) { return api(url, { method: 'GET' }); }
+
+function deleteJSON(url) { return api(url, { method: 'DELETE' }); }
 
 function putJSON(url, body) {
   return api(url, {
@@ -252,6 +265,7 @@ function el(tag, className, text) {
  */
 
 var vocabLoaded = false;
+var styleOpened = false;
 
 function setView(name) {
   var view = name === 'settings' ? 'settings' : 'note';
@@ -259,6 +273,10 @@ function setView(name) {
   if (view === 'settings' && !vocabLoaded) {
     vocabLoaded = true;
     loadVocab();
+  }
+  if (view === 'settings' && !styleOpened && firstStyleName()) {
+    styleOpened = true;
+    selectStyle(firstStyleName());   // the list is already there; its text is not
   }
 }
 
@@ -350,6 +368,29 @@ function daemonUp(health) {
     $('daemon-info').textContent = line;
   }
   syncRecordEnabled();
+  // A page opened while the daemon was down has no styles: #pick-mode would hold
+  // nothing but "raw" and every take would silently be a raw note. Refetch them
+  // (and the defaults that select inside them) as soon as it answers. Only when the
+  // last attempt came back empty — a daemon that merely blipped changes nothing here.
+  if (stylesTried && !stylesReady && !takeActive()) refetchStyles();
+}
+
+var refetchingStyles = false;
+
+/* /api/styles + the settings that pick inside it — the boot pair, on its own. */
+async function refetchStyles() {
+  if (refetchingStyles) return;
+  refetchingStyles = true;
+  try {
+    await loadStyles();
+    if (!stylesReady) return;   // still nothing: leave the picks alone
+    var data = await getJSON('/api/settings');
+    applySettingsToPicks((data && data.settings) || []);
+  } catch (e) {
+    /* the next poll tries again */
+  } finally {
+    refetchingStyles = false;
+  }
 }
 
 /* Quietly: a daemon that is down is polled every 5 s, and nothing is logged.
@@ -408,7 +449,9 @@ function scheduleHealth() {
 
 var settingsRows = [];   // [{setting, control}] — control null for read-only rows
 var backendChoices = [];
-var defaultMode = 'edit';   // the daemon's default_mode; 'edit' is its built-in one
+var defaultStyle = 'edit';   // the daemon's default_style; 'edit' is its built-in one
+var styleGroups = [];        // /api/styles groups, in dropdown order (Mine first)
+var stylesMineDir = '';      // where a Save writes
 
 function readPicks() {
   var raw = lsGet(LS_PICKS);
@@ -423,6 +466,7 @@ function readPicks() {
 
 function savePicks() {
   lsSet(LS_PICKS, JSON.stringify({
+    v: PICKS_VERSION,
     mode: $('pick-mode').value,
     backend: $('pick-backend').value,
     language: $('pick-language').value,
@@ -438,7 +482,7 @@ function initProcessToggle() {
   $('process-toggle').checked = (picks && typeof picks.process === 'boolean') ? picks.process : true;
 }
 
-/* True when Stop must not run cleanup — the mode pick says raw, or the toggle is off. */
+/* True when Stop must not run cleanup — the style pick says raw, or the toggle is off. */
 function skipCleanup() {
   return $('pick-mode').value === 'raw' || !$('process-toggle').checked;
 }
@@ -452,6 +496,68 @@ function selectIfPresent(sel, value) {
       return;
     }
   }
+}
+
+/* The style dropdowns: one <optgroup> per source (Mine / a folder / Built-in),
+ * plain file names inside, the description as the option's tooltip. "raw" is not
+ * a style — no LLM runs at all — so it sits outside the groups, last, and only
+ * on the record panel. */
+function fillStyleSelects(groups) {
+  styleGroups = groups || [];
+  var pickSel = $('pick-mode');
+  var regenSel = $('regenerate-mode');
+  var pick = pickSel.value;     // a refill (after a save) must not move the picks
+  var regen = regenSel.value;
+  pickSel.innerHTML = '';
+  regenSel.innerHTML = '';
+  styleGroups.forEach(function (group) {
+    var into = [addOptGroup(pickSel, group.label), addOptGroup(regenSel, group.label)];
+    (group.styles || []).forEach(function (style) {
+      into.forEach(function (parent) {
+        var opt = addOption(parent, style.name, style.name);
+        if (style.description) opt.title = style.description;
+      });
+    });
+  });
+  addOption(pickSel, 'raw', 'raw — no LLM');
+  restoreStylePick(pickSel, pick);
+  restoreStylePick(regenSel, regen);
+}
+
+function addOptGroup(sel, label) {
+  var group = document.createElement('optgroup');
+  group.label = label;
+  sel.appendChild(group);
+  return group;
+}
+
+function hasOption(sel, value) {
+  if (value === null || value === undefined || value === '') return false;
+  for (var i = 0; i < sel.options.length; i++) {
+    if (sel.options[i].value === String(value)) return true;
+  }
+  return false;
+}
+
+/* Keep what was selected; a style that has since been deleted falls back to the
+ * daemon's default, and then to whatever the list starts with. */
+function restoreStylePick(sel, value) {
+  if (hasOption(sel, value)) { sel.value = String(value); return; }
+  if (hasOption(sel, defaultStyle)) { sel.value = defaultStyle; return; }
+  if (sel.options.length) sel.value = sel.options[0].value;
+}
+
+function styleNames() {
+  var out = [];
+  styleGroups.forEach(function (group) {
+    (group.styles || []).forEach(function (style) { out.push(style.name); });
+  });
+  return out;
+}
+
+function firstStyleName() {
+  var names = styleNames();
+  return names.length ? names[0] : '';
 }
 
 function findSetting(settings, key) {
@@ -494,16 +600,20 @@ function applySettingsToPicks(settings) {
   var backend = findSetting(settings, 'backend');
   var backendSel = $('pick-backend');
   backendSel.innerHTML = '';
+  // "" = whatever the style says (and the backend setting when it says nothing).
+  // An explicit pick here wins over the style, which is why it is not preselected.
+  addOption(backendSel, '', 'style default');
   backendChoices = (backend && backend.choices) ? backend.choices.slice() : [];
   if (!backendChoices.length && backend && backend.value) backendChoices = [backend.value];
   backendChoices.forEach(function (choice) {
     addOption(backendSel, choice, backendLabel(settings, choice));
   });
-  if (backend) selectIfPresent(backendSel, backend.value);
+  backendSel.value = '';
 
-  var mode = findSetting(settings, 'default_mode');
-  if (mode && mode.value) defaultMode = mode.value;
-  if (mode) selectIfPresent($('pick-mode'), mode.value);
+  var style = findSetting(settings, 'default_style');
+  if (style && style.value) defaultStyle = String(style.value);
+  if (style) selectIfPresent($('pick-mode'), style.value);
+  if (style) selectIfPresent($('regenerate-mode'), style.value);
 
   // "Everything stays in <notes_dir> on this machine" — the markup's fallback text
   // stands when the daemon does not say where that is.
@@ -530,7 +640,8 @@ function applySettingsToPicks(settings) {
 
   if (picks) {
     selectIfPresent($('pick-mode'), picks.mode);
-    selectIfPresent($('pick-backend'), picks.backend);
+    // Only a deliberate backend travels: see PICKS_VERSION.
+    if (picks.v === PICKS_VERSION) selectIfPresent($('pick-backend'), picks.backend);
     if (picks.language === '') langSel.value = '';
     else selectIfPresent(langSel, picks.language);
   }
@@ -539,6 +650,7 @@ function applySettingsToPicks(settings) {
 async function boot() {
   var healthPromise = getJSON('/health');
   var settingsPromise = getJSON('/api/settings');
+  var stylesPromise = getJSON('/api/styles');
 
   try {
     daemonUp(await healthPromise);
@@ -546,14 +658,18 @@ async function boot() {
     daemonDown();
   }
 
+  // The style dropdowns are filled first: applySettingsToPicks() below selects
+  // the daemon's default (and then the remembered pick) inside them.
+  await applyStyles(stylesPromise);
+
   try {
     var data = await settingsPromise;
     var settings = (data && data.settings) || [];
     applySettingsToPicks(settings);
     renderSettings(settings);
   } catch (e) {
-    // 'edit' is the daemon's built-in default; without this the first option
-    // ('light') would silently become the one this recording uses.
+    // 'edit' is the daemon's built-in default; without this the first style in
+    // the list would silently become the one this recording uses.
     selectIfPresent($('pick-mode'), 'edit');
     $('settings-status').textContent = errText(e);
     var tbody = $('settings-table');
@@ -2121,11 +2237,14 @@ async function loadNote(name) {
   $('note-path').hidden = !data.path;
 
   renderVersions(data.versions || []);
-  // A note that was never processed has no mode of its own: offer what the record
-  // panel is set to, and the daemon's default when that pick is "raw" (not a mode).
+  // A note that was never processed has no style of its own: offer what the record
+  // panel is set to, and the daemon's default when that pick is "raw" (not a style).
   var pick = $('pick-mode').value;
-  selectIfPresent($('regenerate-mode'), data.mode || raw.cleanup_mode ||
-                  (pick && pick !== 'raw' ? pick : defaultMode));
+  var made = data.mode || raw.cleanup_mode;
+  setMissingStyle(data.style_missing ? made : null);
+  if (!data.style_missing) {
+    selectIfPresent($('regenerate-mode'), made || (pick && pick !== 'raw' ? pick : defaultStyle));
+  }
   updateProcessState();
   setStage('note');
 }
@@ -2218,7 +2337,9 @@ async function regenerateNote() {
   setProcessing(true);
   say('regenerating…');
   try {
-    var body = { mode: $('regenerate-mode').value };
+    // A note whose style is gone leaves the select on the disabled "(missing: …)"
+    // entry: Regenerate falls back to `edit` until the user picks another (PHASE10 E).
+    var body = { mode: $('regenerate-mode').value || 'edit' };
     var backend = $('pick-backend').value;
     if (backend) body.backend = backend;
     var instructions = $('revise-instructions').value.trim();
@@ -2284,7 +2405,7 @@ async function revealNote() {
 
 /* ----------------------------------------------------------------- settings */
 
-/* "default_mode" -> "Default mode": the design's row name, from the key itself. */
+/* "default_style" -> "Default style": the design's row name, from the key itself. */
 function settingName(key) {
   var words = String(key).replace(/_/g, ' ');
   return words.charAt(0).toUpperCase() + words.slice(1);
@@ -2453,6 +2574,176 @@ async function saveVocab() {
   }
 }
 
+/* Styles ------------------------------------------------------------------
+ *
+ * The registry lives in files (vnote/styles.py); this is the same editor shape as
+ * the vocabulary, one file at a time. Saving always writes to Mine, so "edit" on
+ * a built-in creates the override copy there and the list moves it under Mine.
+ */
+
+var selectedStyle = null;   // the saved style shown in the editor; null for an unsaved new one
+var missingStyleOption = null;
+
+var STYLE_TEMPLATE = [
+  '---',
+  'description: what this style is for',
+  'output: note',
+  '---',
+  'Say what the model should do with the transcript.',
+  ''
+].join('\n');
+
+/* The disabled "(missing: x)" entry a note whose style was deleted shows. */
+function setMissingStyle(name) {
+  var sel = $('regenerate-mode');
+  if (missingStyleOption && missingStyleOption.parentNode === sel) sel.removeChild(missingStyleOption);
+  missingStyleOption = null;
+  if (!name) return;
+  var opt = addOption(sel, '', '(missing: ' + name + ')');
+  opt.disabled = true;
+  missingStyleOption = opt;
+  sel.value = '';
+}
+
+var stylesTried = false;   // boot has attempted the fetch: before that, nothing retries
+var stylesReady = false;   // ... and it came back with styles: nothing to retry
+
+async function applyStyles(promise) {
+  try {
+    var data = await promise;
+    stylesMineDir = data.mine_dir || '';
+    fillStyleSelects(data.groups || []);
+    renderStyleProblems(data.problems || []);
+    renderStylesList();
+    stylesReady = styleGroups.length > 0;
+  } catch (e) {
+    stylesReady = false;
+    renderStyleProblems(['could not load the styles: ' + errText(e)]);
+  } finally {
+    stylesTried = true;
+  }
+}
+
+function loadStyles() { return applyStyles(getJSON('/api/styles')); }
+
+function renderStyleProblems(problems) {
+  var box = $('styles-problems');
+  box.innerHTML = '';
+  box.hidden = !problems.length;
+  problems.forEach(function (line) { box.appendChild(el('p', null, line)); });
+}
+
+function renderStylesList() {
+  var list = $('styles-list');
+  list.innerHTML = '';
+  styleGroups.forEach(function (group) {
+    list.appendChild(el('li', 'group', group.label));
+    (group.styles || []).forEach(function (style) {
+      var li = el('li');
+      var btn = el('button');
+      btn.type = 'button';
+      btn.dataset.name = style.name;
+      btn.dataset.source = style.source;
+      btn.appendChild(el('span', 'name', style.name));
+      if (style.description) btn.appendChild(el('span', 'desc', style.description));
+      if (style.name === selectedStyle) btn.setAttribute('aria-current', 'true');
+      btn.addEventListener('click', function () { selectStyle(style.name); });
+      li.appendChild(btn);
+      list.appendChild(li);
+    });
+  });
+}
+
+function styleSourceLabel(data) {
+  if (data.source === 'mine') return 'yours · ' + data.path;
+  if (data.source === 'builtin') return 'built-in — Save keeps your copy in ' + stylesMineDir;
+  return data.source;
+}
+
+async function selectStyle(name) {
+  var status = $('style-status');
+  status.textContent = 'loading…';
+  try {
+    var data = await getJSON('/api/styles/' + encodeURIComponent(name));
+    selectedStyle = name;
+    $('style-name').value = name;
+    $('style-name').readOnly = true;         // an existing style keeps its file name
+    $('style-text').value = data.text || '';
+    $('style-delete').disabled = !data.mine; // only your own folder is yours to delete from
+    status.textContent = styleSourceLabel(data);
+    renderStylesList();
+  } catch (e) {
+    status.textContent = errText(e);
+  }
+}
+
+/* A new style is unsaved until Save writes it: the name is editable until then. */
+function draftStyle(name, text) {
+  selectedStyle = null;
+  $('style-name').value = name;
+  $('style-name').readOnly = false;
+  $('style-text').value = text;
+  $('style-delete').disabled = true;
+  $('style-status').textContent = 'unsaved — Save writes it to ' + stylesMineDir;
+  renderStylesList();
+}
+
+function newStyle() {
+  var name = (window.prompt('File name for the new style (lowercase, no spaces):') || '').trim();
+  if (!name) return;
+  draftStyle(name.toLowerCase(), STYLE_TEMPLATE);
+}
+
+function duplicateStyle() {
+  var base = ($('style-name').value || '').trim();
+  if (!base) return;
+  draftStyle(base + '-copy', $('style-text').value);
+}
+
+async function saveStyle() {
+  var name = ($('style-name').value || '').trim();
+  var status = $('style-status');
+  if (!name) {
+    status.textContent = 'give the style a file name first';
+    return;
+  }
+  var btn = $('style-save');
+  btn.disabled = true;
+  status.textContent = 'saving…';
+  try {
+    await putJSON('/api/styles/' + encodeURIComponent(name), { text: $('style-text').value });
+    selectedStyle = name;
+    await loadStyles();           // the dropdowns follow the registry
+    await selectStyle(name);
+    flash(status, 'saved ' + fmtTime(new Date().toISOString()));
+  } catch (e) {
+    status.textContent = errText(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function deleteStyle() {
+  var name = ($('style-name').value || '').trim();
+  var status = $('style-status');
+  if (!name || !selectedStyle) return;
+  if (!window.confirm('Delete the style "' + name + '"? Its file is removed from ' + stylesMineDir + '.')) return;
+  $('style-delete').disabled = true;
+  status.textContent = 'deleting…';
+  try {
+    await deleteJSON('/api/styles/' + encodeURIComponent(name));
+    selectedStyle = null;
+    await loadStyles();
+    var next = firstStyleName();
+    if (next) await selectStyle(next);
+    else draftStyle('', STYLE_TEMPLATE);
+    flash(status, 'deleted');
+  } catch (e) {
+    status.textContent = errText(e);
+    $('style-delete').disabled = false;
+  }
+}
+
 /* ------------------------------------------------------------------- wiring */
 
 function typingInAField(elx) {
@@ -2589,6 +2880,10 @@ function wire() {
 
   $('settings-save').addEventListener('click', saveSettings);
   $('vocab-save').addEventListener('click', saveVocab);
+  $('style-save').addEventListener('click', saveStyle);
+  $('style-new').addEventListener('click', newStyle);
+  $('style-duplicate').addEventListener('click', duplicateStyle);
+  $('style-delete').addEventListener('click', deleteStyle);
 
   // Closing the tab with unsaved editor text — or during a live take, whose audio
   // only this tab and the daemon's half-finished session hold — asks first.
@@ -2622,6 +2917,7 @@ function init() {
   setStage('idle');
   setTransport('ready');
   setRaw(true);           // the drawer is open by default, and owns its own label
+  $('style-delete').disabled = true;
   renderVersions([]);
   updateProcessState();   // nothing is open yet: save/regenerate/revise stay off
   paintTimer();

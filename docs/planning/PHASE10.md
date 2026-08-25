@@ -160,6 +160,60 @@ the API; restoring is a folder move, documented. This is the app's first destruc
 action — the rule from VNOTE-002/003 stands: the daemon never unlinks the only copy
 of a recording; trash is a move.
 
+## F — wire contract (fixed 2026-08-25 so daemon and page can build in parallel)
+
+**Folder.** Flat until the first Continue. Migration (under the folder lock, in this
+order so no reader ever sees a missing file): `mkdir takes/1` → *rename* `audio.*` into
+it → rename `transcript.original.txt` if present → *copy* `transcript.txt` into it (the
+root copy stays: for one take the join is identical) → `meta.takes = [{n: 1, created:
+meta.created, duration_s: <the duration meta already holds>}]`. `_audio_file()` falls
+back to `takes/1/audio.*` so the old `/audio` route keeps working. Root `transcript.txt`
+= the takes' `transcript.txt` joined with a blank line, rewritten on every take add /
+edit / delete; `meta.audio_duration_s` = the sum. A note with `takes/` never goes back
+to flat.
+
+**Live sessions.** `POST /stream/start?continue=<name>` binds the session to the note
+(`LiveSession.note_name`; 404 if the note does not exist). `_registry.bound(name)` is
+true while such a session lives; delete-note / delete-take return 409 meanwhile.
+
+**Continue (both capture paths).** `POST /stream/finish?sid=&note=1&continue=<name>
+&how=continue|append|merge[&mode=<style>&backend=&model=&raw=1&instructions=]` and
+`POST /api/note?continue=<name>&how=…` (MediaRecorder fallback, audio body). The
+daemon transcribes the new audio in one pass → take n = `takes/<n>/{audio.wav,
+transcript.txt}` (n = max existing + 1, never reused) → then:
+- the note has no `note.md`, or `raw=1` → nothing cleaned, no version;
+- `how=append` → `clean(new transcript, style)`; body appended to the current note
+  under `\n\n---\n\n`; version `{op: "continue", how: "append", take: n}`;
+- `how=continue` (default) → `cleanup.continue_note(current note, new transcript,
+  style, …)`: the note is read-only context, the model returns only the continuation
+  (no TITLE line); appended the same way; `{op: "continue", how: "continue", take: n}`;
+- `how=merge` → `cleanup.merge_note(current note, new transcript, style, …)`: TITLE/---
+  contract, the whole note replaced; `{op: "merge", how: "merge", take: n}`.
+The style is `mode` if given, else `meta.cleanup_mode`, else the default style; backend
+and model resolve as everywhere (explicit > style > setting). Reply: the note's full
+detail payload plus `take: n` and `live_transcript`. A cleanup failure keeps the take
+(audio + transcript are already on disk) and answers 500 with `take` set — never
+unlinks anything.
+
+**Detail payload** (`GET /api/notes/<name>`) gains `takes: [{n, created, duration_s,
+transcript, transcript_edited, audio_url}]` (a flat note reports one synthesized take
+from its root files; `audio_url` there is the old `/audio` route), and `live: bool`
+(a session is bound). `transcript` stays the root join.
+
+**Routes.**
+| route | behaviour |
+|---|---|
+| `GET /api/notes/<name>/takes/<n>/audio` | the take's audio (same Range handling as `/audio`) |
+| `PUT /api/notes/<name>/takes/<n>/transcript {"text"}` | per-take edit; keeps `takes/<n>/transcript.original.txt` once; rewrites the root join. On a flat note n=1 edits the root files (same as `PUT …/transcript`) |
+| `POST /api/notes/<name>/takes/<n>/rerun {how, mode?, backend?, model?, instructions?}` | the take's transcript against the *current* note per `how` → new version as above; 400 when the note has no `note.md` (regenerate instead) |
+| `POST /api/notes/<name>/reclean` | + `takes: [n, …]` (default all, ≥1 else 400): the join of those takes only; the version entry records `takes` |
+| `DELETE /api/notes/<name>/takes/<n>` | → `<notes_dir>/trash/<name>/take-<n>/` (a move); rebuild join + duration; 409 on the last take or while bound; `note.md` untouched; numbers keep their gaps |
+| `DELETE /api/notes/<name>` | → `<notes_dir>/trash/<name>/` (a move); 409 while bound |
+| `GET /api/trash` · `POST /api/trash/reveal` | `{path, entries: <count>}`; best-effort reveal like a note folder |
+`trash/` is excluded from `/api/notes` (its name never matches the session regex) and
+never emptied by the daemon. Version entries: `take`, `how`, `takes` alongside the
+existing fields.
+
 ## Contract additions (the boundary for the page)
 
 | route | behaviour |

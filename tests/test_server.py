@@ -755,6 +755,64 @@ def test_put_note_saves_an_edit_as_a_new_version(notes_dir):
     assert status == 404
 
 
+def test_transcript_edit_feeds_the_next_regenerate(notes_dir):
+    """Phase 10 C end to end: a raw note, an edited transcript, then Regenerate."""
+    status, _, body = _request("POST", "/api/note?format=webm&raw=1", b"WEBMDATA",
+                               {"Content-Type": "application/octet-stream"})
+    assert status == 200, body
+    name = _json.loads(body)["name"]
+    folder = notes_dir / name
+
+    status, data = _get_json(f"/api/notes/{name}")
+    assert status == 200
+    assert data["note"] is None and data["meta"]["cleanup_mode"] is None  # nothing failed: no LLM ran
+    assert data["transcript_edited"] is False and not (folder / "note.md").exists()
+
+    status, data = _send_json("PUT", f"/api/notes/{name}/transcript", {"text": "the words I meant"})
+    assert status == 200, data
+    assert data == {"transcript": "the words I meant", "transcript_edited": True}
+    assert (folder / "transcript.txt").read_text(encoding="utf-8") == "the words I meant"
+    assert (folder / "transcript.original.txt").read_text(encoding="utf-8") == "fake transcript\n"
+
+    # a second edit leaves Whisper's copy alone — the first edit was the only chance to keep it
+    status, _ = _send_json("PUT", f"/api/notes/{name}/transcript", {"text": "second thoughts"})
+    assert status == 200
+    assert (folder / "transcript.original.txt").read_text(encoding="utf-8") == "fake transcript\n"
+
+    status, data = _get_json(f"/api/notes/{name}")
+    assert data["transcript"] == "second thoughts" and data["transcript_edited"] is True
+
+    status, data = _send_json("POST", f"/api/notes/{name}/reclean", {"mode": "light"})
+    assert status == 200, data
+    assert _seen["clean"][0] == "second thoughts"  # the edit is what the model saw, not Whisper's output
+    assert (folder / "note.md").read_text(encoding="utf-8") == "# Fake Title\n\nFake body.\n"
+    entries = _json.loads((folder / "meta.json").read_text(encoding="utf-8"))["versions"]
+    assert [e["op"] for e in entries] == ["regenerate"] and data["version"] == 1
+
+
+def test_transcript_edit_rejects_bad_requests(notes_dir):
+    d = _make_session(notes_dir, "2026-08-11-0900-transcript", meta={"title": "T"}, audio=None)
+    for bad in ({"text": 5}, {"text": None}, {}):
+        status, _ = _send_json("PUT", "/api/notes/2026-08-11-0900-transcript/transcript", bad)
+        assert status == 400, bad
+    assert not (d / "transcript.original.txt").exists()  # a refused write keeps its hands off both files
+    assert (d / "transcript.txt").read_text(encoding="utf-8") == "raw words\n"
+    status, _ = _send_json("PUT", "/api/notes/2026-01-01-0000-missing/transcript", {"text": "x"})
+    assert status == 404
+    status, _, _ = _request("PUT", "/api/notes/nope/transcript", b'{"text": "x"}',
+                            {"Content-Type": "application/json"})
+    assert status == 404
+
+
+def test_transcript_can_be_cleared(notes_dir):
+    """Emptying the pane is a legitimate edit; the original stays put."""
+    d = _make_session(notes_dir, "2026-08-11-0901-cleared", meta={"title": "T"}, audio=None)
+    status, data = _send_json("PUT", "/api/notes/2026-08-11-0901-cleared/transcript", {"text": ""})
+    assert status == 200 and data["transcript"] == ""
+    assert (d / "transcript.txt").read_text(encoding="utf-8") == ""
+    assert (d / "transcript.original.txt").read_text(encoding="utf-8") == "raw words\n"
+
+
 def test_reclean_passes_instructions_and_returns_a_version(notes_dir):
     d = _make_session(notes_dir, "2026-08-10-0902-redo", meta={"title": "Old", "cleanup_mode": "edit"},
                       audio=None)

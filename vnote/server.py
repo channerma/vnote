@@ -294,6 +294,8 @@ def _note_detail(session: Path) -> dict:
         "meta": _read_meta(session),
         "note": _read_text(session / "note.md"),
         "transcript": _read_text(session / "transcript.txt") or "",
+        # the kept copy of Whisper's output is the whole record of an edit: no meta flag
+        "transcript_edited": (session / "transcript.original.txt").is_file(),
         "audio_url": f"/api/notes/{session.name}/audio" if audio else None,
         "path": str(session),  # the page shows it (with a Copy button) next to the reveal action
         "versions": versions.entries(session),
@@ -566,6 +568,9 @@ class _Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/notes/([^/]+)/note", path)
             if m:
                 return self._api_save_note(m.group(1))
+            m = re.fullmatch(r"/api/notes/([^/]+)/transcript", path)
+            if m:
+                return self._api_save_transcript(m.group(1))
             if path == "/api/vocab":
                 text = self._read_json().get("text")
                 if not isinstance(text, str):
@@ -647,6 +652,22 @@ class _Handler(BaseHTTPRequestHandler):
 
         result = pipeline.save_edit(session, text)
         self._send(200, {"version": result.version, "title": result.title, "note": result.note_text})
+
+    def _api_save_transcript(self, name: str) -> None:
+        """PUT the raw transcript the user edited; Regenerate reads it from here on.
+
+        Not a version: ``note.md`` is untouched. Empty text is allowed (clearing the
+        pane is a legitimate edit), and Whisper's own output is kept once — see
+        :func:`versions.write_transcript`.
+        """
+        session = _session_path(name)
+        if session is None:
+            return self._send(404, {"error": f"no such note: {name}"})
+        text = self._read_json().get("text")
+        if not isinstance(text, str):
+            return self._send(400, {"error": "body must be {\"text\": \"...\"}"})
+        versions.write_transcript(session, text)
+        self._send(200, {"transcript": text, "transcript_edited": True})
 
     def _api_revise(self, name: str) -> None:
         """Rewrite the *current* note per a free-text instruction — a new version (op ``revise``)."""

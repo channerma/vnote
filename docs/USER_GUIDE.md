@@ -111,6 +111,12 @@ vnote --serve               # same, without launching a browser — open the URL
 4. The result appears with a **Copy** button (Markdown), a warning if cleanup failed and
    you're looking at the raw transcript, and an **open in Notes** shortcut.
 
+**Process on stop** (on by default): turn it off and Stop writes a *raw* note — audio and
+transcript, no LLM — whatever the mode says. The note opens on the raw transcript with a
+quiet "not processed" line and the Regenerate controls ready, so you can fix the transcript
+first and process it when you like. Your mode pick is remembered and is what Regenerate
+offers. Like the other picks, the toggle is per browser.
+
 **Live transcript** (the "Live transcript" toggle, on by default where the browser supports
 it): the words appear as you speak. Settled text stays put — you can select and copy it
 mid-sentence, while paused, and while the daemon is processing after Stop — and the last
@@ -123,7 +129,8 @@ after 30 minutes. Live recordings are saved as `audio.wav`.
 
 With live transcript off, the recording is saved as `audio.webm` (Chrome / Edge / Firefox)
 or `audio.mp4` (Safari) and uploaded on Stop. Either way the note folder holds the audio,
-`transcript.txt`, `note.md` and `meta.json`.
+`transcript.txt`, `note.md` and `meta.json` (plus `transcript.original.txt` once you edit
+the transcript — see [Notes](#notes)).
 
 ### Notes
 
@@ -133,6 +140,11 @@ one to:
 - **Read and edit** the processed note (it's Markdown in a plain editor) and **Save** —
   every save is a new version.
 - **Play** the audio (seeking works), **Copy** the note, unfold the raw transcript.
+- **Edit the raw transcript** and **Save transcript** — mishearings, names, a sentence you
+  want the model to see differently. The pane says "edited" once you have saved an edit,
+  and Whisper's own output is kept as `transcript.original.txt` the first
+  time you save (written once, never overwritten). The next **Regenerate** reads your
+  edit. Saving a transcript is not a note version: `note.md` is untouched.
 - **Regenerate** it from the raw transcript in another mode — the same thing as
   `vnote --redo` — or **Revise** the note as it stands. Both read the one
   **Instructions** box ("make it shorter", "turn the second half into a checklist"):
@@ -329,12 +341,13 @@ What the page talks to; handy for scripts too. JSON unless noted; errors are non
 | `GET /api/settings` · `PUT /api/settings` | the settings list ↔ `{key: value, …}` (editable keys only; 400 with a reason otherwise) |
 | `GET /api/vocab` · `PUT /api/vocab` | `{"text": …}` ↔ the vocabulary file |
 | `GET /api/notes` | newest-first `{"notes": [{name, title, created, duration_s, mode, backend, has_audio, has_note}]}` |
-| `GET /api/notes/<name>` | the same fields plus `meta`, `note`, `transcript`, `audio_url`, `path`, `versions` |
+| `GET /api/notes/<name>` | the same fields plus `meta`, `note`, `transcript`, `transcript_edited`, `audio_url`, `path`, `versions` |
 | `GET /api/notes/<name>/audio` | the audio file (`Range` supported) |
 | `POST /api/note?format=webm&mode=…&backend=…&language=…&raw=0` | body = audio bytes → a finished note: `{name, title, note, transcript, meta, cleanup_error}` |
 | `POST /api/notes/<name>/reclean` | `{mode, backend?, model?, instructions?}` → `{title, note, version}` — regenerate from the transcript |
 | `POST /api/notes/<name>/revise` | `{instructions, backend?, model?}` → `{title, note, version}` — apply an instruction to the current note |
 | `PUT /api/notes/<name>/note` | `{"text": …}` → `{version, title, note}` — save a manual edit |
+| `PUT /api/notes/<name>/transcript` | `{"text": …}` → `{transcript, transcript_edited}` — rewrite `transcript.txt` (what Regenerate reads); the first write keeps Whisper's output as `transcript.original.txt`. Not a version. Empty text is allowed |
 | `GET /api/notes/<name>/versions/<n>` | `{n, text, created, op, mode, backend, model, instructions, restored_from}` |
 | `POST /api/notes/<name>/restore` | `{"n": …}` → `{title, note, version}` — restores that version as a new one |
 | `POST /api/notes/<name>/reveal` | open the folder in the OS file manager (best-effort) → `{opened, path}` |

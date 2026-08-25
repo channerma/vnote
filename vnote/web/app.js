@@ -8,6 +8,7 @@
  *   #view-note  data-state="idle|recording|paused|processing|note"
  *               data-live="on|off"  data-starting="true" (during a start, Stop = Cancel)
  *   #note       data-raw="shown|hidden"    tab-note|tab-raw|tab-audio (phone tabs)
+ *               data-processed="no"        no note.md and nothing failed: a raw take
  *   #sidebar    data-open="true|false"     (off-canvas below 860px)
  *
  *   Shell
@@ -37,6 +38,7 @@
  *     #pick-backend             select, filled from /api/settings
  *     #pick-language            select: the configured language, the last pick,
  *                               the common ones, and auto
+ *     #process-toggle           checkbox: run cleanup on Stop (off = a raw note)
  *     #live-toggle              checkbox: stream PCM and show the transcript live
  *     #mic-help                 banner: permission denied / insecure context
  *     #retry-wrap #retry-detail #retry   banner: a failed upload, still in this tab
@@ -51,11 +53,13 @@
  *     #version-select #version-restore   linear history, newest first
  *     #note-continue            disabled affordance ("Continue recording")
  *     #note-warning             "cleanup failed — this is the raw transcript"
+ *     #note-unprocessed         the calm twin: a raw take, nothing went wrong
  *     #note-tab-note #note-tab-raw #note-tab-audio   phone tabs over the panes
  *     #note-editor              the note's Markdown
  *     #note-save #note-save-status    PUT the editor as a new version
  *     #note-copy #note-copy-status
- *     #note-raw #note-raw-copy #note-raw-status #note-raw-toggle   the transcript
+ *     #note-raw #note-raw-save #note-raw-copy #note-raw-status #note-raw-toggle
+ *                               the transcript, editable — Save rewrites transcript.txt
  *     #regenerate-mode #regenerate    re-run cleanup from the raw transcript
  *     #revise-instructions      ONE instructions box, read by both Regenerate (appended
  *                               to the cleanup prompt) and Revise
@@ -197,8 +201,10 @@ function flash(el, text, ms) {
 }
 
 /* `stillWanted`, when given, is re-checked after the clipboard call: callers
- * whose status line belongs to a note drop the flash once that note is gone. */
-async function copyText(text, statusEl, stillWanted) {
+ * whose status line belongs to a note drop the flash once that note is gone.
+ * `show`, when given, replaces the flash — a status line that carries a standing
+ * marker has to repaint it afterwards (see flashRaw). */
+async function copyText(text, statusEl, stillWanted, show) {
   var msg;
   try {
     if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('no clipboard api');
@@ -208,7 +214,8 @@ async function copyText(text, statusEl, stillWanted) {
     msg = copyFallback(text) ? 'copied' : 'copy failed';
   }
   if (stillWanted && !stillWanted()) return;
-  flash(statusEl, msg);
+  if (show) show(msg);
+  else flash(statusEl, msg);
 }
 
 /* Fallback: put the text in a textarea, select it, execCommand('copy'). */
@@ -401,6 +408,7 @@ function scheduleHealth() {
 
 var settingsRows = [];   // [{setting, control}] — control null for read-only rows
 var backendChoices = [];
+var defaultMode = 'edit';   // the daemon's default_mode; 'edit' is its built-in one
 
 function readPicks() {
   var raw = lsGet(LS_PICKS);
@@ -418,8 +426,21 @@ function savePicks() {
     mode: $('pick-mode').value,
     backend: $('pick-backend').value,
     language: $('pick-language').value,
-    live: $('live-toggle').checked
+    live: $('live-toggle').checked,
+    process: $('process-toggle').checked
   }));
+}
+
+/* Off: Stop writes a raw note (audio + transcript, no LLM) whatever the mode says,
+ * and the mode pick keeps its value for the Regenerate that follows. Default on. */
+function initProcessToggle() {
+  var picks = readPicks();
+  $('process-toggle').checked = (picks && typeof picks.process === 'boolean') ? picks.process : true;
+}
+
+/* True when Stop must not run cleanup — the mode pick says raw, or the toggle is off. */
+function skipCleanup() {
+  return $('pick-mode').value === 'raw' || !$('process-toggle').checked;
 }
 
 /* Set a <select> to `value` only when that option actually exists. */
@@ -481,6 +502,7 @@ function applySettingsToPicks(settings) {
   if (backend) selectIfPresent(backendSel, backend.value);
 
   var mode = findSetting(settings, 'default_mode');
+  if (mode && mode.value) defaultMode = mode.value;
   if (mode) selectIfPresent($('pick-mode'), mode.value);
 
   // "Everything stays in <notes_dir> on this machine" — the markup's fallback text
@@ -717,6 +739,7 @@ function setTransport(state) {
     $(id).disabled = active;
   });
   $('live-toggle').disabled = active || !liveAvailable;
+  $('process-toggle').disabled = active;
 
   if (starting) {
     setStage('idle');
@@ -772,6 +795,7 @@ async function startRecording() {
 
   // a second click must not start a second recorder — nor a second live session
   if (recorder || recStream || recStarting || live) return;
+  if (!confirmDiscard()) return;   // the stage is about to lose the open note
   recStarting = true;
   recCancelled = false;
   liveFallbackReason = '';
@@ -913,8 +937,7 @@ function stopRecording() {
 /* The design's processing sentence: no honest percentage exists, so it says what
  * is happening and how long it usually takes. */
 function processingCopy() {
-  var mode = $('pick-mode').value;
-  var what = mode === 'raw' ? 'no cleanup' : 'then cleaning with ' + mode;
+  var what = skipCleanup() ? 'no cleanup' : 'then cleaning with ' + $('pick-mode').value;
   return 'Transcribing ' + fmtDuration(recordedMs() / 1000) + ' of audio, ' + what +
     ' — usually 20–40 s.';
 }
@@ -929,7 +952,7 @@ function noteQuery(format) {
     params.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
   }
   add('format', format);
-  if (mode === 'raw') {
+  if (skipCleanup()) {
     add('raw', '1');           // raw => no LLM, no mode
   } else {
     add('mode', mode);
@@ -1083,7 +1106,7 @@ function finishQuery(sid) {
     if (v === null || v === undefined || v === '') return;
     params.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
   }
-  if (mode === 'raw') {
+  if (skipCleanup()) {
     add('raw', '1');           // raw => no LLM, no mode
   } else {
     add('mode', mode);
@@ -1517,6 +1540,7 @@ async function stopLive() {
 var allNotes = [];          // the last /api/notes payload, newest first
 var currentNote = null;     // the last /api/notes/<name> payload
 var loadedText = '';        // #note-editor as it was loaded — the dirty baseline
+var loadedTranscript = '';  // what #note-raw held when the note was loaded
 var titleEditable = false;  // false for a note with no "# " heading (dictation)
 var haveVersions = false;
 var viewingVersion = null;  // n while an older version is previewed, else null
@@ -1651,9 +1675,23 @@ function isDirty() {
   return $('note-editor').value !== loadedText;
 }
 
-/* Returns false when the user chose to keep unsaved edits. */
-function confirmDiscard() {
+/* The raw pane is an editor too: its text is what Regenerate will read. */
+function rawDirty() {
+  if (!currentNote) return false;
+  return $('note-raw').value !== loadedTranscript;
+}
+
+/* Returns false when the user chose to keep unsaved edits in the note editor.
+ * A version preview repaints that editor and nothing else, so it asks with this one:
+ * asking about the raw pane there would prompt for edits that are in no danger. */
+function confirmDiscardNote() {
   if (!isDirty()) return true;
+  return window.confirm('This note has unsaved edits. Discard them?');
+}
+
+/* The same question for the paths that can cost the raw pane's edits as well. */
+function confirmDiscard() {
+  if (!isDirty() && !rawDirty()) return true;
   return window.confirm('This note has unsaved edits. Discard them?');
 }
 
@@ -1661,11 +1699,43 @@ function confirmDiscard() {
 function revertEditor() {
   if (!currentNote || viewingVersion !== null) return;
   $('note-editor').value = loadedText;
+  $('note-raw').value = loadedTranscript;
   updateSaveState();
+  updateRawSaveState();
+  updateRawStatus();
 }
 
 function updateSaveState() {
   $('note-save').disabled = processing || viewingVersion !== null || !isDirty();
+}
+
+/* loadNote() repaints #note-raw from the server, so a save/restore of the *note*
+ * would silently drop an unsaved transcript edit. Stash it before, put it back after. */
+function stashRawEdit() {
+  return rawDirty() ? $('note-raw').value : null;
+}
+
+function restoreRawEdit(text) {
+  if (text === null || !currentNote) return;
+  $('note-raw').value = text;
+  updateRawSaveState();
+  updateRawStatus();
+}
+
+function updateRawSaveState() {
+  $('note-raw-save').disabled = processing || viewingVersion !== null || !rawDirty();
+}
+
+/* The standing marker on the raw pane's status line: whether the transcript on
+ * disk is still Whisper's own words. A flash (copied/saved) puts it back after. */
+function updateRawStatus() {
+  var edited = !rawDirty() && !!(currentNote && currentNote.transcript_edited);
+  $('note-raw-status').textContent = edited ? 'edited' : '';
+}
+
+function flashRaw(text) {
+  flash($('note-raw-status'), text);
+  window.setTimeout(updateRawStatus, 2100);   // flash() blanks the line at 2 s
 }
 
 function updateProcessState() {
@@ -1683,6 +1753,7 @@ function updateProcessState() {
   // Single owner of the editor's read-only state: an old version on screen or a
   // write in flight both mean "what you type here would be lost".
   editor.readOnly = processing || previewing;
+  $('note-raw').readOnly = processing || previewing;
   editor.classList.toggle('viewing-old', previewing);
   setTitleEditable(titleEditable && have && !processing && !previewing);
 
@@ -1690,6 +1761,7 @@ function updateProcessState() {
   // reply's DOM writes, and the server keeps the new version for when the note is reopened.
 
   updateSaveState();
+  updateRawSaveState();
 }
 
 function setProcessing(on) {
@@ -1796,6 +1868,7 @@ async function restoreVersion() {
   var status = $('note-save-status');
   var token = noteToken();
   var n = viewingVersion;
+  var keepRaw = stashRawEdit();   // ... and so does the one after a restore
   setProcessing(true);
   status.textContent = 'restoring v' + n + '…';
   try {
@@ -1806,6 +1879,7 @@ async function restoreVersion() {
     await loadNote(token.name);
     await loadNotes();
     if (currentNote && currentNote.name === token.name) {
+      restoreRawEdit(keepRaw);
       flash($('note-save-status'), 'restored v' + n + ' as v' + (data.version || '?'));
     }
   } catch (e) {
@@ -1855,9 +1929,25 @@ function onTitleInput() {
   updateSaveState();
 }
 
+/* The calm twin of #note-warning: no note.md and nothing failed, so the recording
+ * was simply never handed to the LLM. CSS shows the hint; Regenerate is ready. */
+function setProcessed(on) {
+  if (on) delete $('note').dataset.processed;
+  else $('note').dataset.processed = 'no';
+}
+
 function setRaw(shown) {
   $('note').dataset.raw = shown ? 'shown' : 'hidden';
   $('note-raw-toggle').textContent = shown ? 'Hide' : 'Show';
+}
+
+/* The stack-into-tabs breakpoint from style.css. Unknown (no matchMedia) = not a phone. */
+function isPhoneLayout() {
+  try {
+    return !!(window.matchMedia && window.matchMedia('(max-width: 860px)').matches);
+  } catch (e) {
+    return false;
+  }
 }
 
 /* Phone only (the strip is hidden above 860px): which pane the stack shows. */
@@ -1926,15 +2016,18 @@ async function openNote(name) {
 function closeNote() {
   currentNote = null;
   loadedText = '';
+  loadedTranscript = '';
   titleEditable = false;
   viewingVersion = null;
   haveVersions = false;
   $('note-editor').value = '';
   $('note-title').textContent = '';
   $('note-meta').innerHTML = '';
-  $('note-raw').textContent = '';
+  $('note-raw').value = '';
   $('note-warning').hidden = true;
+  setProcessed(true);
   $('note-save-status').textContent = '';
+  $('note-raw-status').textContent = '';
   $('note-copy-status').textContent = '';
   $('note-path-status').textContent = '';
   renderVersions([]);
@@ -1965,16 +2058,18 @@ async function loadNote(name) {
     if (gen !== noteGeneration) return;
     currentNote = null;
     loadedText = '';
+    loadedTranscript = '';
     titleEditable = false;
     $('note-title').textContent = 'could not open ' + name;
     $('note-meta').innerHTML = '';
     $('note-meta').appendChild(el('span', null, errText(e)));
     editor.value = '';
-    $('note-raw').textContent = '';
+    $('note-raw').value = '';
     $('note-audio').hidden = true;
     $('note-path').textContent = '';
     $('note-path').hidden = true;      // an empty bordered chip is not a path
     $('note-warning').hidden = true;
+    setProcessed(true);
     renderVersions([]);
     setStage('note');
     updateProcessState();
@@ -1986,15 +2081,25 @@ async function loadNote(name) {
   var raw = data.meta || {};
 
   // No note.md: the editor holds the transcript. Deliberate for a raw recording,
-  // a failed cleanup when a mode was actually asked for (and never timed).
+  // a failed cleanup when a mode was actually asked for (and never timed). The two
+  // read very differently — one is a failure, the other is a note waiting to be made.
   var transcript = data.transcript || '';
   loadedText = data.note || transcript;
   var cleanupFailed = !data.note && !!transcript && !!raw.cleanup_mode &&
     (raw.cleanup_seconds === null || raw.cleanup_seconds === undefined);
   $('note-warning').hidden = !cleanupFailed;
+  setProcessed(!!data.note || cleanupFailed);
 
   editor.value = loadedText;
-  $('note-raw').textContent = transcript;
+  loadedTranscript = transcript;
+  $('note-raw').value = transcript;
+  updateRawStatus();
+
+  // A note that was never processed *is* its transcript: open on that pane (PHASE10 C).
+  if (!data.note && !cleanupFailed) {
+    if (isPhoneLayout()) pickNoteTab('raw');
+    else setRaw(true);
+  }
 
   var heading = headingOf(loadedText);
   titleEditable = heading !== null;
@@ -2016,7 +2121,11 @@ async function loadNote(name) {
   $('note-path').hidden = !data.path;
 
   renderVersions(data.versions || []);
-  selectIfPresent($('regenerate-mode'), data.mode || raw.cleanup_mode);
+  // A note that was never processed has no mode of its own: offer what the record
+  // panel is set to, and the daemon's default when that pick is "raw" (not a mode).
+  var pick = $('pick-mode').value;
+  selectIfPresent($('regenerate-mode'), data.mode || raw.cleanup_mode ||
+                  (pick && pick !== 'raw' ? pick : defaultMode));
   updateProcessState();
   setStage('note');
 }
@@ -2028,6 +2137,7 @@ async function saveNote() {
   var token = noteToken();
   var name = token.name;
   var text = $('note-editor').value;
+  var keepRaw = stashRawEdit();   // the reload below repaints the raw pane from the server
   setProcessing(true);
   status.textContent = 'saving…';
   try {
@@ -2038,11 +2148,34 @@ async function saveNote() {
     await loadNote(name);
     await loadNotes();
     if (currentNote && currentNote.name === name) {
+      restoreRawEdit(keepRaw);
       flash($('note-save-status'),
             'saved ' + fmtTime(new Date().toISOString()) + ' · v' + (data.version || '?'));
     }
   } catch (e) {
     if (stillCurrent(token)) status.textContent = errText(e);
+  } finally {
+    setProcessing(false);
+  }
+}
+
+/* The raw transcript the user edited -> transcript.txt. Not a version: note.md is
+ * untouched, and the next Regenerate reads the edit. */
+async function saveTranscript() {
+  if (!currentNote || !currentNote.name || viewingVersion !== null || processing) return;
+  var token = noteToken();
+  var text = $('note-raw').value;
+  setProcessing(true);
+  $('note-raw-status').textContent = 'saving…';
+  try {
+    await putJSON('/api/notes/' + encodeURIComponent(token.name) + '/transcript', { text: text });
+    if (!stillCurrent(token)) return;
+    loadedTranscript = text;              // the daemon has it: nothing is pending any more
+    currentNote.transcript = text;
+    currentNote.transcript_edited = true;
+    flashRaw('saved');
+  } catch (e) {
+    if (stillCurrent(token)) $('note-raw-status').textContent = errText(e);
   } finally {
     setProcessing(false);
   }
@@ -2073,6 +2206,13 @@ async function applyProcessed(data, token) {
 
 async function regenerateNote() {
   if (!currentNote || !currentNote.name || processing || viewingVersion !== null) return;
+  // Regenerate reads transcript.txt, not the pane: an unsaved edit would be ignored,
+  // so offer to save it rather than quietly re-running the old words.
+  if (rawDirty()) {
+    if (!window.confirm('The transcript edit is unsaved. Save it and regenerate from it?')) return;
+    await saveTranscript();
+    if (!currentNote || !currentNote.name || processing || rawDirty()) return;  // the save failed; it said why
+  }
   if (!confirmDiscard()) return;
   var token = noteToken();
   setProcessing(true);
@@ -2370,6 +2510,7 @@ function wire() {
     savePicks();
     if (!takeActive()) setLiveView($('live-toggle').checked);
   });
+  $('process-toggle').addEventListener('change', savePicks);
 
   $('live-copy').addEventListener('click', function () {
     copyText(liveText(), $('live-copy-status'));
@@ -2400,10 +2541,15 @@ function wire() {
     copyText($('note-editor').value, $('note-copy-status'),
              function () { return stillCurrent(token); });
   });
+  $('note-raw').addEventListener('input', function () {
+    updateRawSaveState();
+    updateRawStatus();
+  });
+  $('note-raw-save').addEventListener('click', saveTranscript);
   $('note-raw-copy').addEventListener('click', function () {
     var token = noteToken();
-    copyText($('note-raw').textContent, $('note-raw-status'),
-             function () { return stillCurrent(token); });
+    copyText($('note-raw').value, $('note-raw-status'),
+             function () { return stillCurrent(token); }, flashRaw);
   });
   $('note-raw-toggle').addEventListener('click', function () {
     setRaw($('note').dataset.raw !== 'shown');
@@ -2423,7 +2569,7 @@ function wire() {
     var sel = ev.currentTarget;
     var n = parseInt(sel.value, 10);
     if (isNaN(n)) return;
-    if (!confirmDiscard()) {
+    if (!confirmDiscardNote()) {
       var back = currentVersionN(currentNote && currentNote.versions);
       if (back !== null) sel.value = String(back);
       return;
@@ -2471,6 +2617,7 @@ function wire() {
 function init() {
   wire();
   syncSidebarToggle();
+  initProcessToggle();
   initLiveToggle();
   setStage('idle');
   setTransport('ready');

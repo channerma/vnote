@@ -255,3 +255,30 @@ def test_concurrent_commits_keep_a_dense_history(tmp_path):
     assert versions.read(d, total) == last
     meta = versions.read_meta(d)
     assert (meta["title"], meta["created"], meta["source"]) == ("Start", "2026-08-20T09:00:00", "mic")
+
+
+def test_a_failed_keep_of_the_original_leaves_no_truncated_file(tmp_path, monkeypatch):
+    """The copy of Whisper's output is all-or-nothing.
+
+    A half-written transcript.original.txt would still exist, so the next edit would
+    skip the copy and the original would survive only as that truncation.
+    """
+    d = _session(tmp_path, note=None)
+    (d / "transcript.txt").write_text("what whisper heard\n", encoding="utf-8")
+
+    def half_a_copy(src, dst, *args, **kwargs):
+        dst.write(b"what whis")  # ENOSPC in the middle of the copy
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(versions.shutil, "copyfileobj", half_a_copy)
+    with pytest.raises(OSError):
+        versions.write_transcript(d, "my edit")
+
+    assert not (d / "transcript.original.txt").exists()
+    assert (d / "transcript.txt").read_text(encoding="utf-8") == "what whisper heard\n"  # untouched
+    assert not [p.name for p in d.iterdir() if p.name.startswith(".original-")]  # no debris
+
+    monkeypatch.undo()
+    versions.write_transcript(d, "my edit")
+    assert (d / "transcript.original.txt").read_text(encoding="utf-8") == "what whisper heard\n"
+    assert (d / "transcript.txt").read_text(encoding="utf-8") == "my edit"

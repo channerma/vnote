@@ -5,7 +5,9 @@
 > reasoning is in the session, the decisions are here. Order: **A → D → C → E → F**,
 > each a separate commit with tests and a fresh-context diff review.
 >
-> **Status:** decided 2026-08-25; nothing built yet.
+> **Status:** decided 2026-08-25. **A** (warm start) and **D** (labels) built and
+> reviewed the same day; **C** built the same day (review fixes in progress); E and F
+> not started.
 
 ## The feedback (six items) and the verdicts
 
@@ -116,8 +118,9 @@ Turn the spoken brief into a session prompt in the speaker's voice …
 ```
 
 A single-take note keeps today's flat layout for as long as it has one take; the
-first Continue moves the root `audio.*` / `transcript*.txt` into `takes/1/` (same
-filesystem, a rename) and writes the derived root transcript. No bulk migration.
+first Continue moves the root `audio.*` / `transcript.txt` / `transcript.original.txt`
+(C's kept copy — `transcript_edited` is derived from that file's existence, not a meta
+flag) into `takes/1/` (same filesystem, a rename) and writes the derived root transcript. No bulk migration.
 `duration_s` = the sum of the takes. Audio: one file per take, never appended; the
 Audio tab lists takes (time, duration, a player each).
 

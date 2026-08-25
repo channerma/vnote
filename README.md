@@ -103,7 +103,8 @@ Each note is a folder `voice-notes/YYYY-MM-DD-HHMM-<slug>/`:
 | file | what |
 |---|---|
 | `audio.wav` / `audio.webm` | the recording (or a copy of the file you passed) |
-| `transcript.txt` | raw Whisper output |
+| `transcript.txt` | raw Whisper output — editable from the web UI |
+| `transcript.original.txt` | Whisper's output, kept once when you first edit the transcript |
 | `note.md` | the cleaned note — the thing you keep |
 | `meta.json` | model, durations, language, timestamps |
 | `versions/note-<n>.md` | every version of the note (the current one included) — edits, regenerations, revisions — restorable from the web UI |

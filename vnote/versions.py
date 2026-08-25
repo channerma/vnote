@@ -9,6 +9,9 @@ that produced it (``clean`` · ``regenerate`` · ``revise`` · ``edit`` ·
 
 Folders written before versioning existed are migrated on first touch
 (:func:`ensure_history`): their ``note.md`` becomes v1 with op ``clean``.
+
+The folder's lock lives here too, so the other read-modify-write files of a note
+(``meta.json``, ``transcript.txt``) are written under the same one.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import threading
 from datetime import datetime
@@ -75,6 +79,55 @@ def write_meta(session_dir: Path, meta: dict) -> None:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def _keep_original(current: Path, original: Path) -> None:
+    """Copy ``current`` to ``original`` atomically — a half-written keep is worse than none.
+
+    A truncated ``transcript.original.txt`` would still *exist*, so every later edit
+    would skip the copy and Whisper's words would survive only as that truncation.
+    The bytes land in a temp file and are flushed to disk before the name is taken.
+    """
+    try:
+        src = current.open("rb")
+    except FileNotFoundError:
+        return  # a folder with no transcript.txt has nothing to keep
+    with src:
+        fd, tmp = tempfile.mkstemp(dir=original.parent, prefix=".original-", suffix=".txt")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                shutil.copyfileobj(src, fh)  # byte-for-byte; encodings are not our business here
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, original)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+
+def write_transcript(session_dir: Path, text: str) -> None:
+    """Replace ``transcript.txt`` with the user's edit, keeping Whisper's output once.
+
+    ``transcript.original.txt`` is written the first time a transcript is edited and
+    never again: the first edit is the only moment Whisper's own words still exist.
+    Same lock as :func:`commit` — the transcript is what a regenerate reads, so a
+    commit must not see it half-replaced — and the same atomic tmp + ``os.replace``
+    as :func:`write_meta`. Nothing here ever unlinks or truncates either file.
+    """
+    session_dir = Path(session_dir)
+    current = session_dir / "transcript.txt"
+    original = session_dir / "transcript.original.txt"
+    with _commit_lock:
+        if not original.exists():
+            _keep_original(current, original)
+        fd, tmp = tempfile.mkstemp(dir=session_dir, prefix=".transcript-", suffix=".txt")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.replace(tmp, current)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
 
 
 def entries(session_dir: Path) -> list[dict]:

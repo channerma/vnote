@@ -65,6 +65,11 @@ for (const id of ids) { const el = new El('div'); el.id = id; byId[id] = el; }
   opt.value = v;
   byId['pick-mode'].appendChild(opt);
 });
+['light', 'edit', 'summary', 'dictation'].forEach(v => {   // Regenerate cannot run "raw"
+  const opt = new El('option');
+  opt.value = v;
+  byId['regenerate-mode'].appendChild(opt);
+});
 
 // the live text lives inside the #live scroller (livePane())
 const inner = new El('div');
@@ -309,6 +314,14 @@ const appendCalls = () => calls.filter(c => c.url.startsWith('/stream/append'));
   ok($('live-toggle').disabled === false, 'live toggle enabled');
   $('live-toggle').fire('change');
   ok(JSON.parse(store['vnote.picks']).live === true, 'live state saved with the picks');
+  ok($('process-toggle').checked === true, 'process-on-stop defaults on');
+  $('process-toggle').fire('change');
+  ok(JSON.parse(store['vnote.picks']).process === true, 'and it is saved with the picks too');
+  store['vnote.picks'] = JSON.stringify({ mode: 'edit', backend: 'ollama', language: '', live: true, process: false });
+  G.initProcessToggle();
+  ok($('process-toggle').checked === false, 'a remembered "off" comes back');
+  $('process-toggle').checked = true;
+  $('process-toggle').fire('change');   // back to the default for the sections below
   ok($('retry-wrap').hidden === true, 'retry banner hidden with nothing to retry');
   ok(state() === 'idle', 'the stage starts idle', state());
   ok($('rec-status').textContent === 'New note', 'topbar label', $('rec-status').textContent);
@@ -447,7 +460,7 @@ const appendCalls = () => calls.filter(c => c.url.startsWith('/stream/append'));
   ok(state() === 'note', 'the finished note took the stage', state());
   ok($('note-editor').value === '# A note\n\nthe body', 'the note is open on the stage', $('note-editor').value);
   ok($('note-title').textContent === 'A note', 'title from the "# " heading', $('note-title').textContent);
-  ok($('note-raw').textContent === 'raw words here', 'raw transcript in the drawer');
+  ok($('note-raw').value === 'raw words here', 'raw transcript in the drawer');
   ok($('note').dataset.raw === 'shown', 'the raw drawer starts open');
   ok(!!calls.find(c => c.url === '/api/notes/n1'), 'the note was opened the way the sidebar opens it');
   ok(rows().length === 3, 'the sidebar was refreshed', rows().length);
@@ -479,6 +492,17 @@ const appendCalls = () => calls.filter(c => c.url.startsWith('/stream/append'));
   ok(G.finishQuery('S2') === '?sid=S2&note=1&raw=1&language=de', 'raw finish query', G.finishQuery('S2'));
   $('pick-mode').value = 'edit';
   $('pick-language').value = '';
+
+  console.log('\n11b. process-on-stop off: a raw note whatever the mode says');
+  $('process-toggle').checked = false;
+  ok(G.finishQuery('S3') === '?sid=S3&note=1&raw=1&language=auto',
+     'no mode, no backend, raw=1', G.finishQuery('S3'));
+  ok(G.noteQuery('webm') === '?format=webm&raw=1&language=auto',
+     'the upload path says the same', G.noteQuery('webm'));
+  ok(/no cleanup/.test(G.processingCopy()), 'and the stop line promises none', G.processingCopy());
+  $('process-toggle').checked = true;
+  ok(G.finishQuery('S3') === '?sid=S3&note=1&mode=edit&backend=ollama&language=auto',
+     'back on: the mode pick counts again', G.finishQuery('S3'));
 
   console.log('\n12. /stream/start failing falls back to MediaRecorder');
   routes['/stream/start'] = async () => ({ status: 500, body: { error: 'nope' } });
@@ -748,6 +772,8 @@ const appendCalls = () => calls.filter(c => c.url.startsWith('/stream/append'));
                         meta: { cleanup_mode: 'edit' }, versions: [] });
   await G.loadNote('n1');
   ok($('note-warning').hidden === false, 'the cleanup-failed strip is shown');
+  ok($('note').dataset.processed === undefined,
+     'and not the calm state — the two are exclusive', $('note').dataset.processed);
   ok($('note-editor').value === 'raw only', 'the editor holds the transcript', $('note-editor').value);
   noteDetail = () => ({ name: 'n1', title: 'x', note: null, transcript: 'raw only',
                         meta: { cleanup_mode: null }, versions: [] });
@@ -755,6 +781,83 @@ const appendCalls = () => calls.filter(c => c.url.startsWith('/stream/append'));
   ok($('note-warning').hidden === true, 'a deliberate raw note is not a failure');
   noteDetail = detail;
   await G.loadNote('n1');
+
+  console.log('\n24f2. a raw note opens calm, with Regenerate ready');
+  noteDetail = () => ({ name: 'n1', title: 'x', note: null, transcript: 'raw only',
+                        meta: { cleanup_mode: null }, transcript_edited: false, versions: [] });
+  $('pick-mode').value = 'summary';
+  G.setRaw(false);                  // a raw note must open the drawer itself
+  await G.loadNote('n1');
+  ok($('note').dataset.processed === 'no', 'the not-processed state, not the failed banner',
+     $('note').dataset.processed);
+  ok($('note').dataset.raw === 'shown', 'and it opens on the transcript pane', $('note').dataset.raw);
+  ok($('note-warning').hidden === true, 'and the failure strip stays away');
+  ok($('regenerate-mode').value === 'summary', 'Regenerate offers the record panel\u2019s mode',
+     $('regenerate-mode').value);
+  $('pick-mode').value = 'raw';
+  await G.loadNote('n1');
+  ok($('regenerate-mode').value === 'edit', 'unless that pick is raw \u2014 then the daemon default',
+     $('regenerate-mode').value);
+  $('pick-mode').value = 'edit';
+  noteDetail = detail;
+  await G.loadNote('n1');
+  ok($('note').dataset.processed === undefined, 'a processed note clears the state');
+  ok($('regenerate-mode').value === 'edit', 'and keeps the mode it was made with');
+
+  console.log('\n24f3. the raw pane is an editor; Save rewrites transcript.txt');
+  let putTranscript = null;
+  routes['/api/notes/n1/transcript'] = async (url, opts) => {
+    putTranscript = JSON.parse(opts.body);
+    return { body: { transcript: putTranscript.text, transcript_edited: true } };
+  };
+  ok($('note-raw').value === 'raw words here', 'the transcript fills the pane', $('note-raw').value);
+  ok($('note-raw-save').disabled === true, 'nothing to save on a fresh load');
+  $('note-raw').value = 'raw words, fixed';
+  $('note-raw').fire('input');
+  ok($('note-raw-save').disabled === false, 'an edit enables Save');
+  calls.length = 0;
+  await G.saveTranscript();
+  const putRaw = calls.find(c => c.url === '/api/notes/n1/transcript');
+  ok(!!putRaw && putRaw.method === 'PUT' && putTranscript.text === 'raw words, fixed',
+     'PUT the edited transcript', putRaw && putRaw.url);
+  ok(G.rawDirty() === false && $('note-raw-save').disabled === true,
+     'and nothing is pending afterwards');
+  await G.showVersion(1);
+  ok($('note-raw-save').disabled === true, 'Save is off while an old version is previewed');
+  await G.loadNote('n1');
+  noteDetail = () => Object.assign(detail(), { transcript_edited: true });
+  await G.loadNote('n1');
+  ok($('note-raw-status').textContent === 'edited', 'a transcript that was edited says so',
+     $('note-raw-status').textContent);
+  noteDetail = detail;
+  await G.loadNote('n1');
+  ok($('note-raw-status').textContent === '', 'an untouched one says nothing');
+
+  console.log('\n24f4. an unsaved transcript edit survives a note save; Regenerate offers to use it');
+  await G.loadNote('n1');
+  $('note-raw').value = 'transcript in progress';
+  $('note-raw').fire('input');
+  $('note-editor').value = '# A note\n\nedited body';
+  $('note-editor').fire('input');
+  await G.saveNote();
+  ok($('note-raw').value === 'transcript in progress',
+     'the reload after Save did not drop the raw edit', $('note-raw').value);
+  ok(G.rawDirty() === true && $('note-raw-save').disabled === false, 'and it is still pending');
+
+  routes['/api/notes/n1/reclean'] = async () => ({
+    body: { title: 'A note', note: '# A note\n\nregenerated', version: 5 } });
+  calls.length = 0;
+  confirmAnswer = false;
+  await G.regenerateNote();
+  ok(!calls.find(c => c.url === '/api/notes/n1/reclean'), 'Cancel regenerates nothing');
+  ok($('note-raw').value === 'transcript in progress', 'and keeps the edit');
+  confirmAnswer = true;
+  calls.length = 0;
+  await G.regenerateNote();
+  eq(calls.filter(c => /transcript$|reclean$/.test(c.url)).map(c => c.url),
+     ['/api/notes/n1/transcript', '/api/notes/n1/reclean'],
+     'OK saves the transcript first, then regenerates from it');
+  ok(putTranscript.text === 'transcript in progress', 'and what it saved is the edit', putTranscript);
 
   console.log('\n24g. the raw drawer and the phone tabs');
   ok($('note').dataset.raw === 'shown' && $('note-raw-toggle').textContent === 'Hide', 'the drawer starts open');

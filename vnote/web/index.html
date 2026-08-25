@@ -108,6 +108,7 @@
             <label for="pick-language">Language</label>
             <select id="pick-language"></select>
           </p>
+          <label class="check"><input id="process-toggle" type="checkbox" checked /> <span>Process on stop</span></label>
           <label class="check"><input id="live-toggle" type="checkbox" /> <span>Show live transcript</span></label>
         </div>
         <p class="hint">These apply to this recording only; the defaults come from Settings.</p>
@@ -151,6 +152,10 @@
         <div id="note-warning" hidden>
           <strong>Cleanup failed</strong> — this is the raw transcript, unedited. The audio and transcript are saved.
         </div>
+        <!-- the calm twin of the strip above: nothing failed, the LLM was simply not asked -->
+        <div id="note-unprocessed">
+          Raw transcript — not processed. Edit it below if you like, then Regenerate.
+        </div>
 
         <!-- phone only: the stacked panes become Note / Raw / Audio tabs -->
         <div class="note-tabs" role="tablist" aria-label="Note panes">
@@ -168,17 +173,18 @@
               <button id="note-save" class="btn btn-primary btn-sm" type="button">Save</button>
               <button id="note-copy" class="btn btn-secondary btn-sm" type="button">Copy</button>
             </div>
-            <textarea id="note-editor" spellcheck="false" aria-label="Note, Markdown"></textarea>
+            <textarea id="note-editor" class="pane-text" spellcheck="false" aria-label="Note, Markdown"></textarea>
           </div>
 
           <div class="pane pane-raw">
             <div class="pane-head">
               <span class="micro">Raw transcript</span>
               <span id="note-raw-status" class="inline-status" role="status"></span>
+              <button id="note-raw-save" class="btn btn-primary btn-sm" type="button">Save transcript</button>
               <button id="note-raw-copy" class="btn btn-secondary btn-sm" type="button">Copy</button>
               <button id="note-raw-toggle" class="link-btn accent" type="button">Hide</button>
             </div>
-            <div id="note-raw"></div>
+            <textarea id="note-raw" class="pane-text" spellcheck="false" aria-label="Raw transcript"></textarea>
           </div>
         </div>
 

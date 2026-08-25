@@ -5,9 +5,9 @@
 > reasoning is in the session, the decisions are here. Order: **A → D → C → E → F**,
 > each a separate commit with tests and a fresh-context diff review.
 >
-> **Status:** decided 2026-08-25. **A** (warm start) and **D** (labels) built and
-> reviewed the same day; **C** built the same day (review fixes in progress); E and F
-> not started.
+> **Status:** decided and **built 2026-08-25** — A, D, C, E, F each committed after a
+> fresh-context review; **version 0.7.0**. Verified by 358 tests, 435 stub-DOM smoke
+> checks and five reviews; NOT yet by the Body in a real browser (the open gate).
 
 ## The feedback (six items) and the verdicts
 

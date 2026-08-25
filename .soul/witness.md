@@ -104,3 +104,17 @@ TYPE:         Obligation Skipped — verification
 CONSEQUENCE:  Unresolved; no field incident known.
 STATUS:       Open
 ```
+
+```
+ID:           VNOTE-010
+WHEN:         2026-08-25 / PHASE10 A–F, five implementer runs
+WHERE:        Process — implementer output → diff-reviewer; vnote/versions.py _keep_original, vnote/takes.py ensure_takes + trash moves, vnote/cleanup.py keep_alive
+WHAT:         Five of five implementer outputs came back accept-with-fixes; three carried data-loss-family blockers the
+              suites had not caught (a non-atomic copy of Whisper's output, an interrupted flat→takes migration that the
+              next Continue would join over the only full transcript, shutil.move's copytree+rmtree fallback on drvfs), plus
+              keep_alive "-1" sent as a string, which Ollama 0.23.1 rejects on every cleanup.
+TYPE:         Council Note — VNOTE-006 confirmed a second day (review is load-bearing); same failure family as VNOTE-002/003
+CONSEQUENCE:  All fixed before commit; the migration now has a completion marker and every step is conditional; trash is
+              os.rename only. Cost ≈ one review cycle per build, unchanged.
+STATUS:       Open (pattern)
+```

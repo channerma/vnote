@@ -11,3 +11,7 @@
   PHASE10 E as ahead of the evidence; the `VNOTE_STYLES_DIRS` list in a project's .env covers it meanwhile.
 - I-008 "Empty trash" (and a size readout) once `<notes_dir>/trash/` actually piles up (PHASE10 F).
 - I-009 Delete-note / delete-take restore from the page (today: a folder move by hand, documented).
+- I-010 Show the `audio_kept` path from `/stream/cancel?keep=1` in the Retry banner ("the daemon parked its copy at …");
+  the page ignores it today (page review 2026-08-25).
+- I-011 `rootJoin()`'s one-take branch returns the PUT text verbatim; a takes/ note reduced to one take differs by
+  whitespace from the daemon's join until reload. Copy-only, watch only (page review 2026-08-25).

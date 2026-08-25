@@ -134,8 +134,9 @@ one to:
   every save is a new version.
 - **Play** the audio (seeking works), **Copy** the note, unfold the raw transcript.
 - **Regenerate** it from the raw transcript in another mode — the same thing as
-  `vnote --redo` — optionally with an instruction; or **Revise** the current note with an
-  instruction ("make it shorter", "turn the second half into a checklist").
+  `vnote --redo` — or **Revise** the note as it stands. Both read the one
+  **Instructions** box ("make it shorter", "turn the second half into a checklist"):
+  Regenerate appends it to the cleanup prompt, Revise applies it to the current note.
 - Pick an older **version** from the dropdown to read it, and **Restore** it (which is
   itself a new version — nothing is ever destroyed). On disk: `versions/note-<n>.md` and
   a `versions` list in `meta.json` recording when, which operation, mode, backend and

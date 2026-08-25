@@ -57,7 +57,9 @@
  *     #note-copy #note-copy-status
  *     #note-raw #note-raw-copy #note-raw-status #note-raw-toggle   the transcript
  *     #regenerate-mode #regenerate    re-run cleanup from the raw transcript
- *     #revise-instructions #revise    apply an instruction to the current note
+ *     #revise-instructions      ONE instructions box, read by both Regenerate (appended
+ *                               to the cleanup prompt) and Revise
+ *     #revise                   apply the instruction to the current note
  *     #note-audio               <audio>, hidden when the folder has none
  *     #note-path #note-path-copy #note-path-status #note-reveal
  *

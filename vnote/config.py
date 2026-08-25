@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -158,6 +159,11 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting("ollama_host", "OLLAMA_HOST", "http://127.0.0.1:11434", "Where Ollama listens."),
     Setting(
+        "ollama_keep_alive", "VNOTE_OLLAMA_KEEP_ALIVE", "30m",
+        "How long Ollama keeps the model loaded after a request — e.g. 30m, 1h, -1 = until Ollama exits "
+        "(Ollama's own default is 5m).",
+    ),
+    Setting(
         "claude_model", "VNOTE_CLAUDE_MODEL", "claude-sonnet-5",
         "Model for the claude (API) backend. The claude-code backend uses the CLI's own model choice instead.",
     ),
@@ -218,6 +224,12 @@ def _coerce(s: Setting, raw: object) -> object:
         raise ValueError(f"{s.key} must be one of {', '.join(s.choices)}; got {value!r}")
     if s.key == "ollama_host" and not value.startswith(("http://", "https://")):
         raise ValueError(f"ollama_host must start with http:// or https://; got {value!r}")
+    # Ollama reads a bare number as seconds (-1 = until it exits) and anything else with
+    # Go's time.ParseDuration, which insists on a unit — reject what it would 400 on.
+    if s.key == "ollama_keep_alive" and not re.fullmatch(r"-?\d+|(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+", value):
+        raise ValueError(
+            f"{s.key} must be a duration like 30m, 1h, 300s, a number of seconds, or -1; got {value!r}"
+        )
     return value
 
 

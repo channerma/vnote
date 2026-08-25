@@ -1,5 +1,6 @@
 """Tests for the transcript-cleanup prompts, parser and backend dispatch (no network)."""
 
+import json
 import subprocess
 
 import pytest
@@ -253,3 +254,70 @@ def test_revise_ollama_uses_the_note_model_not_the_dictation_model(monkeypatch):
 
     assert revise("# T\n\nbody", "shorter").title == "T"
     assert rec["model"] == "big:14b"
+
+
+# --- the Ollama HTTP payloads (no network: urlopen is faked) --------------------
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _capture_ollama(monkeypatch, body: bytes) -> list[dict]:
+    """Bypass the readiness probes and record what gets POSTed to /api/chat."""
+    posted: list[dict] = []
+    monkeypatch.setattr(cleanup, "_ensure_ollama_running", lambda: None)
+    monkeypatch.setattr(cleanup, "_ensure_model_present", lambda model: None)
+
+    def fake_urlopen(req, timeout=None):
+        posted.append(json.loads(req.data))
+        return _FakeResponse(body)
+
+    monkeypatch.setattr(cleanup.urllib.request, "urlopen", fake_urlopen)
+    return posted
+
+
+def test_ollama_complete_sends_keep_alive(monkeypatch):
+    monkeypatch.setenv("VNOTE_OLLAMA_KEEP_ALIVE", "42m")
+    posted = _capture_ollama(monkeypatch, json.dumps({"message": {"content": "hello"}}).encode())
+
+    assert cleanup._ollama_complete("sys", "user", "big:14b") == "hello"
+    assert posted[0]["keep_alive"] == "42m" == str(config.get("ollama_keep_alive"))
+
+
+def test_preload_ollama_loads_the_model_with_an_empty_message_list(monkeypatch):
+    monkeypatch.setenv("VNOTE_OLLAMA_KEEP_ALIVE", "30m")
+    posted = _capture_ollama(monkeypatch, b"{}")
+
+    cleanup.preload_ollama("big:14b")
+
+    assert posted == [{"model": "big:14b", "messages": [], "keep_alive": "30m"}]
+
+
+def test_keep_alive_numbers_go_out_as_json_numbers(monkeypatch):
+    """Ollama parses a keep_alive *string* with Go's time.ParseDuration: "-1" is a 400,
+    -1 the number is "until Ollama exits" (checked against Ollama 0.23.1, 2026-08-25)."""
+    monkeypatch.setenv("VNOTE_OLLAMA_KEEP_ALIVE", "-1")
+    posted = _capture_ollama(monkeypatch, json.dumps({"message": {"content": "hi"}}).encode())
+
+    cleanup.preload_ollama("big:14b")
+    cleanup._ollama_complete("sys", "user", "big:14b")
+
+    assert posted[0]["keep_alive"] == -1 and isinstance(posted[0]["keep_alive"], int)
+    assert posted[1]["keep_alive"] == -1 and isinstance(posted[1]["keep_alive"], int)
+
+    monkeypatch.setenv("VNOTE_OLLAMA_KEEP_ALIVE", "30m")
+    posted.clear()
+    cleanup.preload_ollama("big:14b")
+    assert posted[0]["keep_alive"] == "30m"  # a unit stays a string
+

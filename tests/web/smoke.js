@@ -270,7 +270,8 @@ let noteDetail = () => ({
 });
 function baseRoutes() {
   return {
-    '/health': async () => ({ body: { version: '0.5.0', whisper_model: 'large-v3-turbo', device: 'cuda' } }),
+    '/health': async () => ({ body: { version: '0.5.0', whisper_model: 'large-v3-turbo', device: 'cuda',
+                                     warm: true, ollama: 'ready' } }),
     '/api/settings': async () => ({ body: { settings: [] } }),
     '/api/note': async () => ({ body: NOTE }),
     '/stream/start': async () => ({ body: { session_id: 'SID1' } }),
@@ -836,6 +837,27 @@ const appendCalls = () => calls.filter(c => c.url.startsWith('/stream/append'));
   ok($('app').dataset.daemon === undefined, 'recovery clears it');
   ok(/large-v3-turbo on cuda/.test($('daemon-info').textContent), 'the health line is back', $('daemon-info').textContent);
   ok($('record').disabled === false, 'Record is back');
+
+  console.log('\n24k2. a warming daemon: the strip says so and Record stays on');
+  routes['/health'] = async () => ({ body: { version: '0.6.0', whisper_model: 'large-v3-turbo',
+                                             device: 'cpu', warm: false, ollama: 'starting' } });
+  await G.checkHealth();
+  ok($('daemon-info').textContent === 'warming large-v3-turbo …', 'the strip names the model', $('daemon-info').textContent);
+  ok($('app').dataset.daemon === undefined, 'a warming daemon is not a down daemon');
+  ok($('record').disabled === false, 'Record stays enabled while warming');
+  routes['/health'] = async () => ({ body: { version: '0.6.0', whisper_model: 'large-v3-turbo',
+                                             device: 'cuda', warm: true, ollama: 'starting' } });
+  await G.checkHealth();
+  ok(/on cuda · ollama starting$/.test($('daemon-info').textContent), 'then Whisper lands, Ollama still loading', $('daemon-info').textContent);
+  routes['/health'] = async () => ({ body: { version: '0.6.0', whisper_model: 'large-v3-turbo',
+                                             device: 'cpu', warm: false, ollama: 'skipped',
+                                             warm_error: 'no such model: tiny-typo' } });
+  await G.checkHealth();
+  ok($('daemon-info').textContent === 'whisper failed: no such model: tiny-typo',
+     'a load that failed says so instead of warming forever', $('daemon-info').textContent);
+  routes['/health'] = health;
+  await G.checkHealth();
+  ok($('daemon-info').textContent === 'vnote 0.5.0 · large-v3-turbo on cuda', 'and a fully warm daemon reads plainly', $('daemon-info').textContent);
 
   console.log('\n24l. settings rows and the vocabulary editor');
   G.renderSettings([

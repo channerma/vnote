@@ -240,6 +240,12 @@ vnote --serve              # terminal A: loads the model once, serves on 127.0.0
 vnote memo.m4a             # terminal B: detects the daemon, starts transcribing at once
 ```
 
+- The page is up as soon as the daemon binds — Whisper (and, on the `ollama` backend, the
+  LLM) load on a background thread behind it. While that runs the sidebar reads
+  *"warming large-v3-turbo …"* and **Record still works**: the recording is held and
+  transcribed as soon as the model lands. `GET /health` reports the same state
+  (`warm`, `warm_error`, `ollama`); if the model never loads the sidebar says
+  *"whisper failed: …"* instead of warming forever.
 - The CLI probes for a daemon on every run and silently falls back to in-process models
   when none is up — same output, same files.
 - `--no-daemon` forces in-process for a single run.
@@ -297,6 +303,7 @@ default. A `.env` in the current directory is auto-loaded (see `.env.example`).
 | `ollama_model` | `VNOTE_OLLAMA_MODEL` | `qwen2.5:14b-instruct` | Ollama model for note cleanup (`ollama pull` it once) |
 | `dictation_model` | `VNOTE_DICTATION_MODEL` | — | Ollama model for `dictation` mode — small and fast, e.g. `llama3.2:3b`; blank = same as `ollama_model` |
 | `ollama_host` | `OLLAMA_HOST` | `http://127.0.0.1:11434` | where Ollama listens |
+| `ollama_keep_alive` | `VNOTE_OLLAMA_KEEP_ALIVE` | `30m` | how long Ollama keeps the model loaded after a request — a duration with a unit (`30m`, `1h30m`), a bare number of seconds (`300`), or `-1` = until Ollama exits (Ollama's own default is `5m`) |
 | `claude_model` | `VNOTE_CLAUDE_MODEL` | `claude-sonnet-5` | model for the `claude` (API) backend; `claude-code` uses the CLI's own choice |
 | `claude_code_bin` | `VNOTE_CLAUDE_CODE_BIN` | `claude` | name or path of the Claude Code CLI |
 | `whisper_model` | `VNOTE_WHISPER_MODEL` | `large-v3-turbo` | faster-whisper model loaded at daemon start (~1.6 GB on first use) — **restart to apply** |
@@ -317,7 +324,7 @@ What the page talks to; handy for scripts too. JSON unless noted; errors are non
 | route | behaviour |
 |---|---|
 | `GET /` · `GET /static/<file>` | the page (`vnote/web/`) |
-| `GET /health` | `{status, version, device, whisper_model, uptime_s}` |
+| `GET /health` | `{status, version, device, whisper_model, uptime_s, warm, warm_error, ollama}` — `warm` is false until Whisper is loaded, `warm_error` is null unless the load failed; `ollama` is `unknown` · `skipped` (backend is not Ollama) · `starting` · `ready` · `absent` |
 | `GET /api/settings` · `PUT /api/settings` | the settings list ↔ `{key: value, …}` (editable keys only; 400 with a reason otherwise) |
 | `GET /api/vocab` · `PUT /api/vocab` | `{"text": …}` ↔ the vocabulary file |
 | `GET /api/notes` | newest-first `{"notes": [{name, title, created, duration_s, mode, backend, has_audio, has_note}]}` |

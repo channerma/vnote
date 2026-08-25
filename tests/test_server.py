@@ -72,6 +72,62 @@ def test_health(live_server):
     assert h["status"] == "ok"
     assert h["whisper_model"] == config.WHISPER_MODEL
     assert "device" in h and "uptime_s" in h
+    assert h["warm"] is False  # no warm thread runs in tests: the model is never loaded
+    assert h["warm_error"] is None  # ... and nothing failed either
+    assert h["ollama"] == "unknown"  # ... so the background warm never reached Ollama
+
+
+def test_warm_in_background_survives_a_failed_whisper_load(monkeypatch):
+    """A model that never loads must be *reported*, not left as a page warming forever."""
+    monkeypatch.setattr(server, "_warm_error", None)
+    monkeypatch.setattr(server, "_ollama_state", "unknown")
+
+    def boom():
+        raise RuntimeError("no such model: tiny-typo")
+
+    monkeypatch.setattr(server, "_warm", boom)
+    monkeypatch.setattr(server, "_warm_ollama", lambda: pytest.fail("ollama warmed after a failed load"))
+
+    server._warm_in_background()  # never raises: the daemon keeps serving
+
+    assert server._warm_error == "no such model: tiny-typo"
+    assert server._ollama_state == "skipped"
+
+
+def test_health_reports_a_warm_error(live_server, monkeypatch):
+    monkeypatch.setattr(server, "_warm_error", "no such model: tiny-typo")
+    h = daemon.health(timeout=5)
+    assert h["warm_error"] == "no such model: tiny-typo"
+
+
+def test_warm_ollama_skipped_when_the_backend_is_not_ollama(monkeypatch):
+    monkeypatch.setattr(server, "_ollama_state", "unknown")
+    monkeypatch.setenv("VNOTE_BACKEND", "claude-code")
+
+    def boom(model):  # nothing may reach the Ollama client
+        raise AssertionError("preload_ollama called for a non-Ollama backend")
+
+    monkeypatch.setattr(cleanup, "preload_ollama", boom)
+    server._warm_ollama()
+    assert server._ollama_state == "skipped"
+
+
+def test_warm_ollama_ready_and_absent(monkeypatch):
+    monkeypatch.setattr(server, "_ollama_state", "unknown")
+    monkeypatch.setenv("VNOTE_BACKEND", "ollama")
+    monkeypatch.setenv("VNOTE_OLLAMA_MODEL", "fake:1b")
+    seen: list[str] = []
+    monkeypatch.setattr(cleanup, "preload_ollama", lambda model: seen.append(model))
+    server._warm_ollama()
+    assert seen == ["fake:1b"]
+    assert server._ollama_state == "ready"
+
+    def fail(model):
+        raise RuntimeError("ollama is not installed")
+
+    monkeypatch.setattr(cleanup, "preload_ollama", fail)
+    server._warm_ollama()  # a failed warm is reported, never raised: the daemon keeps serving
+    assert server._ollama_state == "absent"
 
 
 def test_transcribe_path_mode(live_server, tmp_path):

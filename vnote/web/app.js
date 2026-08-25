@@ -20,7 +20,9 @@
  *     #notes-empty              swapped with #notes-list via `hidden`
  *     #notes-empty-dir          the daemon's notes_dir, inside that sentence
  *     #nav-settings             toggles data-view
- *     #daemon-info              one line from /health, or "daemon unreachable"
+ *     #daemon-info              one line from /health ("warming <model> …" until the
+ *                               model lands, "whisper failed: …" when it never
+ *                               does), or "daemon unreachable"
  *
  *   Stage — recording
  *     #view-note                the stage; data-state drives every screen below
@@ -317,12 +319,27 @@ function daemonIsDown() { return $('app').dataset.daemon === 'down'; }
 /* --------------------------------------------------------------- daemon health */
 
 var HEALTH_POLL_MS = 5000;
+var WARM_POLL_MS = 2000;   // while the models load, ask more often so the strip clears promptly
+var HEALTH_TIMEOUT_MS = 4000;   // a hung socket must not stall the poll: say "unreachable" instead
 
+var warming = false;       // last /health said the daemon is still loading Whisper
+
+/* Record stays enabled while warming: live audio spills to disk and the daemon's
+ * worker simply waits for the model. Only a daemon that is *down* disables it. */
 function daemonUp(health) {
   delete $('app').dataset.daemon;
-  $('daemon-info').textContent =
-    'vnote ' + (health.version || '?') + ' · ' +
-    (health.whisper_model || '?') + ' on ' + (health.device || '?');
+  var failed = typeof health.warm_error === 'string' ? health.warm_error : '';
+  warming = health.warm === false && !failed;   // a daemon too old to say is treated as warm
+  if (failed) {
+    $('daemon-info').textContent = 'whisper failed: ' + failed;   // it will not arrive by waiting
+  } else if (warming) {
+    $('daemon-info').textContent = 'warming ' + (health.whisper_model || '?') + ' …';
+  } else {
+    var line = 'vnote ' + (health.version || '?') + ' · ' +
+      (health.whisper_model || '?') + ' on ' + (health.device || '?');
+    if (health.ollama === 'starting') line += ' · ollama starting';
+    $('daemon-info').textContent = line;
+  }
   syncRecordEnabled();
 }
 
@@ -332,6 +349,7 @@ function daemonUp(health) {
  * after it ends sets it if the daemon is still gone. */
 function daemonDown() {
   if (takeActive()) return;
+  warming = false;
   $('app').dataset.daemon = 'down';
   $('daemon-info').textContent = 'daemon unreachable';
   syncRecordEnabled();
@@ -354,13 +372,27 @@ var healthTicks = 0;
 var NOTES_REFRESH_POLLS = 6;   // every 6th health poll, i.e. ~30 s
 
 async function checkHealth() {
+  var t = timeoutSignal(HEALTH_TIMEOUT_MS);
   try {
-    daemonUp(await getJSON('/health'));
+    daemonUp(await api('/health', { method: 'GET', signal: t.signal }));
   } catch (e) {
     daemonDown();
+  } finally {
+    t.cancel();
   }
   healthTicks += 1;
   if (healthTicks % NOTES_REFRESH_POLLS === 0) refreshNotesIfIdle();
+}
+
+/* A chained timer rather than one interval: the beat changes with the state. */
+var healthTimer = null;
+
+function scheduleHealth() {
+  if (healthTimer !== null) window.clearTimeout(healthTimer);
+  healthTimer = window.setTimeout(function () {
+    healthTimer = null;
+    checkHealth().then(scheduleHealth, scheduleHealth);
+  }, warming ? WARM_POLL_MS : HEALTH_POLL_MS);
 }
 
 /* --------------------------------------------------------------------- boot */
@@ -2445,7 +2477,7 @@ function init() {
   updateProcessState();   // nothing is open yet: save/regenerate/revise stay off
   paintTimer();
   boot();
-  window.setInterval(checkHealth, HEALTH_POLL_MS);
+  scheduleHealth();
 }
 
 if (document.readyState === 'loading') {

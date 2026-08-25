@@ -159,6 +159,19 @@ def test_update_rejects_ollama_host_without_a_scheme():
     assert config.update({"ollama_host": "http://gpu-box:11434"}) == ["ollama_host"]
 
 
+def test_update_checks_the_keep_alive_duration(tmp_path, monkeypatch):
+    """Ollama 400s on a unit-less duration string; a bare number is seconds (-1 = forever)."""
+    import pytest
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("VNOTE_OLLAMA_KEEP_ALIVE", raising=False)
+    for good in ("-1", "30m", "1h30m", "300s", "0"):
+        assert config.update({"ollama_keep_alive": good}) == ["ollama_keep_alive"]
+    for bad in ("forever", "30 minutes", "m30"):
+        with pytest.raises(ValueError, match="ollama_keep_alive must be a duration"):
+            config.update({"ollama_keep_alive": bad})
+
+
 def test_file_values_are_coerced_not_trusted():
     config.save_config({"default_mode": 5, "language": 7})
     assert config.get("default_mode") == "5"  # a string, so consumers can validate and name it

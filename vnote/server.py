@@ -35,6 +35,15 @@ from .audio import BYTES_PER_S, wav_bytes
 _infer_lock = threading.Lock()
 _started = 0.0
 
+# How far the background warm has got with the local LLM, as /health reports it:
+#   unknown  — the warm thread has not reached it yet
+#   skipped  — the backend is not ollama, so there is nothing to warm
+#   starting — being loaded right now
+#   ready    — loaded and held in memory (see the ollama_keep_alive setting)
+#   absent   — the warm failed; cleanup will try again (and say why) on the first note
+_ollama_state = "unknown"
+_warm_error: str | None = None  # why the Whisper load failed, if it did; /health reports it
+
 
 class _BadRequest(ValueError):
     """A malformed request body/header; answered with 400 instead of 500."""
@@ -45,6 +54,48 @@ def _warm() -> str:
 
     transcribe._load_model()
     return transcribe._device or "cpu"
+
+
+def _warm_ollama() -> None:
+    """Make the local LLM ready too — best effort, never fatal.
+
+    VRAM headroom for Whisper plus a 14B model is unknown on machines other than
+    the author's, so a failure here is one line on stderr and an "absent" state,
+    not a daemon that refuses to start.
+    """
+    global _ollama_state
+    if config.get("backend") != "ollama":
+        _ollama_state = "skipped"
+        return
+    _ollama_state = "starting"
+    model = "?"
+    try:
+        from . import cleanup  # the Ollama client; imported here to keep startup imports thin
+
+        model = config.ollama_model()
+        cleanup.preload_ollama(model)
+    except Exception as exc:  # noqa: BLE001
+        _ollama_state = "absent"
+        print(f"  (ollama not warmed: {exc})", file=sys.stderr, flush=True)
+        return
+    _ollama_state = "ready"
+    print(f"  ollama warm: {model}", flush=True)
+
+
+def _warm_in_background() -> None:
+    """The daemon serves the page from the first second; the models load behind it."""
+    global _warm_error, _ollama_state
+    try:
+        device = _warm()
+    except Exception as exc:  # noqa: BLE001
+        # Keep serving: the page must be able to say *why* nothing works, rather than
+        # sit on "warming ..." for as long as the daemon runs.
+        _warm_error = str(exc) or type(exc).__name__
+        _ollama_state = "skipped"  # nothing to clean up if nothing can be transcribed
+        print(f"  whisper warm failed: {exc}", file=sys.stderr, flush=True)
+        return
+    print(f"  whisper warm on {device}", flush=True)
+    _warm_ollama()
 
 
 def _transcribe_pcm(pcm: bytes, language: str | None) -> tuple[str, dict]:
@@ -458,6 +509,9 @@ class _Handler(BaseHTTPRequestHandler):
                     "device": transcribe._device or "cpu",
                     "whisper_model": config.WHISPER_MODEL,
                     "uptime_s": round(time.monotonic() - _started, 1),
+                    "warm": transcribe.is_warm(),
+                    "warm_error": _warm_error,
+                    "ollama": _ollama_state,
                 })
             if path == "/api/settings":
                 return self._send(200, {"settings": config.describe()})
@@ -853,9 +907,9 @@ def serve(open_browser: bool = False) -> int:
     _started = time.monotonic()
     url = f"http://{host}:{port}"
     _sweep_stale_spills()  # a killed daemon leaves its live spills behind; nobody else will
-    print(f"vnote daemon — warming {config.WHISPER_MODEL} ...", flush=True)
-    device = _warm()
-    print(f"  warm on {device}; web UI + API at {url}  (Ctrl-C to stop)", flush=True)
+    print(f"vnote daemon — web UI + API at {url}; warming {config.WHISPER_MODEL} "
+          "in the background ...  (Ctrl-C to stop)", flush=True)
+    threading.Thread(target=_warm_in_background, daemon=True).start()  # the page is up before the models are
     if open_browser:
         threading.Thread(target=_open_browser, args=(url,), daemon=True).start()
     try:

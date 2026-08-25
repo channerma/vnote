@@ -267,6 +267,41 @@ def _ensure_model_present(model: str) -> None:
     )
 
 
+def _keep_alive() -> str | int:
+    """The ``keep_alive`` value in the form Ollama actually accepts.
+
+    A JSON *string* goes through Go's time.ParseDuration and must carry a unit
+    ("30m"); only a JSON *number* means seconds, with -1 = keep it loaded until
+    Ollama exits. Sending "-1" as a string is a 400 ("time: missing unit in
+    duration") — checked against Ollama 0.23.1, 2026-08-25.
+    """
+    value = str(config.get("ollama_keep_alive")).strip()
+    return int(value) if re.fullmatch(r"-?\d+", value) else value
+
+
+def preload_ollama(model: str) -> None:
+    """Load ``model`` into Ollama's memory so the first note doesn't pay for it.
+
+    An empty ``messages`` array is Ollama's documented way to load a model without
+    generating anything (API doc, read 2026-08-25). Raises on any failure — the
+    daemon's background warm decides what a failure means.
+    """
+    _ensure_ollama_running()
+    _ensure_model_present(model)
+    payload = {
+        "model": model,
+        "messages": [],
+        "keep_alive": _keep_alive(),
+    }
+    req = urllib.request.Request(
+        f"{config.get('ollama_host')}/api/chat",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=300):  # a cold pull of weights from disk is slow
+        pass
+
+
 def _ollama_complete(system: str, user: str, model: str) -> str:
     _ensure_ollama_running()
     _ensure_model_present(model)
@@ -274,6 +309,7 @@ def _ollama_complete(system: str, user: str, model: str) -> str:
         "model": model,
         "stream": False,
         "options": {"temperature": 0.3},
+        "keep_alive": _keep_alive(),  # keep it hot for the next note
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},

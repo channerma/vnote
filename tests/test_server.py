@@ -35,6 +35,16 @@ def _fake_revise(note_text, instructions, backend="ollama", model=None):
     return CleanResult(title="Revised", body="Shorter body.")
 
 
+def _fake_continue(note_text, new_transcript, mode="edit", backend=None, model=None, instructions=None):
+    _seen["continue"] = (note_text, new_transcript, mode, backend, model, instructions)
+    return "Continued body."
+
+
+def _fake_merge(note_text, new_transcript, mode="edit", backend=None, model=None, instructions=None):
+    _seen["merge"] = (note_text, new_transcript, mode, backend, model, instructions)
+    return CleanResult(title="Merged Title", body="Merged body.")
+
+
 def _fake_spans(pcm: bytes) -> list[tuple[float, float]]:
     """Stand-in for vad.speech_spans: nonzero samples are speech (so onnxruntime stays out)."""
     spoken = len(pcm.rstrip(b"\x00"))
@@ -57,6 +67,8 @@ def live_server(monkeypatch, tmp_path):
     monkeypatch.setattr(transcribe, "transcribe", _fake_transcribe)
     monkeypatch.setattr(cleanup, "clean", _fake_clean)
     monkeypatch.setattr(cleanup, "revise", _fake_revise)  # the other half of Phase 9's cleanup
+    monkeypatch.setattr(cleanup, "continue_note", _fake_continue)  # Phase 10 F: the two take prompts
+    monkeypatch.setattr(cleanup, "merge_note", _fake_merge)
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server._Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     monkeypatch.setattr(config, "daemon_addr", lambda: ("127.0.0.1", httpd.server_address[1]))
@@ -1161,3 +1173,488 @@ def test_stream_cancel_drops_the_session_and_its_audio(live_server):
     assert not failed.exists() or not any(failed.iterdir())
     status, _, _ = _request("POST", f"/stream/cancel?sid={sess.sid}")
     assert status == 404
+
+
+# --- Phase 10 F: takes — continue, re-run, delete ------------------------------
+
+
+def _continue_note(notes_dir, name, **kw):
+    """A note ready to be continued: one take, flat, with a cleaned note.md."""
+    meta = {"title": "Old", "cleanup_mode": "light", "created": "2026-08-25T16:00:00",
+            "audio_duration_s": 3.0}
+    meta.update(kw.pop("meta", {}))
+    return _make_session(notes_dir, name, meta=meta, note=kw.pop("note", "# Old\n\nfirst body\n"),
+                         transcript=kw.pop("transcript", "first words"), **kw)
+
+
+def _start_continue(name: str, language: str | None = "en"):
+    status, data = _send_json("POST", f"/stream/start?continue={name}", {"language": language})
+    return status, data
+
+
+def _record_and_finish(sid: str, query: str, pcm: bytes = SPEECH_SAMPLE * 16_000):
+    _request("POST", f"/stream/append?sid={sid}", pcm, {"Content-Type": "application/octet-stream"})
+    status, _, body = _request("POST", f"/stream/finish?sid={sid}&note=1&{query}", b"")
+    return status, _json.loads(body)
+
+
+def _versions_of(folder: Path) -> list[dict]:
+    return _json.loads((folder / "meta.json").read_text(encoding="utf-8"))["versions"]
+
+
+def test_continue_through_the_live_stream_adds_take_2_and_a_version(notes_dir):
+    d = _continue_note(notes_dir, "2026-08-25-1600-continue")
+    status, data = _start_continue("2026-08-25-1600-continue")
+    assert status == 200 and data["note"] == "2026-08-25-1600-continue"
+    sid = data["session_id"]
+
+    status, detail = _get_json("/api/notes/2026-08-25-1600-continue")
+    assert detail["live"] is True  # the page shows the note is being recorded into
+
+    status, data = _record_and_finish(sid, "continue=2026-08-25-1600-continue&how=continue")
+    assert status == 200, data
+    assert data["take"] == 2 and data["live_transcript"] == "fake transcript"
+    # the reply is the note's full detail payload
+    assert data["name"] == "2026-08-25-1600-continue" and data["live"] is False
+    assert data["note"] == "# Old\n\nfirst body\n\n---\n\nContinued body.\n"
+    assert [t["n"] for t in data["takes"]] == [1, 2]
+    assert data["takes"][1]["audio_url"] == "/api/notes/2026-08-25-1600-continue/takes/2/audio"
+    assert data["takes"][1]["transcript"] == "fake transcript"
+    assert data["duration_s"] == 4.0  # 3 s of take 1 plus the second's measured 1 s
+    assert data["has_audio"] is True  # the list view follows the migration too
+    status, listing = _get_json("/api/notes")
+    assert listing["notes"][0]["has_audio"] is True and listing["notes"][0]["duration_s"] == 4.0
+
+    assert (d / "takes" / "1" / "audio.wav").is_file() and (d / "takes" / "2" / "audio.wav").is_file()
+    assert not (d / "audio.wav").exists()  # the flat note migrated on the way in
+    assert (d / "transcript.txt").read_text(encoding="utf-8") == "first words\n\nfake transcript\n"
+    assert (d / "note.md").read_text(encoding="utf-8") == "# Old\n\nfirst body\n\n---\n\nContinued body.\n"
+    entry = _versions_of(d)[-1]
+    assert (entry["op"], entry["how"], entry["take"]) == ("continue", "continue", 2)
+    # the model saw the note as context and only the new take's transcript, in the note's own style
+    assert _seen["continue"][:3] == ("# Old\n\nfirst body\n", "fake transcript", "light")
+
+
+def test_continue_how_append_cleans_only_the_new_take(notes_dir):
+    d = _continue_note(notes_dir, "2026-08-25-1601-append")
+    _, data = _start_continue("2026-08-25-1601-append")
+    status, data = _record_and_finish(data["session_id"], "continue=2026-08-25-1601-append&how=append")
+    assert status == 200, data
+    assert data["note"] == "# Old\n\nfirst body\n\n---\n\nFake body.\n"
+    assert _seen["clean"][0] == "fake transcript"  # the take alone, not the joined transcript
+    assert "continue" not in _seen
+    entry = _versions_of(d)[-1]
+    assert (entry["op"], entry["how"], entry["take"]) == ("continue", "append", 2)
+
+
+def test_continue_how_merge_rewrites_the_whole_note(notes_dir):
+    d = _continue_note(notes_dir, "2026-08-25-1602-merge")
+    _, data = _start_continue("2026-08-25-1602-merge")
+    status, data = _record_and_finish(data["session_id"], "continue=2026-08-25-1602-merge&how=merge")
+    assert status == 200, data
+    assert data["note"] == "# Merged Title\n\nMerged body.\n" and data["title"] == "Merged Title"
+    assert _seen["merge"][:2] == ("# Old\n\nfirst body\n", "fake transcript")
+    entry = _versions_of(d)[-1]
+    assert (entry["op"], entry["how"], entry["take"]) == ("merge", "merge", 2)
+    assert (d / "versions" / "note-2.md").read_text(encoding="utf-8") == "# Merged Title\n\nMerged body.\n"
+
+
+def test_continuing_a_raw_note_keeps_the_take_and_writes_no_version(notes_dir):
+    d = _continue_note(notes_dir, "2026-08-25-1603-raw", note=None,
+                       meta={"title": "Raw", "cleanup_mode": None})
+    _, data = _start_continue("2026-08-25-1603-raw")
+    status, data = _record_and_finish(data["session_id"], "continue=2026-08-25-1603-raw&how=continue")
+    assert status == 200, data
+    assert data["take"] == 2 and data["versions"] == [] and data["note"] is None
+    assert "continue" not in _seen and "clean" not in _seen  # nothing was cleaned
+    assert (d / "takes" / "2" / "transcript.txt").read_text(encoding="utf-8") == "fake transcript\n"
+    assert not (d / "note.md").exists()
+
+
+def test_continue_with_raw_1_leaves_the_note_alone(notes_dir):
+    d = _continue_note(notes_dir, "2026-08-25-1604-rawflag")
+    _, data = _start_continue("2026-08-25-1604-rawflag")
+    status, data = _record_and_finish(data["session_id"], "continue=2026-08-25-1604-rawflag&raw=1")
+    assert status == 200, data
+    assert data["take"] == 2 and "continue" not in _seen
+    assert (d / "note.md").read_text(encoding="utf-8") == "# Old\n\nfirst body\n"  # untouched
+    assert [e["op"] for e in _versions_of(d)] == ["clean"]  # only the migration's v1
+
+
+def test_continue_through_the_mediarecorder_fallback(notes_dir):
+    d = _continue_note(notes_dir, "2026-08-25-1605-upload")
+    status, _, body = _request(
+        "POST", "/api/note?format=webm&continue=2026-08-25-1605-upload&how=continue", b"WEBMDATA",
+        {"Content-Type": "application/octet-stream"})
+    assert status == 200, body
+    data = _json.loads(body)
+    assert data["take"] == 2 and data["name"] == "2026-08-25-1605-upload"
+    assert (d / "takes" / "2" / "audio.webm").read_bytes() == b"WEBMDATA"  # the upload's own format
+    assert data["takes"][1]["duration_s"] is None  # a webm's length is nobody's to guess here
+    assert not _seen["path"].exists()  # the temp upload is gone; the take folder holds it
+    assert _versions_of(d)[-1]["take"] == 2
+
+
+def test_a_cleanup_failure_after_the_take_answers_500_with_the_take(notes_dir, monkeypatch):
+    d = _continue_note(notes_dir, "2026-08-25-1606-broken")
+
+    def boom(note_text, new_transcript, mode="edit", backend=None, model=None, instructions=None):
+        raise RuntimeError("cudaMalloc failed")
+
+    monkeypatch.setattr(cleanup, "continue_note", boom)
+    _, data = _start_continue("2026-08-25-1606-broken")
+    spill = server._registry.sessions[data["session_id"]].pcm_path()
+    status, data = _record_and_finish(data["session_id"], "continue=2026-08-25-1606-broken&how=continue")
+
+    assert status == 500 and data["take"] == 2 and "cudaMalloc" in data["error"]
+    take = d / "takes" / "2"
+    assert _wav_frames((take / "audio.wav").read_bytes()) == 16_000  # the recording is safe
+    assert (take / "transcript.txt").read_text(encoding="utf-8") == "fake transcript\n"
+    assert data["audio_kept"] == str(take / "audio.wav")  # ... and the reply says where
+    assert (d / "note.md").read_text(encoding="utf-8") == "# Old\n\nfirst body\n"  # the note is untouched
+    assert not spill.exists()  # the take holds the audio: no second copy in failed/
+    assert not (notes_dir / "failed").exists()
+
+
+def test_continue_validates_before_the_session_is_taken_out(notes_dir):
+    """A refused Stop must leave the recording running, exactly as a bad style does."""
+    _continue_note(notes_dir, "2026-08-25-1607-guard")
+    _, data = _start_continue("2026-08-25-1607-guard")
+    sid = data["session_id"]
+    _request("POST", f"/stream/append?sid={sid}", SPEECH_SAMPLE * 16_000,
+             {"Content-Type": "application/octet-stream"})
+
+    status, _, body = _request("POST", f"/stream/finish?sid={sid}&note=1&continue=2026-08-25-1607-guard"
+                                       "&how=sideways", b"")
+    assert status == 400 and b"bad how" in body
+    status, _, body = _request("POST", f"/stream/finish?sid={sid}&note=1&continue=2026-01-01-0000-gone", b"")
+    assert status == 404 and b"no such note" in body
+    assert sid in server._registry.sessions  # still recording; the user can just stop again
+
+    status, data = _record_and_finish(sid, "continue=2026-08-25-1607-guard&how=continue", b"")
+    assert status == 200 and data["take"] == 2
+
+
+def test_only_one_live_session_may_continue_a_note(notes_dir):
+    """Two tabs continuing at once would each add a take to a note the other is writing."""
+    _continue_note(notes_dir, "2026-08-25-1609-once")
+    status, data = _start_continue("2026-08-25-1609-once")
+    assert status == 200
+    status, second = _send_json("POST", "/stream/start?continue=2026-08-25-1609-once", {})
+    assert status == 409 and "already going" in second["error"]
+    assert len(server._registry.sessions) == 1  # nothing was started behind the 409
+
+    _record_and_finish(data["session_id"], "how=append")
+    status, _ = _start_continue("2026-08-25-1609-once")
+    assert status == 200  # the first one finished: the note is free again
+
+
+def test_stream_start_refuses_an_unknown_note(live_server):
+    status, data = _send_json("POST", "/stream/start?continue=2026-01-01-0000-gone", {})
+    assert status == 404 and "no such note" in data["error"]
+    assert server._registry.sessions == {}  # nothing was started behind the 404
+
+
+def test_a_bound_session_is_enough_to_continue_on_stop(notes_dir):
+    """The binding survives Stop on its own: the page need not repeat ?continue=."""
+    d = _continue_note(notes_dir, "2026-08-25-1608-bound")
+    _, data = _start_continue("2026-08-25-1608-bound")
+    status, data = _record_and_finish(data["session_id"], "how=append")
+    assert status == 200, data
+    assert data["take"] == 2 and data["name"] == "2026-08-25-1608-bound"
+    assert list(notes_dir.iterdir()) == [d]  # no second note folder was made
+
+
+# --- re-running a take against the current note --------------------------------
+
+
+def test_rerun_a_take_makes_a_new_version(notes_dir):
+    d = _continue_note(notes_dir, "2026-08-25-1610-rerun")
+    _, data = _start_continue("2026-08-25-1610-rerun")
+    _record_and_finish(data["session_id"], "continue=2026-08-25-1610-rerun&how=append")
+    _seen.pop("continue", None)
+
+    status, data = _send_json("POST", "/api/notes/2026-08-25-1610-rerun/takes/2/rerun",
+                              {"how": "continue"})
+    assert status == 200, data
+    assert data["take"] == 2 and data["version"] == 3
+    assert data["note"].endswith("---\n\nContinued body.\n")
+    # the re-run works on the note as it stands now, with the take's transcript
+    assert _seen["continue"][0] == "# Old\n\nfirst body\n\n---\n\nFake body.\n"
+    assert _seen["continue"][1] == "fake transcript"
+    assert _seen["continue"][2] == "light"  # no mode in the body: the note's own style decides
+    entry = _versions_of(d)[-1]
+    assert (entry["op"], entry["how"], entry["take"]) == ("continue", "continue", 2)
+
+
+def test_rerun_rejects_what_it_cannot_do(notes_dir):
+    _continue_note(notes_dir, "2026-08-25-1611-rerunbad")
+    status, data = _send_json("POST", "/api/notes/2026-08-25-1611-rerunbad/takes/1/rerun",
+                              {"how": "sideways"})
+    assert status == 400 and "bad how" in data["error"]
+    status, data = _send_json("POST", "/api/notes/2026-08-25-1611-rerunbad/takes/1/rerun",
+                              {"how": "continue", "mode": "gone"})
+    assert status == 400 and "bad style" in data["error"]
+    status, data = _send_json("POST", "/api/notes/2026-08-25-1611-rerunbad/takes/9/rerun", {})
+    assert status == 404 and "no take 9" in data["error"]
+    status, data = _send_json("POST", "/api/notes/2026-01-01-0000-missing/takes/1/rerun", {})
+    assert status == 404
+
+    _make_session(notes_dir, "2026-08-25-1612-noclean", note=None, audio=None)
+    status, data = _send_json("POST", "/api/notes/2026-08-25-1612-noclean/takes/1/rerun", {})
+    assert status == 400 and "regenerate" in data["error"]  # the page offers Regenerate instead
+
+
+# --- regenerating from a subset of the takes -----------------------------------
+
+
+def test_reclean_from_a_subset_of_takes_records_which_ones(notes_dir):
+    d = _continue_note(notes_dir, "2026-08-25-1620-subset")
+    _, data = _start_continue("2026-08-25-1620-subset")
+    _record_and_finish(data["session_id"], "continue=2026-08-25-1620-subset&how=append")
+
+    status, data = _send_json("POST", "/api/notes/2026-08-25-1620-subset/reclean",
+                              {"mode": "light", "takes": [1]})
+    assert status == 200, data
+    assert _seen["clean"][0] == "first words"  # only take 1's text reached the model
+    entry = _versions_of(d)[-1]
+    assert entry["op"] == "regenerate" and entry["takes"] == [1]
+
+    status, data = _send_json("POST", "/api/notes/2026-08-25-1620-subset/reclean",
+                              {"mode": "light", "takes": [1, 2]})
+    assert status == 200 and _seen["clean"][0] == "first words\n\nfake transcript"
+    assert _versions_of(d)[-1]["takes"] == [1, 2]
+
+    for bad in ([], "1", [1, "2"], [True]):
+        status, data = _send_json("POST", "/api/notes/2026-08-25-1620-subset/reclean",
+                                  {"mode": "light", "takes": bad})
+        assert status == 400, bad
+    status, data = _send_json("POST", "/api/notes/2026-08-25-1620-subset/reclean",
+                              {"mode": "light", "takes": [9]})
+    assert status == 404 and "no take 9" in data["error"]
+
+
+# --- per-take audio and transcripts --------------------------------------------
+
+
+def test_take_audio_is_served_with_ranges(notes_dir):
+    _continue_note(notes_dir, "2026-08-25-1630-audio")
+    _, data = _start_continue("2026-08-25-1630-audio")
+    _record_and_finish(data["session_id"], "continue=2026-08-25-1630-audio&how=append")
+
+    url = "/api/notes/2026-08-25-1630-audio/takes/2/audio"
+    status, headers, body = _request("GET", url)
+    assert status == 200 and headers["Content-Type"] == "audio/wav"
+    assert _wav_frames(body) == 16_000
+    status, headers, ranged = _request("GET", url, headers={"Range": "bytes=0-9"})
+    assert status == 206 and ranged == body[:10] and headers["Accept-Ranges"] == "bytes"
+
+    # the note-level route still works after the migration: it follows take 1
+    status, headers, body = _request("GET", "/api/notes/2026-08-25-1630-audio/audio")
+    assert status == 200 and body == b"RIFF" + bytes(range(100))
+    status, data = _get_json("/api/notes/2026-08-25-1630-audio/takes/9/audio")
+    assert status == 404 and "no audio for take 9" in data["error"]
+    status, _ = _get_json("/api/notes/2026-01-01-0000-missing/takes/1/audio")
+    assert status == 404
+
+
+def test_put_a_take_transcript_keeps_the_original_and_rebuilds_the_join(notes_dir):
+    d = _continue_note(notes_dir, "2026-08-25-1631-edit")
+    _, data = _start_continue("2026-08-25-1631-edit")
+    _record_and_finish(data["session_id"], "continue=2026-08-25-1631-edit&how=append")
+
+    status, data = _send_json("PUT", "/api/notes/2026-08-25-1631-edit/takes/2/transcript",
+                              {"text": "the words I meant"})
+    assert status == 200 and data == {"transcript": "the words I meant", "transcript_edited": True}
+    assert (d / "takes" / "2" / "transcript.original.txt").read_text(encoding="utf-8") == "fake transcript\n"
+    assert (d / "transcript.txt").read_text(encoding="utf-8") == "first words\n\nthe words I meant\n"
+    status, detail = _get_json("/api/notes/2026-08-25-1631-edit")
+    assert detail["takes"][1]["transcript_edited"] is True and detail["takes"][0]["transcript_edited"] is False
+
+    status, _ = _send_json("PUT", "/api/notes/2026-08-25-1631-edit/takes/9/transcript", {"text": "x"})
+    assert status == 404
+    status, _ = _send_json("PUT", "/api/notes/2026-08-25-1631-edit/takes/2/transcript", {"text": 5})
+    assert status == 400
+
+
+def test_a_flat_notes_take_1_is_the_note_itself(notes_dir):
+    d = _continue_note(notes_dir, "2026-08-25-1632-flat")
+    status, detail = _get_json("/api/notes/2026-08-25-1632-flat")
+    assert status == 200
+    assert [t["n"] for t in detail["takes"]] == [1]
+    assert detail["takes"][0]["audio_url"] == "/api/notes/2026-08-25-1632-flat/audio"
+    assert detail["takes"][0]["transcript"] == "first words"
+
+    status, _ = _send_json("PUT", "/api/notes/2026-08-25-1632-flat/takes/1/transcript", {"text": "edited"})
+    assert status == 200
+    assert (d / "transcript.txt").read_text(encoding="utf-8") == "edited"
+    assert (d / "transcript.original.txt").read_text(encoding="utf-8") == "first words\n"
+    assert not (d / "takes").exists()  # editing a transcript is not a reason to migrate
+
+
+# --- deletes: moves into trash/ -------------------------------------------------
+
+
+def test_delete_a_take_moves_it_to_trash(notes_dir):
+    d = _continue_note(notes_dir, "2026-08-25-1640-deltake")
+    _, data = _start_continue("2026-08-25-1640-deltake")
+    _record_and_finish(data["session_id"], "continue=2026-08-25-1640-deltake&how=append")
+
+    status, data = _send_json("DELETE", "/api/notes/2026-08-25-1640-deltake/takes/2", {})
+    assert status == 200, data
+    assert data["take"] == 2
+    trashed = Path(data["trashed"])
+    # a take goes to its own namespace: never inside trash/<name>/, which is where a
+    # whole trashed note of that name lives
+    assert trashed == notes_dir / "trash" / "2026-08-25-1640-deltake.takes" / "take-2"
+    assert _wav_frames((trashed / "audio.wav").read_bytes()) == 16_000  # moved, not unlinked
+    assert not (d / "takes" / "2").exists()
+    assert (d / "transcript.txt").read_text(encoding="utf-8") == "first words\n"
+    assert (d / "note.md").exists()  # untouched by design: the Body regenerates or edits
+    status, detail = _get_json("/api/notes/2026-08-25-1640-deltake")
+    assert [t["n"] for t in detail["takes"]] == [1]
+    assert detail["duration_s"] == 3.0 and detail["has_audio"] is True  # the sum, rebuilt
+
+    status, data = _send_json("DELETE", "/api/notes/2026-08-25-1640-deltake/takes/1", {})
+    assert status == 409 and "only take" in data["error"]  # the last one stays
+    assert (d / "takes" / "1" / "audio.wav").is_file()
+    status, _ = _send_json("DELETE", "/api/notes/2026-08-25-1640-deltake/takes/9", {})
+    assert status == 404
+
+
+def test_delete_a_note_moves_the_folder_and_drops_it_from_the_list(notes_dir):
+    d = _make_session(notes_dir, "2026-08-25-1641-delnote", meta={"title": "Doomed"})
+    status, data = _send_json("DELETE", "/api/notes/2026-08-25-1641-delnote", {})
+    assert status == 200, data
+    trashed = Path(data["trashed"])
+    assert trashed == notes_dir / "trash" / "2026-08-25-1641-delnote"
+    assert (trashed / "note.md").is_file() and (trashed / "audio.wav").is_file()
+    assert not d.exists()
+
+    status, listing = _get_json("/api/notes")
+    assert listing["notes"] == []  # trash/ never matches the session regex
+    status, _ = _get_json("/api/notes/2026-08-25-1641-delnote")
+    assert status == 404
+    status, _ = _send_json("DELETE", "/api/notes/2026-01-01-0000-missing", {})
+    assert status == 404
+
+
+def test_deletes_are_refused_while_a_session_is_recording_into_the_note(notes_dir):
+    d = _continue_note(notes_dir, "2026-08-25-1642-busy")
+    _, data = _start_continue("2026-08-25-1642-busy")
+    sid = data["session_id"]
+
+    status, payload = _send_json("DELETE", "/api/notes/2026-08-25-1642-busy", {})
+    assert status == 409 and "still going" in payload["error"]
+    status, payload = _send_json("DELETE", "/api/notes/2026-08-25-1642-busy/takes/1", {})
+    assert status == 409
+    assert d.is_dir()
+
+    _record_and_finish(sid, "continue=2026-08-25-1642-busy&how=append")
+    status, payload = _send_json("DELETE", "/api/notes/2026-08-25-1642-busy", {})
+    assert status == 200 and not d.exists()  # the session is gone: the delete goes through
+
+
+def test_deletes_are_refused_cross_site(notes_dir):
+    d = _make_session(notes_dir, "2026-08-25-1643-xsite", audio=None)
+    status, _, _ = _request("DELETE", "/api/notes/2026-08-25-1643-xsite", None,
+                            {"Origin": "https://evil.example"})
+    assert status == 403 and d.is_dir()
+
+
+def test_trash_reports_where_it_is_and_how_much_is_in_it(notes_dir, monkeypatch):
+    status, data = _get_json("/api/trash")
+    assert status == 200 and data == {"path": str(notes_dir / "trash"), "entries": 0}
+
+    _make_session(notes_dir, "2026-08-25-1644-gone", audio=None)
+    _send_json("DELETE", "/api/notes/2026-08-25-1644-gone", {})
+    status, data = _get_json("/api/trash")
+    assert data["entries"] == 1
+
+    calls = _record_reveal(monkeypatch, wsl=False)
+    monkeypatch.setattr(server.sys, "platform", "linux")
+    status, data = _send_json("POST", "/api/trash/reveal", {})
+    assert status == 200 and data["opened"] is True and data["entries"] == 1
+    assert calls == [("popen", ("xdg-open", str(notes_dir / "trash")), server.subprocess.DEVNULL)]
+
+
+def test_the_root_transcript_of_a_multi_take_note_cannot_be_edited(notes_dir):
+    """It is derived from the takes: a write here would be undone by the next rebuild."""
+    d = _continue_note(notes_dir, "2026-08-25-1650-derived")
+    _, data = _start_continue("2026-08-25-1650-derived")
+    _record_and_finish(data["session_id"], "continue=2026-08-25-1650-derived&how=append")
+
+    status, payload = _send_json("PUT", "/api/notes/2026-08-25-1650-derived/transcript",
+                                 {"text": "rewritten by hand"})
+    assert status == 409 and "edit a take" in payload["error"]
+    assert (d / "transcript.txt").read_text(encoding="utf-8") == "first words\n\nfake transcript\n"
+    assert not (d / "transcript.original.txt").exists()  # and no bogus "original" was minted
+
+
+def test_a_stop_whose_note_vanished_saves_a_note_of_its_own(notes_dir):
+    """The binding must not outlive the note: the recording is what matters."""
+    d = _continue_note(notes_dir, "2026-08-25-1651-vanished")
+    _, data = _start_continue("2026-08-25-1651-vanished")
+    sid = data["session_id"]
+    # the API refuses a delete while the session is bound, so this is the folder being
+    # moved out from under the daemon by hand — the case the binding cannot recover from
+    d.rename(notes_dir / "moved-away-by-hand")
+
+    status, payload = _record_and_finish(sid, "how=append")
+    assert status == 200, payload
+    assert "take" not in payload and server._SESSION_RE.fullmatch(payload["name"])
+    assert payload["name"] != "2026-08-25-1651-vanished"  # a note of its own, not a 404
+    assert (notes_dir / payload["name"] / "note.md").is_file()
+
+
+def test_a_takes_subset_is_deduplicated_and_ordered(notes_dir):
+    d = _continue_note(notes_dir, "2026-08-25-1652-dupes")
+    _, data = _start_continue("2026-08-25-1652-dupes")
+    _record_and_finish(data["session_id"], "continue=2026-08-25-1652-dupes&how=append")
+
+    status, data = _send_json("POST", "/api/notes/2026-08-25-1652-dupes/reclean",
+                              {"mode": "light", "takes": [2, 1, 2]})
+    assert status == 200, data
+    assert _seen["clean"][0] == "first words\n\nfake transcript"  # each take once, in order
+    assert _versions_of(d)[-1]["takes"] == [1, 2]
+
+
+def test_cancel_with_keep_parks_the_recording_in_failed(notes_dir):
+    """A page that drops a session it still holds a Retry for must not lose the audio."""
+    d = _continue_note(notes_dir, "2026-08-25-1653-keep")
+    _, data = _start_continue("2026-08-25-1653-keep")
+    sid = data["session_id"]
+    spill = server._registry.sessions[sid].pcm_path()
+    _request("POST", f"/stream/append?sid={sid}", SPEECH_SAMPLE * 16_000,
+             {"Content-Type": "application/octet-stream"})
+
+    status, _, body = _request("POST", f"/stream/cancel?sid={sid}&keep=1")
+    assert status == 200, body
+    data = _json.loads(body)
+    kept = Path(data["audio_kept"])
+    assert data["cancelled"] is True
+    assert kept.parent == notes_dir / "failed" and _wav_frames(kept.read_bytes()) == 16_000
+    assert not spill.exists()  # the spill became that WAV, and only after it existed
+    assert sid not in server._registry.sessions
+    assert server._registry.bound("2026-08-25-1653-keep") is False  # the note is free again
+    status, detail = _get_json("/api/notes/2026-08-25-1653-keep")
+    assert detail["live"] is False and [t["n"] for t in detail["takes"]] == [1]
+    assert not (d / "takes").exists()  # a cancel adds no take: the note is as it was
+
+    status, _, _ = _request("POST", f"/stream/cancel?sid={sid}&keep=1")
+    assert status == 404  # a second cancel is still a 404, not a 500
+
+
+def test_cancel_with_keep_drops_a_recording_too_short_to_matter(notes_dir):
+    _continue_note(notes_dir, "2026-08-25-1654-tiny")
+    _, data = _start_continue("2026-08-25-1654-tiny")
+    sid = data["session_id"]
+    spill = server._registry.sessions[sid].pcm_path()
+    _request("POST", f"/stream/append?sid={sid}", SPEECH_SAMPLE * 100,
+             {"Content-Type": "application/octet-stream"})
+
+    status, _, body = _request("POST", f"/stream/cancel?sid={sid}&keep=1")
+    assert status == 200 and _json.loads(body)["audio_kept"] is None
+    assert not spill.exists()
+    failed = notes_dir / "failed"
+    assert not failed.exists() or not any(failed.iterdir())

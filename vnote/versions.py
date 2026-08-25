@@ -25,11 +25,16 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-OPS = ("clean", "regenerate", "revise", "edit", "restore")
+OPS = ("clean", "regenerate", "revise", "edit", "restore", "continue", "merge")
 
 # The daemon is multithreaded; commits are read-modify-write. Re-entrant because
 # commit() calls ensure_history(), which takes the same lock on its own.
 _commit_lock = threading.RLock()
+
+# The same lock under its public name: takes.py does its own read-modify-write on
+# a note folder (meta.json, the derived transcript.txt, the takes/ tree) and must
+# serialize against every commit here, not against a second lock of its own.
+folder_lock = _commit_lock
 
 
 def read_meta(session_dir: Path) -> dict:
@@ -202,6 +207,12 @@ def _migrate(session_dir: Path, meta: dict) -> None:
     write_meta(session_dir, meta)
 
 
+# The fields commit() writes itself; ``extra`` may add to an entry, never rewrite these.
+_ENTRY_FIELDS = frozenset(
+    {"n", "created", "op", "mode", "backend", "model", "instructions", "restored_from"}
+)
+
+
 def commit(
     session_dir: Path,
     text: str,
@@ -214,12 +225,17 @@ def commit(
     instructions: str | None = None,
     restored_from: int | None = None,
     when: datetime | None = None,
+    extra: dict | None = None,
 ) -> tuple[int, dict]:
     """Write ``text`` as the next version (and as note.md); return (n, the new meta).
 
     ``op`` is one of :data:`OPS`. A ``clean``/``regenerate`` also refreshes the
     ``cleanup_*`` fields in meta.json (and ``regenerate`` sets ``recleaned``, the
     0.5.0 field the page still reads).
+
+    ``extra`` adds fields to the log entry — Phase 10 F records ``take``/``how`` on
+    a continue and ``takes`` on a regenerate from a subset. It cannot overwrite the
+    fields above: a version entry's own shape is this function's to decide.
     """
     session_dir = Path(session_dir)
     text = normalized(text)
@@ -247,6 +263,7 @@ def commit(
             "model": model,
             "instructions": instructions,
             "restored_from": restored_from,
+            **{k: v for k, v in (extra or {}).items() if k not in _ENTRY_FIELDS},
         })
         meta["versions"] = log
         if title:

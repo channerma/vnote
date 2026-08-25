@@ -351,3 +351,61 @@ def test_registry_ttl_sweep_expires_and_closes():
     assert expired == [session]  # on_expire ran while the audio was still there
     assert registry.sessions == {}
     assert not path.exists()  # ... and the session was closed behind it
+
+
+def test_a_session_can_be_bound_to_a_note():
+    """Continue binds the recording to a note; deletes are refused while it lives."""
+    registry = stream.Registry(transcribe_pcm=FakeTranscriber(), vad=fake_vad)
+    plain = registry.start("en")
+    bound = registry.start("en", note_name="2026-08-25-0900-a-note")
+    try:
+        assert plain.note_name is None and bound.note_name == "2026-08-25-0900-a-note"
+        assert registry.bound("2026-08-25-0900-a-note") is True
+        assert registry.bound("2026-08-25-0901-other") is False
+    finally:
+        plain.close(keep_audio=False)
+        bound.close(keep_audio=False)
+
+
+def test_a_note_stops_being_bound_once_its_session_expires():
+    """bound() sweeps first: a vanished browser must not block a delete for ever."""
+    registry = stream.Registry(ttl_s=1800.0, transcribe_pcm=FakeTranscriber(), vad=fake_vad)
+    session = registry.start("en", note_name="2026-08-25-0900-a-note")
+    assert registry.bound("2026-08-25-0900-a-note") is True
+    session.last_seen -= registry.ttl_s + 1
+    assert registry.bound("2026-08-25-0900-a-note") is False
+    assert registry.sessions == {}
+
+
+def test_two_starts_racing_for_one_note_cannot_both_bind():
+    """The check lives inside start(), under the registry lock — a barrier proves it."""
+    registry = stream.Registry(transcribe_pcm=FakeTranscriber(), vad=fake_vad)
+    start = threading.Barrier(6)
+    won: list[stream.LiveSession] = []
+    busy: list[Exception] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        start.wait()
+        try:
+            session = registry.start("en", note_name="2026-08-25-0900-a-note")
+        except stream.NoteBusy as exc:
+            with lock:
+                busy.append(exc)
+        else:
+            with lock:
+                won.append(session)
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in threads)
+
+    try:
+        assert len(won) == 1 and len(busy) == 5
+        assert len(registry.sessions) == 1  # and nothing was left behind by the losers
+    finally:
+        for session in won:
+            session.close(keep_audio=False)

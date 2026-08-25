@@ -5,6 +5,7 @@
  *
  * State is CSS-driven: this file sets data attributes, style.css does the rest.
  *   #app        data-view="note|settings"  data-daemon="down"  data-sidebar="collapsed"
+ *               data-continue="yes"        this take is being recorded into a note
  *   #view-note  data-state="idle|recording|paused|processing|note"
  *               data-live="on|off"  data-starting="true" (during a start, Stop = Cancel)
  *   #note       data-raw="shown|hidden"    tab-note|tab-raw|tab-audio (phone tabs)
@@ -39,6 +40,10 @@
  *     #pick-backend             select, filled from /api/settings; "" = the style's
  *     #pick-language            select: the configured language, the last pick,
  *                               the common ones, and auto
+ *     #continue-bar             shown only while continuing a note (data-continue)
+ *     #continue-target          "Continuing: <title>"
+ *     #pick-how                 select: continue / append / merge — what Stop does
+ *                               with the new take (also the per-take Re-run pick)
  *     #process-toggle           checkbox: run cleanup on Stop (off = a raw note)
  *     #live-toggle              checkbox: stream PCM and show the transcript live
  *     #mic-help                 banner: permission denied / insecure context
@@ -52,22 +57,30 @@
  *     #note-title               contenteditable; rewrites the note's "# " heading
  *     #note-meta                created, duration, mode, backend, whisper, timings
  *     #version-select #version-restore   linear history, newest first
- *     #note-continue            disabled affordance ("Continue recording")
+ *     #note-continue            records another take into this note
  *     #note-warning             "cleanup failed — this is the raw transcript"
  *     #note-unprocessed         the calm twin: a raw take, nothing went wrong
  *     #note-tab-note #note-tab-raw #note-tab-audio   phone tabs over the panes
  *     #note-editor              the note's Markdown
  *     #note-save #note-save-status    PUT the editor as a new version
  *     #note-copy #note-copy-status
- *     #note-raw #note-raw-save #note-raw-copy #note-raw-status #note-raw-toggle
- *                               the transcript, editable — Save rewrites transcript.txt
+ *     #note-raw                 the takes container: one .take section per take
+ *     #note-raw-copy #note-raw-status #note-raw-toggle   the pane's own controls
+ *       (Copy copies the root join; the drawer toggle is desktop-only)
+ *     the .take sections inside it are built at runtime, one per take, and no id of
+ *     theirs appears in the markup. Per take n they are: take-n-text (the textarea),
+ *     take-n-save (PUT …/takes/n/transcript), take-n-status ("edited", saving, or
+ *     that take's error), take-n-include (the checkbox the next Regenerate reads;
+ *     only with 2+ takes), take-n-how with take-n-rerun (re-run this take against
+ *     the current note) and take-n-delete (DELETE …/takes/n, never the last take).
  *     #regenerate-mode #regenerate    re-run cleanup from the raw transcript, in
  *                               a style; a note whose style is gone shows "(missing: …)"
  *     #revise-instructions      ONE instructions box, read by both Regenerate (appended
  *                               to the cleanup prompt) and Revise
  *     #revise                   apply the instruction to the current note
- *     #note-audio               <audio>, hidden when the folder has none
+ *     #note-audio-list          one labelled <audio> per take, hidden when none has audio
  *     #note-path #note-path-copy #note-path-status #note-reveal
+ *     #note-delete              DELETE the note — to the trash folder, after a confirm
  *
  *   Settings view
  *     #view-settings            the settings screen (CSS only: data-view shows it)
@@ -78,6 +91,7 @@
  *     #styles-problems          the registry's warnings (hidden when there are none)
  *     #style-name #style-text   the selected style's file name and full text
  *     #style-new #style-duplicate #style-delete #style-save #style-status
+ *     #trash-path #trash-status #trash-reveal   where deleted notes and takes went
  */
 
 'use strict';
@@ -214,10 +228,8 @@ function flash(el, text, ms) {
 }
 
 /* `stillWanted`, when given, is re-checked after the clipboard call: callers
- * whose status line belongs to a note drop the flash once that note is gone.
- * `show`, when given, replaces the flash — a status line that carries a standing
- * marker has to repaint it afterwards (see flashRaw). */
-async function copyText(text, statusEl, stillWanted, show) {
+ * whose status line belongs to a note drop the flash once that note is gone. */
+async function copyText(text, statusEl, stillWanted) {
   var msg;
   try {
     if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('no clipboard api');
@@ -227,8 +239,7 @@ async function copyText(text, statusEl, stillWanted, show) {
     msg = copyFallback(text) ? 'copied' : 'copy failed';
   }
   if (stillWanted && !stillWanted()) return;
-  if (show) show(msg);
-  else flash(statusEl, msg);
+  flash(statusEl, msg);
 }
 
 /* Fallback: put the text in a textarea, select it, execCommand('copy'). */
@@ -266,6 +277,7 @@ function el(tag, className, text) {
 
 var vocabLoaded = false;
 var styleOpened = false;
+var trashLoaded = false;
 
 function setView(name) {
   var view = name === 'settings' ? 'settings' : 'note';
@@ -273,6 +285,10 @@ function setView(name) {
   if (view === 'settings' && !vocabLoaded) {
     vocabLoaded = true;
     loadVocab();
+  }
+  if (view === 'settings' && !trashLoaded) {
+    trashLoaded = true;
+    loadTrash();
   }
   if (view === 'settings' && !styleOpened && firstStyleName()) {
     styleOpened = true;
@@ -409,6 +425,7 @@ function daemonDown() {
  * is down; this keeps the keyboard honest too. */
 function syncRecordEnabled() {
   if (!takeActive()) $('record').disabled = daemonIsDown();
+  updateNoteActions();   // Continue and Delete need the daemon too
 }
 
 /* Notes are also created outside this page (the tray, the CLI). Refresh the list
@@ -470,9 +487,30 @@ function savePicks() {
     mode: $('pick-mode').value,
     backend: $('pick-backend').value,
     language: $('pick-language').value,
+    how: $('pick-how').value,
     live: $('live-toggle').checked,
     process: $('process-toggle').checked
   }));
+}
+
+/* What Stop does with a continued take (contract F). The same three choices drive
+ * a take's Re-run, so there is one list of them. */
+var HOW_CHOICES = [
+  ['continue', 'continue — the note is context'],
+  ['append', 'append — the new take alone'],
+  ['merge', 'merge — rewrite the whole note']
+];
+
+function fillHowSelect(sel) {
+  HOW_CHOICES.forEach(function (choice) { addOption(sel, choice[0], choice[1]); });
+  return sel;
+}
+
+/* A pick like the others, remembered per browser; 'continue' is the default. */
+function initHowPick() {
+  fillHowSelect($('pick-how'));
+  var picks = readPicks();
+  selectIfPresent($('pick-how'), (picks && picks.how) || 'continue');
 }
 
 /* Off: Stop writes a raw note (audio + transcript, no LLM) whatever the mode says,
@@ -701,9 +739,14 @@ var recStarting = false;   // covers the whole start: getUserMedia, /stream/star
 var recCancelled = false;  // Stop pressed while still starting
 /* What #retry would send: {blob, format} from the MediaRecorder path, or {pcm:
  * [Uint8Array, …]} — the live path's safety copy, turned into a WAV on the click.
- * null means there is nothing to retry and the banner stays hidden. */
+ * null means there is nothing to retry and the banner stays hidden. A recording made
+ * by Continue also carries {note, how}: the destination outlives continueTarget. */
 var lastUpload = null;
 var recMime = '';
+/* The note this take is being recorded into: {name, title}, null for a new note.
+ * Read by startQuery()/noteQuery()/finishQuery(); cleared when the take lands on
+ * the note, or when it is abandoned without one. */
+var continueTarget = null;
 var recElapsedMs = 0;      // accumulated recorded time (excludes pauses)
 var recSegmentStart = 0;   // performance.now() of the current running segment
 var recTicker = null;
@@ -829,6 +872,11 @@ function clearBanners() {
 /* States: ready, starting (microphone/session being opened — Stop cancels),
  * recording, paused, processing. Ready leaves an open note on the stage. */
 function setTransport(state) {
+  // Ready means no take is running, so nothing is being recorded into a note any
+  // more. Every path that ends a take passes through here — including the ones that
+  // end it badly — and each of those pins the destination onto lastUpload first, so
+  // Retry still knows where the recording was going.
+  if (state === 'ready') clearContinue();
   var recording = state === 'recording';
   var paused = state === 'paused';
   var busy = state === 'processing';
@@ -867,6 +915,8 @@ function setTransport(state) {
     else if (busy) setStage('processing');
     else if (stage !== 'note') setStage('idle');
   }
+
+  updateNoteActions();   // a running take owns the stage: no second one into this note
 }
 
 function releaseStream() {
@@ -984,7 +1034,7 @@ function startMediaRecorder() {
     recChunks = [];
     recorder = null;
     paintTimer();
-    uploadRecording(blob, formatFromMime(mimeForBlob));
+    uploadRecording(blob, formatFromMime(mimeForBlob), continueDest());
   };
 
   try {
@@ -1058,7 +1108,77 @@ function processingCopy() {
     ' — usually 20–40 s.';
 }
 
-function noteQuery(format) {
+/* Continue ------------------------------------------------------------------
+ *
+ * The same recording stage as Record, bound to the open note: the take becomes
+ * takes/<n>/ of that note and `how` decides what the daemon does with it
+ * (contract F). The note itself is closed while the take runs — it comes back on
+ * Stop, with the new take's section selected. */
+
+function applyContinue() {
+  var app = $('app');
+  if (continueTarget) {
+    app.dataset.continue = 'yes';
+    $('continue-target').textContent = 'Continuing: ' + continueTarget.title;
+  } else {
+    delete app.dataset.continue;
+    $('continue-target').textContent = '';
+  }
+  updateNoteActions();
+}
+
+function clearContinue() {
+  continueTarget = null;
+  applyContinue();
+}
+
+async function continueNote() {
+  if (!currentNote || !currentNote.name || $('note-continue').disabled) return;
+  continueTarget = {
+    name: currentNote.name,
+    title: $('note-title').textContent || currentNote.title || currentNote.name
+  };
+  applyContinue();
+  // startRecording() asks about unsaved edits and clears the stage, exactly as Record does
+  await startRecording();
+  if (!takeActive()) clearContinue();   // it never started: the note is still the note
+}
+
+/* The live session is bound to the note at /stream/start: the daemon refuses a
+ * second one meanwhile, which is what "already continuing" on the button means. */
+function startQuery() {
+  return continueTarget ? '?continue=' + encodeURIComponent(continueTarget.name) : '';
+}
+
+/* Where this take is going, as the Retry banner has to remember it. `continueTarget`
+ * is cleared the moment the take ends (setTransport('ready')), so a recording the
+ * daemon never got carries its own destination: without that, the next plain Record
+ * would land in that note — or this Retry would land in a brand-new one. */
+function continueDest() {
+  if (!continueTarget) return null;
+  return { note: continueTarget.name, how: $('pick-how').value || 'continue' };
+}
+
+/* Pin the destination onto a recording the daemon never got. */
+function heldUpload(upload, dest) {
+  var target = dest || continueDest();
+  if (target && target.note) {
+    upload.note = target.note;
+    upload.how = target.how;
+  }
+  return upload;
+}
+
+/* Both capture paths carry the same pair. `dest` is the held upload's own
+ * destination; without one, the take that is running now. */
+function addContinue(add, dest) {
+  var target = dest || continueDest();
+  if (!target || !target.note) return;
+  add('continue', target.note);
+  add('how', target.how || 'continue');
+}
+
+function noteQuery(format, dest) {
   var mode = $('pick-mode').value;
   var backend = $('pick-backend').value;
   var language = $('pick-language').value.trim();
@@ -1075,13 +1195,17 @@ function noteQuery(format) {
     add('backend', backend);
   }
   add('language', language || 'auto');  // blank pick = auto-detect, even if a language is saved in settings
+  addContinue(add, dest);
   return params.length ? '?' + params.join('&') : '';
 }
 
-async function uploadRecording(blob, format) {
+/* `dest` (from continueDest(), or the held upload itself on a Retry) says which note
+ * this recording belongs to — never the live `continueTarget`, which is gone by the
+ * time Retry is clicked. */
+async function uploadRecording(blob, format, dest) {
   if (!blob || blob.size === 0) {
     say('nothing was recorded');
-    setTransport('ready');
+    setTransport('ready');   // ... which clears the continue state
     return;
   }
 
@@ -1089,7 +1213,7 @@ async function uploadRecording(blob, format) {
   say(processingCopy());
 
   try {
-    var data = await api('/api/note' + noteQuery(format), {
+    var data = await api('/api/note' + noteQuery(format, dest), {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
       body: blob
@@ -1098,7 +1222,10 @@ async function uploadRecording(blob, format) {
     retryDetail('');
     await showResult(data);
   } catch (e) {
-    lastUpload = { blob: blob, format: format };  // the browser holds the only copy until the daemon has it
+    if (await continueKept(e)) return;
+    // the browser holds the only copy until the daemon has it — and the only record
+    // of where it was going
+    lastUpload = heldUpload({ blob: blob, format: format }, dest);
     retryDetail(errText(e) + '.');
     say('');
   } finally {
@@ -1108,16 +1235,38 @@ async function uploadRecording(blob, format) {
 
 /* The note reply: open it on the stage exactly as the sidebar would. */
 async function showResult(data) {
-  lastNoteName = data.name || null;
+  var target = continueTarget;
+  clearContinue();                // the take landed: the next Record is a new note again
+  lastNoteName = data.name || (target ? target.name : null);
   if (!lastNoteName) {
     say('the daemon returned a note without a name — it is on disk, but cannot be opened here');
     return;
   }
   await loadNotes();
   await loadNote(lastNoteName);   // not openNote(): this take owns the stage already
+  if (data.take) focusTake(data.take);
   if (data.cleanup_error && currentNote && currentNote.name === lastNoteName) {
     say('cleanup failed — this is the raw transcript: ' + data.cleanup_error);
   }
+}
+
+/* A continue that failed *after* the take was written: audio and transcript are on
+ * disk and the reply says which take (contract F). Open the note and say what did
+ * not happen — offering Retry here would record the same take a second time. */
+async function continueKept(e) {
+  var take = (e && e.data) ? e.data.take : null;
+  if (!take || !continueTarget) return false;
+  var name = continueTarget.name;
+  clearContinue();
+  lastUpload = null;
+  retryDetail('');
+  await loadNotes();
+  await loadNote(name);
+  if (currentNote && currentNote.name === name) {
+    focusTake(take);
+    say('take ' + take + ' was saved — ' + errText(e));
+  }
+  return true;
 }
 
 /* ---------------------------------------------------------- live transcript
@@ -1229,6 +1378,7 @@ function finishQuery(sid) {
     add('backend', backend);
   }
   add('language', language || 'auto');
+  addContinue(add);
   return '?' + params.join('&');
 }
 
@@ -1257,7 +1407,7 @@ function audioCall(ctx, name) {
 async function startLive() {
   var sid;
   try {
-    var started = await postJSON('/stream/start', { language: liveLanguage() });
+    var started = await postJSON('/stream/start' + startQuery(), { language: liveLanguage() });
     sid = started && started.session_id;
     if (!sid) throw new Error('no session id');
   } catch (e) {
@@ -1328,10 +1478,12 @@ function liveNoAudio(session) {
   say('no audio is arriving from the microphone');
 }
 
-/* Best effort: drop a session we started but whose audio we no longer want.
- * /stream/cancel forgets the session and its audio; a 404 means it is gone. */
-function cancelSession(sid) {
-  api('/stream/cancel?sid=' + encodeURIComponent(sid), { method: 'POST' })
+/* Best effort: drop a session we started but no longer want. /stream/cancel forgets
+ * the session and its audio; a 404 means it is gone. With `keep` the daemon parks its
+ * PCM under failed/ instead of unlinking it — for the one caller that ends a take the
+ * daemon could still have transcribed (see stopLive's unsent path). */
+function cancelSession(sid, keep) {
+  api('/stream/cancel?sid=' + encodeURIComponent(sid) + (keep ? '&keep=1' : ''), { method: 'POST' })
     .catch(function () { /* it expires on its own */ });
 }
 
@@ -1416,7 +1568,7 @@ function liveSessionLost(session, e) {
   paintTimer();
   teardownLive(session);
   releaseStream();
-  lastUpload = { pcm: session.all };
+  lastUpload = heldUpload({ pcm: session.all });
   retryDetail('The daemon lost this live session (' + errText(e) + ').');
   say('');
   setTransport('ready');
@@ -1625,7 +1777,13 @@ async function stopLive() {
   // instead, and leave Retry pointing at the copy this tab kept.
   if (unsent) {
     var missing = Math.max(0, Math.round(recordedMs() / 1000 - (session.seconds || 0)));
-    lastUpload = { pcm: session.all };
+    lastUpload = heldUpload({ pcm: session.all });
+    // The daemon still holds this session — and with it the note, which refuses a
+    // delete or a second Continue while a session is bound to it. End it now rather
+    // than leave the note locked for the half-hour TTL, but with keep=1: the daemon
+    // parks its own PCM under failed/ exactly as an abandoned session would, so a tab
+    // closed instead of retried does not take the recording with it.
+    cancelSession(session.sid, true);
     retryDetail('The daemon did not receive the last ' + missing + ' s (' + errText(unsent) + ').');
     say('');
     setTransport('ready');
@@ -1638,11 +1796,12 @@ async function stopLive() {
     retryDetail('');
     await showResult(data);
   } catch (e) {
+    if (await continueKept(e)) return;   // the finally still hands the transport back
     var kept = (e && e.data) ? e.data.audio_kept : null;
     if (kept) {
       say(errText(e) + ' — the daemon kept the audio: ' + kept);
     } else {
-      lastUpload = { pcm: session.all };   // this tab holds the only copy left
+      lastUpload = heldUpload({ pcm: session.all });   // this tab holds the only copy left
       retryDetail(errText(e) + '.');
       say('');
     }
@@ -1656,7 +1815,8 @@ async function stopLive() {
 var allNotes = [];          // the last /api/notes payload, newest first
 var currentNote = null;     // the last /api/notes/<name> payload
 var loadedText = '';        // #note-editor as it was loaded — the dirty baseline
-var loadedTranscript = '';  // what #note-raw held when the note was loaded
+var takes = [];             // the open note's takes, as the detail payload sent them
+var loadedTakeText = {};    // n -> that take's transcript as loaded — the dirty baseline
 var titleEditable = false;  // false for a note with no "# " heading (dictation)
 var haveVersions = false;
 var viewingVersion = null;  // n while an older version is previewed, else null
@@ -1791,10 +1951,14 @@ function isDirty() {
   return $('note-editor').value !== loadedText;
 }
 
-/* The raw pane is an editor too: its text is what Regenerate will read. */
+/* The raw pane is an editor too — one per take. Any of them differing from what
+ * was loaded is text the daemon has not seen. */
 function rawDirty() {
   if (!currentNote) return false;
-  return $('note-raw').value !== loadedTranscript;
+  for (var i = 0; i < takes.length; i++) {
+    if (takeDirty(takes[i].n)) return true;
+  }
+  return false;
 }
 
 /* Returns false when the user chose to keep unsaved edits in the note editor.
@@ -1815,7 +1979,10 @@ function confirmDiscard() {
 function revertEditor() {
   if (!currentNote || viewingVersion !== null) return;
   $('note-editor').value = loadedText;
-  $('note-raw').value = loadedTranscript;
+  takes.forEach(function (t) {
+    var ta = $(takeId(t.n, 'text'));
+    if (ta) ta.value = loadedTakeText[t.n] || '';
+  });
   updateSaveState();
   updateRawSaveState();
   updateRawStatus();
@@ -1825,51 +1992,94 @@ function updateSaveState() {
   $('note-save').disabled = processing || viewingVersion !== null || !isDirty();
 }
 
-/* loadNote() repaints #note-raw from the server, so a save/restore of the *note*
- * would silently drop an unsaved transcript edit. Stash it before, put it back after. */
+/* loadNote() rebuilds the take sections from the server, so a save/restore of the
+ * *note* would silently drop unsaved transcript edits. Stash them before, put them
+ * back after — {n: text} for every dirty take, null when there are none. */
 function stashRawEdit() {
-  return rawDirty() ? $('note-raw').value : null;
+  var out = null;
+  takes.forEach(function (t) {
+    if (!takeDirty(t.n)) return;
+    if (!out) out = {};
+    out[t.n] = takeText(t.n);
+  });
+  return out;
 }
 
-function restoreRawEdit(text) {
-  if (text === null || !currentNote) return;
-  $('note-raw').value = text;
+function restoreRawEdit(edits) {
+  if (!edits || !currentNote) return;
+  takes.forEach(function (t) {
+    var ta = $(takeId(t.n, 'text'));
+    if (ta && edits[t.n] !== undefined) ta.value = edits[t.n];
+  });
   updateRawSaveState();
   updateRawStatus();
 }
 
+/* Every per-take control that a write, a preview or the note's own shape can lock. */
 function updateRawSaveState() {
-  $('note-raw-save').disabled = processing || viewingVersion !== null || !rawDirty();
+  var locked = processing || viewingVersion !== null;
+  var only = takes.length < 2;
+  var bound = !!(currentNote && currentNote.live);
+  takes.forEach(function (t) {
+    var n = t.n;
+    var save = $(takeId(n, 'save'));
+    if (save) save.disabled = locked || !takeDirty(n);
+    var rerun = $(takeId(n, 'rerun'));
+    if (rerun) rerun.disabled = locked;
+    var how = $(takeId(n, 'how'));
+    if (how) how.disabled = locked;
+    var del = $(takeId(n, 'delete'));
+    if (del) {
+      // the last take is the note's only words, and a bound session is still writing
+      del.disabled = locked || only || bound;
+      del.title = only ? 'a note keeps at least one take'
+        : (bound ? 'a recording is continuing this note' : '');
+    }
+    var text = $(takeId(n, 'text'));
+    if (text) text.readOnly = locked;
+  });
 }
 
-/* The standing marker on the raw pane's status line: whether the transcript on
- * disk is still Whisper's own words. A flash (copied/saved) puts it back after. */
+/* The standing marker in each take's header: whether that transcript on disk is
+ * still Whisper's own words. A flash (saved/an error) writes over it and puts it
+ * back after. */
 function updateRawStatus() {
-  var edited = !rawDirty() && !!(currentNote && currentNote.transcript_edited);
-  $('note-raw-status').textContent = edited ? 'edited' : '';
+  takes.forEach(function (t) {
+    var status = $(takeId(t.n, 'status'));
+    if (status) status.textContent = (!takeDirty(t.n) && t.transcript_edited) ? 'edited' : '';
+  });
 }
 
-function flashRaw(text) {
-  flash($('note-raw-status'), text);
+function flashTake(n, text) {
+  var status = $(takeId(n, 'status'));
+  if (!status) return;
+  flash(status, text);
   window.setTimeout(updateRawStatus, 2100);   // flash() blanks the line at 2 s
 }
+
+var NO_TAKES_PICKED = 'pick at least one take';
 
 function updateProcessState() {
   var have = !!(currentNote && currentNote.name);
   var previewing = viewingVersion !== null;
   var instructions = $('revise-instructions').value.trim();
   var editor = $('note-editor');
-  $('regenerate').disabled = processing || previewing || !have;
+  // Regenerate reads the ticked takes; none ticked is not a run, it is a question.
+  var noTakes = have && takes.length > 1 && !includedTakes().length;
+  $('regenerate').disabled = processing || previewing || !have || noTakes;
   $('revise').disabled = processing || previewing || !have || !instructions;
   $('regenerate-mode').disabled = processing;
   $('revise-instructions').disabled = processing;
   $('version-select').disabled = processing || !haveVersions;
   $('version-restore').disabled = processing || !previewing;
+  // Only into an empty line: this runs after every write, and an error a Re-run or a
+  // Regenerate just put there is the more useful sentence.
+  if (noTakes) { if (!$('process-status').textContent) say(NO_TAKES_PICKED); }
+  else if ($('process-status').textContent === NO_TAKES_PICKED) say('');
 
   // Single owner of the editor's read-only state: an old version on screen or a
   // write in flight both mean "what you type here would be lost".
   editor.readOnly = processing || previewing;
-  $('note-raw').readOnly = processing || previewing;
   editor.classList.toggle('viewing-old', previewing);
   setTitleEditable(titleEditable && have && !processing && !previewing);
 
@@ -1878,11 +2088,335 @@ function updateProcessState() {
 
   updateSaveState();
   updateRawSaveState();
+  updateNoteActions();
+}
+
+/* Continue and Delete: both need a note that no live session is writing to, and
+ * neither belongs to a page whose daemon is gone. */
+function updateNoteActions() {
+  var have = !!(currentNote && currentNote.name);
+  var bound = !!(currentNote && currentNote.live);
+  var busy = processing || viewingVersion !== null || takeActive();
+  var cont = $('note-continue');
+  cont.disabled = !have || busy || bound || daemonIsDown();
+  cont.title = bound ? 'a recording is already continuing this note'
+    : 'record another take into this note';
+  var del = $('note-delete');
+  del.disabled = !have || busy || bound || daemonIsDown();
+  del.title = bound ? 'a recording is continuing this note' : '';
 }
 
 function setProcessing(on) {
   processing = on;
   updateProcessState();
+}
+
+/* Takes --------------------------------------------------------------------
+ *
+ * A note is a sequence of takes (contract F) and the raw pane is one section per
+ * take. A flat note reports a single synthesized take, so there is one shape here
+ * and not two: "Transcript" is simply what one take is called.
+ */
+
+function takeId(n, part) { return 'take-' + n + '-' + part; }
+
+function takeText(n) {
+  var ta = $(takeId(n, 'text'));
+  return ta ? ta.value : '';
+}
+
+function takeDirty(n) {
+  var ta = $(takeId(n, 'text'));
+  return !!ta && ta.value !== (loadedTakeText[n] || '');
+}
+
+/* Which takes the next Regenerate reads. A note with one take has no checkbox:
+ * that take is the note. */
+function includedTakes() {
+  var out = [];
+  takes.forEach(function (t) {
+    var box = $(takeId(t.n, 'include'));
+    if (!box || box.checked) out.push(t.n);
+  });
+  return out;
+}
+
+function takeList(data) {
+  if (data.takes && data.takes.length) return data.takes;
+  // A daemon that predates takes/ (or a detail payload that lost the field): the
+  // root files *are* take 1, which is exactly what the contract synthesizes.
+  return [{
+    n: 1, created: data.created, duration_s: data.duration_s,
+    transcript: data.transcript || '', transcript_edited: !!data.transcript_edited,
+    audio_url: data.audio_url || ''
+  }];
+}
+
+function takeLabel(t, many) {
+  if (!many) return 'Transcript';
+  var bits = ['Take ' + t.n];
+  var time = fmtTime(t.created);
+  if (time) bits.push(time);
+  var duration = fmtDuration(t.duration_s);
+  if (duration) bits.push(duration);
+  return bits.join(' · ');
+}
+
+function takeButton(id, className, text, onClick) {
+  var btn = el('button', className, text);
+  btn.id = id;
+  btn.type = 'button';
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+function takeSection(t, many, data) {
+  var n = t.n;
+  var section = el('section', 'take');
+  section.dataset.take = String(n);
+
+  var head = el('div', 'take-head');
+  head.appendChild(el('span', 'micro', takeLabel(t, many)));
+  var status = el('span', 'inline-status');
+  status.id = takeId(n, 'status');
+  status.setAttribute('role', 'status');
+  head.appendChild(status);
+
+  if (many) {
+    var label = el('label', 'check');
+    var check = document.createElement('input');
+    check.type = 'checkbox';
+    check.id = takeId(n, 'include');
+    check.checked = true;
+    check.addEventListener('change', updateProcessState);
+    label.appendChild(check);
+    label.appendChild(el('span', null, 'include'));
+    head.appendChild(label);
+  }
+
+  head.appendChild(takeButton(takeId(n, 'save'), 'btn btn-primary btn-sm', 'Save',
+                              function () { saveTake(n); }));
+
+  // Re-run needs a note to run this take against; a note that was never processed
+  // has none — Regenerate is what makes one.
+  if (data.note) {
+    var how = document.createElement('select');
+    how.id = takeId(n, 'how');
+    how.setAttribute('aria-label', 'What to do with take ' + n);
+    fillHowSelect(how);
+    selectIfPresent(how, $('pick-how').value || 'continue');
+    head.appendChild(how);
+    head.appendChild(takeButton(takeId(n, 'rerun'), 'btn btn-secondary btn-sm', 'Re-run',
+                                function () { rerunTake(n); }));
+  }
+
+  head.appendChild(takeButton(takeId(n, 'delete'), 'btn btn-secondary btn-sm', 'Delete',
+                              function () { deleteTake(n); }));
+  section.appendChild(head);
+
+  var text = document.createElement('textarea');
+  text.id = takeId(n, 'text');
+  text.className = 'take-text';
+  text.spellcheck = false;
+  text.value = t.transcript || '';
+  text.setAttribute('aria-label', takeLabel(t, many));
+  text.addEventListener('input', function () {
+    updateRawSaveState();
+    updateRawStatus();
+  });
+  section.appendChild(text);
+  return section;
+}
+
+function renderTakes(data) {
+  var box = $('note-raw');
+  box.innerHTML = '';
+  takes = takeList(data);
+  loadedTakeText = {};
+  var many = takes.length > 1;
+  takes.forEach(function (t) {
+    loadedTakeText[t.n] = t.transcript || '';
+    box.appendChild(takeSection(t, many, data));
+  });
+  updateRawSaveState();
+  updateRawStatus();
+}
+
+/* One player per take with audio, labelled like its section. */
+function renderTakeAudio() {
+  var box = $('note-audio-list');
+  box.innerHTML = '';
+  var many = takes.length > 1;
+  var any = false;
+  takes.forEach(function (t) {
+    if (!t.audio_url) return;
+    any = true;
+    var wrap = el('div', 'take-audio');
+    wrap.appendChild(el('span', 'micro', takeLabel(t, many)));
+    var audio = document.createElement('audio');
+    audio.controls = true;
+    audio.preload = 'none';
+    audio.src = t.audio_url;
+    wrap.appendChild(audio);
+    box.appendChild(wrap);
+  });
+  box.hidden = !any;
+}
+
+/* After a continue: show the take that was just recorded. */
+function focusTake(n) {
+  var section = null;
+  var sections = $('note-raw').children;   // an HTMLCollection in the browser: index it
+  for (var i = 0; i < sections.length; i++) {
+    var on = sections[i].dataset.take === String(n);
+    sections[i].classList.toggle('is-current', on);
+    if (on) section = sections[i];
+  }
+  if (!section) return;
+  if (!isPhoneLayout()) setRaw(true);   // on a phone the tab strip decides, not us
+  if (typeof section.scrollIntoView === 'function') section.scrollIntoView({ block: 'nearest' });
+}
+
+/* One take's transcript -> takes/<n>/transcript.txt. Not a version: note.md is
+ * untouched, and the next Regenerate reads the edit. */
+async function saveTake(n) {
+  if (!currentNote || !currentNote.name || viewingVersion !== null || processing) return;
+  var token = noteToken();
+  var text = takeText(n);
+  var status = $(takeId(n, 'status'));
+  var saved = false;
+  setProcessing(true);
+  if (status) status.textContent = 'saving…';
+  try {
+    await putJSON('/api/notes/' + encodeURIComponent(token.name) +
+                  '/takes/' + encodeURIComponent(n) + '/transcript', { text: text });
+    if (!stillCurrent(token)) return;
+    loadedTakeText[n] = text;             // the daemon has it: nothing is pending any more
+    takes.forEach(function (t) {
+      if (t.n !== n) return;
+      t.transcript = text;
+      t.transcript_edited = true;
+    });
+    currentNote.transcript = rootJoin(text);   // keep Copy honest without a reload
+    saved = true;
+  } catch (e) {
+    if (stillCurrent(token) && status) status.textContent = errText(e);
+  } finally {
+    setProcessing(false);
+  }
+  if (saved) flashTake(n, 'saved');   // after the repaint above, which would blank it
+}
+
+/* What the daemon's transcript.txt now holds, without asking for it again: takes/ is
+ * rebuilt as the takes' *stripped* transcripts joined by a blank line, with one
+ * trailing newline (takes.rebuild_join). A flat note has no join to derive — its
+ * root transcript.txt is the take's own file, written verbatim as it was PUT
+ * (versions.write_transcript), so `saved` is what it holds. */
+function rootJoin(saved) {
+  if (takes.length < 2) return saved;
+  var parts = takes.map(function (t) { return String(t.transcript || '').trim(); })
+                   .filter(function (part) { return part; });
+  return parts.length ? parts.join('\n\n') + '\n' : '';
+}
+
+/* Regenerate reads the transcripts on disk, not the panes: save every pending edit
+ * first or it would re-run the old words. */
+async function saveDirtyTakes() {
+  var pending = takes.filter(function (t) { return takeDirty(t.n); });
+  for (var i = 0; i < pending.length; i++) {
+    await saveTake(pending[i].n);
+    if (takeDirty(pending[i].n)) return;   // that save failed and said why: stop here
+  }
+}
+
+/* Re-run take n against the *current* note -> a new version. The pre-take note is
+ * a version restore away, so nothing is rewritten (contract F). */
+async function rerunTake(n) {
+  if (!currentNote || !currentNote.name || processing || viewingVersion !== null) return;
+  if (rawDirty()) {
+    if (!window.confirm('The transcript edits are unsaved. Save them and re-run from them?')) return;
+    await saveDirtyTakes();
+    if (!currentNote || !currentNote.name || processing || rawDirty()) return;
+  }
+  if (!confirmDiscard()) return;
+  var token = noteToken();
+  var how = $(takeId(n, 'how'));
+  var body = { how: (how && how.value) || 'continue' };
+  var instructions = $('revise-instructions').value.trim();
+  if (instructions) body.instructions = instructions;
+  setProcessing(true);
+  say('re-running take ' + n + '…');
+  try {
+    var data = await postJSON('/api/notes/' + encodeURIComponent(token.name) +
+                              '/takes/' + encodeURIComponent(n) + '/rerun', body);
+    await applyProcessed(data, token);
+  } catch (e) {
+    if (stillCurrent(token)) say(errText(e));
+  } finally {
+    setProcessing(false);
+  }
+}
+
+/* Delete take n: its folder moves to the trash (contract F). note.md is untouched
+ * — the Body regenerates or edits it — so the confirm has to say so. */
+async function deleteTake(n) {
+  if (!currentNote || !currentNote.name || processing || takes.length < 2) return;
+  if (viewingVersion !== null) return;   // the editor holds an old version, not the note
+  var t = takes.filter(function (x) { return x.n === n; })[0] || { n: n };
+  var when = [fmtTime(t.created), fmtDuration(t.duration_s)].filter(Boolean).join(' · ');
+  if (!window.confirm('Delete take ' + n + (when ? ' (' + when + ')' : '') +
+      '? Its audio and transcript move to the trash folder. The note text is not touched.')) return;
+  var token = noteToken();
+  var status = $(takeId(n, 'status'));
+  setProcessing(true);
+  if (status) status.textContent = 'deleting…';
+  try {
+    await deleteJSON('/api/notes/' + encodeURIComponent(token.name) +
+                     '/takes/' + encodeURIComponent(n));
+    if (!stillCurrent(token)) return;
+    // "The note text is not touched" is what the confirm promised, so the reload below
+    // must not be the thing that touches it: both editors are stashed and put back.
+    var keepRaw = stashRawEdit();
+    var keepNote = isDirty() ? $('note-editor').value : null;
+    await loadNote(token.name);
+    await loadNotes();               // the note's duration is the sum of its takes
+    if (currentNote && currentNote.name === token.name) {
+      restoreRawEdit(keepRaw);
+      if (keepNote !== null) {
+        $('note-editor').value = keepNote;
+        updateSaveState();
+      }
+    }
+  } catch (e) {
+    if (stillCurrent(token) && status) status.textContent = errText(e);
+  } finally {
+    setProcessing(false);
+  }
+}
+
+/* Delete the note: the folder moves to <notes_dir>/trash/ — the app's first
+ * destructive action, and it is a move (VNOTE-002/003: never unlink a recording). */
+async function deleteNote() {
+  if (!currentNote || !currentNote.name || $('note-delete').disabled) return;
+  var name = currentNote.name;
+  var title = $('note-title').textContent || currentNote.title || name;
+  if (!window.confirm('Delete "' + title + '"? The whole folder moves to the trash ' +
+      'folder — nothing is erased, and you can move it back by hand.')) return;
+  var status = $('note-path-status');
+  setProcessing(true);
+  status.textContent = 'deleting…';
+  try {
+    await deleteJSON('/api/notes/' + encodeURIComponent(name));
+    await loadNotes();
+    closeNote();
+    setStage('idle');
+    resetLivePane();
+    say('moved to trash');
+  } catch (e) {
+    if (currentNote && currentNote.name === name) status.textContent = errText(e);
+  } finally {
+    setProcessing(false);
+  }
 }
 
 /* Versions -----------------------------------------------------------------
@@ -2132,14 +2666,17 @@ async function openNote(name) {
 function closeNote() {
   currentNote = null;
   loadedText = '';
-  loadedTranscript = '';
+  takes = [];
+  loadedTakeText = {};
   titleEditable = false;
   viewingVersion = null;
   haveVersions = false;
   $('note-editor').value = '';
   $('note-title').textContent = '';
   $('note-meta').innerHTML = '';
-  $('note-raw').value = '';
+  $('note-raw').innerHTML = '';
+  $('note-audio-list').innerHTML = '';
+  $('note-audio-list').hidden = true;
   $('note-warning').hidden = true;
   setProcessed(true);
   $('note-save-status').textContent = '';
@@ -2174,14 +2711,16 @@ async function loadNote(name) {
     if (gen !== noteGeneration) return;
     currentNote = null;
     loadedText = '';
-    loadedTranscript = '';
+    takes = [];
+    loadedTakeText = {};
     titleEditable = false;
     $('note-title').textContent = 'could not open ' + name;
     $('note-meta').innerHTML = '';
     $('note-meta').appendChild(el('span', null, errText(e)));
     editor.value = '';
-    $('note-raw').value = '';
-    $('note-audio').hidden = true;
+    $('note-raw').innerHTML = '';
+    $('note-audio-list').innerHTML = '';
+    $('note-audio-list').hidden = true;
     $('note-path').textContent = '';
     $('note-path').hidden = true;      // an empty bordered chip is not a path
     $('note-warning').hidden = true;
@@ -2207,9 +2746,7 @@ async function loadNote(name) {
   setProcessed(!!data.note || cleanupFailed);
 
   editor.value = loadedText;
-  loadedTranscript = transcript;
-  $('note-raw').value = transcript;
-  updateRawStatus();
+  renderTakes(data);
 
   // A note that was never processed *is* its transcript: open on that pane (PHASE10 C).
   if (!data.note && !cleanupFailed) {
@@ -2223,15 +2760,7 @@ async function loadNote(name) {
 
   renderNoteMeta(data);
 
-  var audio = $('note-audio');
-  if (data.audio_url) {
-    audio.src = data.audio_url;
-    audio.hidden = false;
-  } else {
-    audio.removeAttribute('src');
-    try { audio.load(); } catch (e) { /* ignore */ }
-    audio.hidden = true;
-  }
+  renderTakeAudio();
 
   $('note-path').textContent = data.path || '';
   $('note-path').hidden = !data.path;
@@ -2278,28 +2807,6 @@ async function saveNote() {
   }
 }
 
-/* The raw transcript the user edited -> transcript.txt. Not a version: note.md is
- * untouched, and the next Regenerate reads the edit. */
-async function saveTranscript() {
-  if (!currentNote || !currentNote.name || viewingVersion !== null || processing) return;
-  var token = noteToken();
-  var text = $('note-raw').value;
-  setProcessing(true);
-  $('note-raw-status').textContent = 'saving…';
-  try {
-    await putJSON('/api/notes/' + encodeURIComponent(token.name) + '/transcript', { text: text });
-    if (!stillCurrent(token)) return;
-    loadedTranscript = text;              // the daemon has it: nothing is pending any more
-    currentNote.transcript = text;
-    currentNote.transcript_edited = true;
-    flashRaw('saved');
-  } catch (e) {
-    if (stillCurrent(token)) $('note-raw-status').textContent = errText(e);
-  } finally {
-    setProcessing(false);
-  }
-}
-
 /* Re-process ---------------------------------------------------------------
  * Regenerate re-runs cleanup from the raw transcript; revise applies an
  * instruction to the current note. Both write a new version. */
@@ -2325,12 +2832,12 @@ async function applyProcessed(data, token) {
 
 async function regenerateNote() {
   if (!currentNote || !currentNote.name || processing || viewingVersion !== null) return;
-  // Regenerate reads transcript.txt, not the pane: an unsaved edit would be ignored,
-  // so offer to save it rather than quietly re-running the old words.
+  // Regenerate reads the transcripts on disk, not the panes: an unsaved edit would
+  // be ignored, so offer to save them rather than quietly re-running the old words.
   if (rawDirty()) {
-    if (!window.confirm('The transcript edit is unsaved. Save it and regenerate from it?')) return;
-    await saveTranscript();
-    if (!currentNote || !currentNote.name || processing || rawDirty()) return;  // the save failed; it said why
+    if (!window.confirm('The transcript edits are unsaved. Save them and regenerate from them?')) return;
+    await saveDirtyTakes();
+    if (!currentNote || !currentNote.name || processing || rawDirty()) return;  // a save failed; it said why
   }
   if (!confirmDiscard()) return;
   var token = noteToken();
@@ -2344,6 +2851,8 @@ async function regenerateNote() {
     if (backend) body.backend = backend;
     var instructions = $('revise-instructions').value.trim();
     if (instructions) body.instructions = instructions;
+    // The whole raw record stays on disk; this run reads the ticked takes only.
+    if (takes.length > 1) body.takes = includedTakes();
     var data = await postJSON(
       '/api/notes/' + encodeURIComponent(token.name) + '/reclean', body);
     await applyProcessed(data, token);
@@ -2574,6 +3083,49 @@ async function saveVocab() {
   }
 }
 
+/* Trash --------------------------------------------------------------------
+ *
+ * Deleted notes and takes are moved to <notes_dir>/trash/; the daemon never empties
+ * it and the API cannot see inside it. All Settings can do is say where it is. */
+
+function applyTrash(data) {
+  $('trash-path').textContent = data.path || '';
+  var entries = Number(data.entries || 0);
+  $('trash-status').textContent = entries + (entries === 1 ? ' item' : ' items');
+}
+
+async function loadTrash() {
+  $('trash-status').textContent = 'loading…';
+  try {
+    applyTrash(await getJSON('/api/trash'));
+  } catch (e) {
+    trashLoaded = false;   // let the next visit retry
+    $('trash-status').textContent = errText(e);
+  }
+}
+
+async function revealTrash() {
+  var btn = $('trash-reveal');
+  var status = $('trash-status');
+  btn.disabled = true;
+  status.textContent = 'opening…';
+  try {
+    // No body: the route takes none.
+    var data = await api('/api/trash/reveal', { method: 'POST' });
+    if (data.opened) {
+      applyTrash(data);          // the reply carries the same {path, entries} as /api/trash
+      flash(status, 'opened');
+      window.setTimeout(function () { applyTrash(data); }, 2100);   // flash() blanks it at 2 s
+    } else {
+      status.textContent = "couldn't open it here — the path is above";
+    }
+  } catch (e) {
+    status.textContent = errText(e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 /* Styles ------------------------------------------------------------------
  *
  * The registry lives in files (vnote/styles.py); this is the same editor shape as
@@ -2790,13 +3342,17 @@ function wire() {
   $('stop').addEventListener('click', function (ev) { ev.currentTarget.blur(); stopRecording(); });
   $('retry').addEventListener('click', function () {
     if (!lastUpload) return;
-    if (lastUpload.pcm) return uploadRecording(wavFromPcm(lastUpload.pcm), 'wav');
-    uploadRecording(lastUpload.blob, lastUpload.format);
+    var dest = lastUpload.note ? lastUpload : null;   // the note it was recorded into
+    if (lastUpload.pcm) return uploadRecording(wavFromPcm(lastUpload.pcm), 'wav', dest);
+    uploadRecording(lastUpload.blob, lastUpload.format, dest);
   });
 
+  // #pick-how is not in this list on purpose: it is the only pick that can still be
+  // changed mid-take (setTransport locks the others), so it is wired on its own.
   ['pick-mode', 'pick-backend', 'pick-language'].forEach(function (id) {
     $(id).addEventListener('change', savePicks);
   });
+  $('pick-how').addEventListener('change', savePicks);
   $('live-toggle').addEventListener('change', function () {
     savePicks();
     if (!takeActive()) setLiveView($('live-toggle').checked);
@@ -2832,15 +3388,11 @@ function wire() {
     copyText($('note-editor').value, $('note-copy-status'),
              function () { return stillCurrent(token); });
   });
-  $('note-raw').addEventListener('input', function () {
-    updateRawSaveState();
-    updateRawStatus();
-  });
-  $('note-raw-save').addEventListener('click', saveTranscript);
+  // The takes' own inputs are wired as they are built; this copies the root join.
   $('note-raw-copy').addEventListener('click', function () {
     var token = noteToken();
-    copyText($('note-raw').value, $('note-raw-status'),
-             function () { return stillCurrent(token); }, flashRaw);
+    copyText(currentNote ? (currentNote.transcript || '') : '', $('note-raw-status'),
+             function () { return stillCurrent(token); });
   });
   $('note-raw-toggle').addEventListener('click', function () {
     setRaw($('note').dataset.raw !== 'shown');
@@ -2875,10 +3427,11 @@ function wire() {
              function () { return stillCurrent(token); });
   });
   $('note-reveal').addEventListener('click', revealNote);
-
-  $('note-continue').disabled = true;   // an affordance only — no behaviour yet
+  $('note-delete').addEventListener('click', deleteNote);
+  $('note-continue').addEventListener('click', continueNote);
 
   $('settings-save').addEventListener('click', saveSettings);
+  $('trash-reveal').addEventListener('click', revealTrash);
   $('vocab-save').addEventListener('click', saveVocab);
   $('style-save').addEventListener('click', saveStyle);
   $('style-new').addEventListener('click', newStyle);
@@ -2913,6 +3466,7 @@ function init() {
   wire();
   syncSidebarToggle();
   initProcessToggle();
+  initHowPick();
   initLiveToggle();
   setStage('idle');
   setTransport('ready');

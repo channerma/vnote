@@ -451,3 +451,71 @@ def test_revise_of_a_plain_note_whose_style_is_gone_keeps_it_plain(tmp_path, mon
     (session / "note.md").write_text("# Plain\n\nbody\n", encoding="utf-8")
     result = pipeline.revise(session, revise_fn=fake_revise, instructions="shorter", backend="ollama")
     assert result.note_text.startswith("# Plain\n\n")
+
+
+# --- Phase 10 F: applying a take to the note it lands in ------------------------
+
+
+def _take_session(tmp_path, *, note="# Deploy Notes\n\nStep one.\n", mode="light"):
+    d = tmp_path / "2026-08-25-0900-takes"
+    d.mkdir(parents=True)
+    (d / "note.md").write_text(note, encoding="utf-8")
+    (d / "transcript.txt").write_text("first words\n", encoding="utf-8")
+    (d / "meta.json").write_text(json.dumps({"title": "Deploy Notes", "cleanup_mode": mode}),
+                                 encoding="utf-8")
+    return d
+
+
+def _merger(title, body="the merged note"):
+    def merge_fn(note_text, new_transcript, mode="edit", backend=None, model=None, instructions=None):
+        return CleanResult(title=title, body=body)
+
+    return merge_fn
+
+
+def test_a_plain_style_merge_keeps_the_notes_own_title(tmp_path, monkeypatch):
+    """`output: plain` has no TITLE line to parse, so CleanResult.title is the take's
+    first few words — it must not become the note's title."""
+    monkeypatch.setattr(output, "NOTES_DIR", tmp_path)
+    d = _take_session(tmp_path, note="just the body, no heading\n", mode="email")  # email is plain
+
+    result = pipeline.rerun_take(
+        d, 1, clean_fn=_cleaner(), continue_fn=lambda *a, **k: "x",
+        merge_fn=_merger("first words of the new take"), how="merge", mode="email",
+    )
+
+    assert result["title"] == "Deploy Notes"  # the meta title, not the model's fallback
+    assert versions.read_meta(d)["title"] == "Deploy Notes"
+    assert (d / "note.md").read_text(encoding="utf-8") == "the merged note\n"  # still headless
+
+
+def test_a_note_style_merge_takes_the_models_title(tmp_path, monkeypatch):
+    monkeypatch.setattr(output, "NOTES_DIR", tmp_path)
+    d = _take_session(tmp_path)
+    result = pipeline.rerun_take(
+        d, 1, clean_fn=_cleaner(), continue_fn=lambda *a, **k: "x",
+        merge_fn=_merger("A Better Title"), how="merge", mode="light",
+    )
+    assert result["title"] == "A Better Title"
+    assert (d / "note.md").read_text(encoding="utf-8") == "# A Better Title\n\nthe merged note\n"
+
+
+def test_an_append_does_not_stack_a_second_rule(tmp_path, monkeypatch):
+    """A note that already ends in `---` would otherwise grow `---\\n\\n---` per take."""
+    monkeypatch.setattr(output, "NOTES_DIR", tmp_path)
+    d = _take_session(tmp_path, note="# Deploy Notes\n\nStep one.\n\n---\n")
+
+    result = pipeline.rerun_take(
+        d, 1, clean_fn=_cleaner(), continue_fn=lambda *a, **k: "the continuation",
+        merge_fn=_merger("x"), how="continue", mode="light",
+    )
+    assert result["note"] == "# Deploy Notes\n\nStep one.\n\n---\n\nthe continuation\n"
+    assert "---\n\n---" not in result["note"]
+
+    # the ordinary case still gets its rule
+    d2 = _take_session(tmp_path / "plain-end")
+    result = pipeline.rerun_take(
+        d2, 1, clean_fn=_cleaner(), continue_fn=lambda *a, **k: "the continuation",
+        merge_fn=_merger("x"), how="continue", mode="light",
+    )
+    assert result["note"] == "# Deploy Notes\n\nStep one.\n\n---\n\nthe continuation\n"

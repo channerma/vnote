@@ -118,6 +118,24 @@ quiet "not processed" line and the Regenerate controls ready, so you can fix the
 first and process it when you like. Your style pick is remembered and is what Regenerate
 offers. Like the other picks, the toggle is per browser.
 
+**Continue recording** (the button beside the version picker on an open note): records
+another **take** into that note instead of making a new one. The stage becomes a recording
+exactly as Record does — a strip above it says which note you are continuing — and a **How**
+pick decides what the daemon does with the new take on Stop:
+
+| How | What the model sees | What happens to the note |
+|---|---|---|
+| **continue** (default) | the note as read-only context plus the new transcript; it writes only the continuation | appended under a `---` rule |
+| **append** | the new take's transcript alone | appended under a `---` rule |
+| **merge** | the note and the new transcript together | the whole note rewritten |
+
+Either way the take is its own folder — `takes/2/audio.wav` and `takes/2/transcript.txt` —
+and the result is a new note version, so the note before the take is one **Restore** away.
+Continuing a note that was never processed just adds a raw take; nothing is cleaned. The
+How pick is remembered per browser like the other picks, and can still be changed while the
+take is running. Only one recording can be bound to a note at a time: the button says so
+while another tab (or the tray) is already continuing it.
+
 **Live transcript** (the "Live transcript" toggle, on by default where the browser supports
 it): the words appear as you speak. Settled text stays put — you can select and copy it
 mid-sentence, while paused, and while the daemon is processing after Stop — and the last
@@ -140,14 +158,27 @@ one to:
 
 - **Read and edit** the processed note (it's Markdown in a plain editor) and **Save** —
   every save is a new version.
-- **Play** the audio (seeking works), **Copy** the note, unfold the raw transcript.
-- **Edit the raw transcript** and **Save transcript** — mishearings, names, a sentence you
-  want the model to see differently. The pane says "edited" once you have saved an edit,
-  and Whisper's own output is kept as `transcript.original.txt` the first
-  time you save (written once, never overwritten). The next **Regenerate** reads your
-  edit. Saving a transcript is not a note version: `note.md` is untouched.
+- **Play** the audio (seeking works) — one player per take — **Copy** the note, unfold the
+  raw transcript.
+- **Edit the raw transcript** and **Save** — mishearings, names, a sentence you want the
+  model to see differently. The raw pane is one section per take (a note you never continued
+  has exactly one, called simply "Transcript"; the others are headed `Take 2 · 14:44 · 2:40`),
+  each with its own textarea and Save. A section says "edited" once you have saved an edit
+  there, and Whisper's own output is kept as `transcript.original.txt` beside it the first
+  time you save (written once, never overwritten). The next **Regenerate** reads your edit.
+  Saving a transcript is not a note version: `note.md` is untouched.
+- **Re-run** a take (the *how* pick beside it, then **Re-run**): the same three choices as
+  Continue, applied to the note as it stands now — a new version, so nothing is lost. Use it
+  when `append` should have been `merge`. To get back to the note as it was before that
+  take, restore the version below it in the list instead.
+- **Delete take** — its audio and transcript move to the trash folder and the joined
+  transcript and duration are rebuilt. `note.md` is *not* touched (regenerate or edit it
+  yourself), take numbers keep their gaps so the version history stays true, and the last
+  remaining take cannot be deleted.
 - **Regenerate** it from the raw transcript in another style — the same thing as
-  `vnote --redo` — or **Revise** the note as it stands. Both read the one
+  `vnote --redo` — or **Revise** the note as it stands. With more than one take, the
+  **include** checkboxes decide which takes that run reads (at least one); the takes
+  themselves are never touched, only this run's input. Both read the one
   **Instructions** box ("make it shorter", "turn the second half into a checklist"):
   Regenerate appends it to the cleanup prompt, Revise applies it to the current note.
 - Pick an older **version** from the dropdown to read it, and **Restore** it (which is
@@ -159,6 +190,10 @@ one to:
   `edit` until you pick another.
 - **Open folder** (best-effort: Explorer from WSL, `xdg-open` on Linux, `open` on macOS),
   with the path shown and copyable as the fallback.
+- **Delete note** — after a confirm naming it, the whole folder *moves* to
+  `voice-notes/trash/<note>/`. Nothing is erased and no recording is ever unlinked: restore
+  a note by moving its folder back. A note a recording is currently continuing cannot be
+  deleted until that take ends.
 
 ### Settings
 
@@ -183,12 +218,17 @@ asks for a file name and seeds the front matter, **Duplicate** copies the open o
 could not read — a folder that will not open, a file with a bad `output:` — is listed
 above the editor and skipped, never fatal.
 
+The **Trash** block at the bottom names `voice-notes/trash/` and how many folders are in
+it, with **Open folder**. Deleted notes and takes are moved there and vnote never empties
+it — that is your call. Restoring is a folder move; the API cannot see inside it.
+
 ### Restyling the page
 
 `vnote/web/index.html` is markup only — no JavaScript. `vnote/web/app.js` finds its
-elements by id (the full list is the comment at the top of that file) and drives the
-look through a few data attributes (`data-view`, `data-state`, `data-live`, `data-raw`,
-`data-daemon`) that the CSS reacts to. The shipped page is the Claude Design handoff
+elements by id (the full list is the comment at the top of that file — including the
+per-take ids it builds at runtime) and drives the look through a few data attributes
+(`data-view`, `data-state`, `data-live`, `data-raw`, `data-daemon`, `data-continue`)
+that the CSS reacts to. The shipped page is the Claude Design handoff
 recorded under `docs/design/handoff/` (layout "stage + drawer"; `HANDOFF.md` there is
 the design spec), minus its web-font import — the page makes no external requests. Any
 page that keeps the ids and attributes can replace it as is.
@@ -401,25 +441,34 @@ What the page talks to; handy for scripts too. JSON unless noted; errors are non
 | `PUT /api/styles/<name>` | `{"text": …}` → 201 (created) or 200 (updated) `{saved, path}` — always written to *your* folder; 400 on a bad name or a file that will not parse |
 | `DELETE /api/styles/<name>` | 204 — your own files only; 403 for a built-in or another folder's, 404 if unknown |
 | `GET /api/notes` | newest-first `{"notes": [{name, title, created, duration_s, mode, backend, has_audio, has_note}]}` |
-| `GET /api/notes/<name>` | the same fields plus `meta`, `note`, `transcript`, `transcript_edited`, `style_missing`, `audio_url`, `path`, `versions` |
-| `GET /api/notes/<name>/audio` | the audio file (`Range` supported) |
+| `GET /api/notes/<name>` | the same fields plus `meta`, `note`, `transcript`, `transcript_edited`, `style_missing`, `audio_url`, `path`, `versions`, `takes: [{n, created, duration_s, transcript, transcript_edited, audio_url}]` and `live` (a recording is being continued into it right now). A note with one take reports it from its root files |
+| `GET /api/notes/<name>/audio` | the audio file (`Range` supported) — after the note has takes, the earliest take's |
+| `GET /api/notes/<name>/takes/<n>/audio` | that take's audio (`Range` supported) |
 | `POST /api/note?format=webm&mode=…&backend=…&language=…&raw=0` | body = audio bytes → a finished note: `{name, title, note, transcript, meta, cleanup_error}`. `mode` is a style name; omit `backend` (or send it blank) to let the style decide |
-| `POST /api/notes/<name>/reclean` | `{mode, backend?, model?, instructions?}` → `{title, note, version}` — regenerate from the transcript; `mode` is a style name |
+| `POST /api/note?continue=<name>&how=continue\|append\|merge` | the same upload, but as the next **take** of an existing note (see `/stream/finish` below for what `how` does) |
+| `POST /api/notes/<name>/reclean` | `{mode, backend?, model?, instructions?, takes?}` → `{title, note, version}` — regenerate from the transcript; `mode` is a style name. `takes: [n, …]` regenerates from those takes' transcripts only (non-empty; the version entry records them) |
+| `POST /api/notes/<name>/takes/<n>/rerun` | `{how, mode?, backend?, model?, instructions?}` → `{title, note, version, take}` — apply that take to the note *as it stands now*, as a new version; 400 when the note has never been cleaned (regenerate instead) |
+| `PUT /api/notes/<name>/takes/<n>/transcript` | `{"text": …}` → `{transcript, transcript_edited}` — edit one take's transcript; keeps its `transcript.original.txt` once and rebuilds the note's joined `transcript.txt`. On a one-take note this is the note-level route |
+| `DELETE /api/notes/<name>/takes/<n>` | → `{name, take, trashed}` — the take **moves** to `<notes_dir>/trash/<name>.takes/take-<n>/` (its own namespace, never inside a trashed note of the same name); the join and the duration are rebuilt, `note.md` is untouched and the remaining take numbers keep their gaps. 409 on the note's last take, or while a recording is being continued into it |
+| `DELETE /api/notes/<name>` | → `{name, trashed}` — the whole folder **moves** to `<notes_dir>/trash/<name>/`. 409 while a recording is being continued into it |
+| `GET /api/trash` · `POST /api/trash/reveal` | `{path, entries}` — where the trash is and how many folders are in it; reveal opens it in the file manager (`{opened, path, entries}`) |
 | `POST /api/notes/<name>/revise` | `{instructions, backend?, model?}` → `{title, note, version}` — apply an instruction to the current note |
 | `PUT /api/notes/<name>/note` | `{"text": …}` → `{version, title, note}` — save a manual edit |
-| `PUT /api/notes/<name>/transcript` | `{"text": …}` → `{transcript, transcript_edited}` — rewrite `transcript.txt` (what Regenerate reads); the first write keeps Whisper's output as `transcript.original.txt`. Not a version. Empty text is allowed |
+| `PUT /api/notes/<name>/transcript` | `{"text": …}` → `{transcript, transcript_edited}` — rewrite `transcript.txt` (what Regenerate reads); the first write keeps Whisper's output as `transcript.original.txt`. Not a version. Empty text is allowed. 409 once the note has takes: its `transcript.txt` is derived from them, so edit a take's instead |
 | `GET /api/notes/<name>/versions/<n>` | `{n, text, created, op, mode, backend, model, instructions, restored_from}` |
 | `POST /api/notes/<name>/restore` | `{"n": …}` → `{title, note, version}` — restores that version as a new one |
 | `POST /api/notes/<name>/reveal` | open the folder in the OS file manager (best-effort) → `{opened, path}` |
 | `POST /transcribe` | JSON `{audio_path, language?}` (shared filesystem) or the audio as an `application/octet-stream` body with `?format=` → `{transcript, meta}` |
 | `POST /clean` | `{transcript, mode?, backend?, model?, tone?, instructions?}` → `{title, body}` — `mode` is a style name |
 | `POST /revise` | `{note, instructions, backend?, model?}` → `{title, body}` |
-| `POST /stream/start` | `{language?}` → `{session_id}` — opens a live session; the daemon keeps the audio |
+| `POST /stream/start` | `{language?}` → `{session_id, note}` — opens a live session; the daemon keeps the audio |
+| `POST /stream/start?continue=<name>` | the same, bound to that note: the recording becomes its next take, and the note refuses a delete while the session lives. 404 if there is no such note; 409 if one is already being recorded into it (one live take per note) |
 | `POST /stream/append?sid=` | body = raw s16le 16 kHz mono PCM → `{partial, committed, tail, seconds}`, at once: a per-session worker transcribes the uncommitted tail and commits it at a silence boundary (or after 30 s), so the request never waits on the GPU |
 | `POST /stream/ping?sid=` | `{ok: true}` — keeps a paused session alive (sessions expire 30 min after the last touch; an abandoned one's audio lands in `failed/live-*.wav`) |
-| `POST /stream/cancel?sid=` | drop a live session and its audio (the user backed out) → `{cancelled: true}` |
+| `POST /stream/cancel?sid=&keep=0\|1` | drop a live session → `{cancelled: true}`. Its audio goes with it (the user backed out); with `keep=1` the recording is parked in `failed/live-*.wav` first and the reply carries `audio_kept` — for a page dropping a session whose recording it has not saved yet. A recording under half a second is dropped either way |
 | `POST /stream/finish?sid=` | → `{transcript, meta, live_transcript}` — one full pass over the whole recording (authoritative), with the live text alongside for comparison |
 | `POST /stream/finish?sid=&note=1&mode=…&backend=…&model=…&language=…&raw=0` | the daemon-held audio → a finished note folder: the `/api/note` payload plus `live_transcript` (no second upload on stop) |
+| `POST /stream/finish?sid=&note=1&continue=<name>&how=continue\|append\|merge` | the audio becomes take *n* of that note (`takes/<n>/`), then: **continue** (default) — the note is read-only context and the model writes only what carries it on, appended under a `---`; **append** — the new transcript is cleaned on its own and appended the same way; **merge** — the whole note is rewritten with the new material worked in. The reply is the note's detail payload plus `take` and `live_transcript`; the version entry records `{op, how, take}`. The style is `mode` if given, else the note's own, else the default. A raw note (or `raw=1`) keeps the take and cleans nothing. A cleanup that fails *after* the take is written answers 500 with `take` — the recording is already safe in the take folder |
 
 ---
 
@@ -434,7 +483,11 @@ vnote --setup              # re-run the interactive first-run setup
 - **Config:** `~/.config/vnote/config.json` (`$XDG_CONFIG_HOME/vnote/config.json`)
 - **Vocabulary:** `~/.config/vnote/vocab.txt`
 - **Your styles:** `~/.config/vnote/styles/*.md`
-- **Notes:** `./voice-notes/` (or `VNOTE_DIR`)
+- **Notes:** `./voice-notes/` (or `VNOTE_DIR`) — one folder per note; a note that has been
+  continued keeps each recording in `takes/<n>/` and its root `transcript.txt` is their join
+- **Trash:** `./voice-notes/trash/` — deleted notes (`trash/<name>/`) and takes
+  (`trash/<name>.takes/take-<n>/`) are *moved* here, never unlinked. vnote never empties it: that
+  is your call. The API cannot see inside it, and restoring is a folder move back
 - **Whisper model cache:** `~/.cache/huggingface`
 
 ---

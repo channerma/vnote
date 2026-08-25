@@ -296,6 +296,81 @@ def test_revise_ollama_uses_the_note_model(monkeypatch):
     assert rec["model"] == "big:14b"
 
 
+# --- continue / merge (Phase 10 F: a new take against an existing note) --------
+
+
+def test_continue_note_forbids_the_title_line_and_shows_the_note_as_context(monkeypatch):
+    rec = _record_complete(monkeypatch)
+
+    body = cleanup.continue_note("# Deploy Notes\n\nStep one.", "and then step two",
+                                 mode="summary", backend="ollama")
+
+    assert "no title line" in rec["system"] and "TITLE:" not in rec["system"]
+    assert "never repeat it" in rec["system"].lower()
+    assert styles.get("summary").body in rec["user"]  # the style is still the editing instruction
+    assert "# Deploy Notes" in rec["user"] and "and then step two" in rec["user"]
+    assert "context only" in rec["user"]
+    assert body == "body"  # the reply is the continuation itself, not a titled note
+
+
+def test_continue_note_drops_the_framings_a_model_reaches_for(monkeypatch):
+    """The prompt forbids all three; appending any of them verbatim breaks the note."""
+    replies = iter([
+        "TITLE: A New Title\n---\nthe continuation",       # the ordinary cleanup contract
+        "```markdown\nthe continuation\n```",               # a fence around the whole answer
+        "# A New Heading\n\nthe continuation",              # a heading of its own
+        "```\n# A New Heading\n\nthe continuation\n```",   # both at once
+        "   \n",                                            # nothing usable at all
+    ])
+
+    def fake(backend, system, user, model):
+        return next(replies)
+
+    monkeypatch.setattr(cleanup, "_complete", fake)
+    for _ in range(4):
+        assert cleanup.continue_note("# T\n\nbody", "more words", mode="edit") == "the continuation"
+    assert cleanup.continue_note("# T\n\nbody", "more words", mode="edit") == "more words"
+
+
+def test_continue_note_resolves_the_backend_and_model_like_clean(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    styles.write("housestyle", "---\nbackend: claude-code\nmodel: tiny:1b\n---\nDo it.")
+    rec = _record_complete(monkeypatch)
+
+    cleanup.continue_note("# T\n\nbody", "more", mode="housestyle")
+    assert (rec["backend"], rec["model"]) == ("claude-code", "tiny:1b")
+    cleanup.merge_note("# T\n\nbody", "more", mode="housestyle", backend="ollama", model="big:14b")
+    assert (rec["backend"], rec["model"]) == ("ollama", "big:14b")  # an explicit pick still wins
+    styles._invalidate()
+
+
+def test_merge_note_keeps_the_title_contract_and_sees_both_texts(monkeypatch):
+    rec = _record_complete(monkeypatch)
+
+    result = cleanup.merge_note("# Deploy Notes\n\nStep one.", "and then step two",
+                                mode="summary", instructions="keep it tight")
+
+    assert "TITLE:" in rec["system"] and "merg" in rec["system"].lower()
+    assert "# Deploy Notes" in rec["user"] and "and then step two" in rec["user"]
+    assert "keep it tight" in rec["user"]
+    assert (result.title, result.body) == ("T", "body")  # the whole note, title and all
+
+
+def test_a_plain_style_keeps_its_plain_contract_in_both(monkeypatch):
+    rec = _record_complete(monkeypatch)
+    cleanup.continue_note("plain body", "more", mode="dictation")
+    assert "no title line" in rec["system"]
+    result = cleanup.merge_note("plain body", "more", mode="dictation")
+    assert "no title line" in rec["system"] and result.body == "TITLE: T\n---\nbody"
+
+
+def test_continue_and_merge_reject_an_unknown_style():
+    with pytest.raises(ValueError, match="unknown style"):
+        cleanup.continue_note("# T\n\nbody", "more", mode="gone")
+    with pytest.raises(ValueError, match="unknown style"):
+        cleanup.merge_note("# T\n\nbody", "more", mode="gone")
+
+
 # --- the Ollama HTTP payloads (no network: urlopen is faked) --------------------
 
 

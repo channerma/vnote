@@ -15,12 +15,14 @@
   every runtime value below is filled by app.js.
 
   State is CSS-driven from the attributes app.js sets:
-    <div class="app" data-view="note|settings" [data-daemon="down"] [data-sidebar="collapsed"]>
+    <div class="app" data-view="note|settings" [data-daemon="down"] [data-sidebar="collapsed"]
+         [data-continue="yes"]>                    a take is being recorded into a note
     <section id="view-note" data-state="idle|recording|paused|processing|note"
              data-live="on|off" [data-starting="true"] [data-retry="true"]>
     <article id="note" class="note" data-raw="shown|hidden">
     <aside id="sidebar" [data-open="true"]>        off-canvas below 860px
-  Plus `hidden` on #mic-help, #retry-wrap, #note-warning and #notes-empty / #notes-list.
+  Plus `hidden` on #mic-help, #retry-wrap, #note-warning, the audio list and
+  #notes-empty / #notes-list.
 -->
 
 <div class="app" id="app" data-view="note">
@@ -84,6 +86,15 @@
       <div class="progress" aria-hidden="true"><span></span></div>
       <p id="process-status" role="status"></p>
 
+      <!-- only while this take is being recorded into an open note (data-continue) -->
+      <div id="continue-bar">
+        <span id="continue-target"></span>
+        <p class="field">
+          <label for="pick-how">How</label>
+          <select id="pick-how"></select>
+        </p>
+      </div>
+
       <!-- idle: the invitation and the per-recording picks -->
       <div class="idle">
         <h1>Ready when you are.</h1>
@@ -140,7 +151,7 @@
           <div class="note-head-actions">
             <select id="version-select" aria-label="Version"></select>
             <button id="version-restore" class="btn btn-secondary btn-sm" type="button">Restore</button>
-            <button id="note-continue" class="btn btn-pending btn-sm" type="button" disabled title="Coming: appends more audio to this note">
+            <button id="note-continue" class="btn btn-secondary btn-sm" type="button">
               <span class="rec-dot" aria-hidden="true"></span><span>Continue recording</span>
             </button>
           </div>
@@ -177,11 +188,12 @@
             <div class="pane-head">
               <span class="micro">Raw transcript</span>
               <span id="note-raw-status" class="inline-status" role="status"></span>
-              <button id="note-raw-save" class="btn btn-primary btn-sm" type="button">Save transcript</button>
               <button id="note-raw-copy" class="btn btn-secondary btn-sm" type="button">Copy</button>
               <button id="note-raw-toggle" class="link-btn accent" type="button">Hide</button>
             </div>
-            <textarea id="note-raw" class="pane-text" spellcheck="false" aria-label="Raw transcript"></textarea>
+            <!-- one .take section per take, built by app.js: header, textarea, Save /
+                 include / Re-run / Delete. A flat note has exactly one. -->
+            <div id="note-raw" class="pane-text"></div>
           </div>
         </div>
 
@@ -201,10 +213,12 @@
             <button id="revise" class="btn btn-primary" type="button">Revise note</button>
           </div>
           <div class="artefacts">
-            <audio id="note-audio" controls preload="none"></audio>
+            <!-- one labelled <audio> per take, built by app.js -->
+            <div id="note-audio-list" hidden></div>
             <code id="note-path"></code>
             <button id="note-path-copy" class="btn btn-secondary btn-sm" type="button">Copy path</button>
             <button id="note-reveal" class="link-btn accent" type="button">Open folder</button>
+            <button id="note-delete" class="link-btn accent" type="button">Delete note</button>
             <span id="note-path-status" class="inline-status" role="status"></span>
           </div>
         </footer>
@@ -261,6 +275,18 @@
               <textarea id="style-text" spellcheck="false" aria-label="Style file"></textarea>
             </div>
           </div>
+        </div>
+
+        <hr class="rule" />
+
+        <div class="trash-block">
+          <div class="vocab-head">
+            <h2>Trash</h2>
+            <span id="trash-status" class="inline-status" role="status"></span>
+            <button id="trash-reveal" class="btn btn-secondary btn-sm" type="button">Open folder</button>
+          </div>
+          <p class="hint">Deleted notes and takes are <em>moved</em> here, never erased. vnote never empties it — drag a folder back to restore it, or delete it yourself when you are sure.</p>
+          <code id="trash-path"></code>
         </div>
       </div>
     </section>

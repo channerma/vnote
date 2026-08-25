@@ -78,6 +78,7 @@ class LiveSession:
         language: str | None,
         transcribe_pcm,
         vad,
+        note_name: str | None = None,
         spill_dir: Path | str | None = None,
         silence_s: float = 0.8,
         max_tail_s: float = 30.0,
@@ -85,6 +86,9 @@ class LiveSession:
     ) -> None:
         self.sid = sid
         self.language = language
+        # Set when the session is a Continue: this recording becomes a take of that
+        # note, and the note may not be deleted while the session lives.
+        self.note_name = note_name
         self.transcribe_pcm = transcribe_pcm  # (pcm, language) -> (text, meta)
         self.vad = vad  # (pcm) -> [(start_s, end_s), ...]
         self.silence_s = silence_s
@@ -279,6 +283,10 @@ class LiveSession:
                     self._wake.set()
 
 
+class NoteBusy(RuntimeError):
+    """A live session is already recording into that note (one live take per note)."""
+
+
 class Registry:
     """The daemon's live-session table; the TTL is enforced on every touch."""
 
@@ -290,13 +298,35 @@ class Registry:
         self.sessions: dict[str, LiveSession] = {}
         self._lock = threading.Lock()
 
-    def start(self, language: str | None = None) -> LiveSession:
+    def start(self, language: str | None = None, note_name: str | None = None) -> LiveSession:
+        """Open a session. With ``note_name``: NoteBusy if one is already bound to that note.
+
+        The check and the insert happen under the one lock — two tabs pressing Continue
+        at the same moment would otherwise both pass a separate check and each add a
+        take to a note the other is still recording into.
+        """
         self.sweep()
         sid = uuid.uuid4().hex
-        session = LiveSession(sid, language=language, transcribe_pcm=self.transcribe_pcm, vad=self.vad)
         with self._lock:
+            if note_name is not None and self._bound(note_name):
+                raise NoteBusy(f"a recording is already going into {note_name}")
+            session = LiveSession(sid, language=language, note_name=note_name,
+                                  transcribe_pcm=self.transcribe_pcm, vad=self.vad)
             self.sessions[sid] = session
         return session
+
+    def _bound(self, name: str) -> bool:  # callers hold self._lock
+        return any(s.note_name == name for s in self.sessions.values())
+
+    def bound(self, name: str) -> bool:
+        """Is a live session recording into note ``name``? Deletes are refused while it is.
+
+        Sweeps first, so a session whose browser vanished stops blocking the note as
+        soon as its TTL is up rather than until the next request happens to sweep.
+        """
+        self.sweep()
+        with self._lock:
+            return self._bound(name)
 
     def get(self, sid: str) -> LiveSession | None:
         self.sweep()

@@ -57,6 +57,43 @@ _REVISE_SYSTEM = (
 )
 
 
+# The note carries on from where it stopped: the take that follows the note is new
+# dictation, and everything already written is context the model must not repeat.
+_CONTINUE_SYSTEM = (
+    "You continue a note that is being dictated in several sittings. The note so far is "
+    "read-only context: never repeat it, summarize it, re-title it or rewrite any of it. "
+    "A new stretch of the same dictation follows; turn *that* into the text that carries the "
+    "note on, in the same voice, structure and conventions the note already uses. "
+    "The transcript may contain spoken meta-instructions about formatting or edits — follow them "
+    "and do not include them as literal text.\n\n"
+    "Respond with the continuation and nothing else — no title line, no preamble, no code fences, "
+    "no repetition of the note you were given."
+)
+
+_MERGE_SYSTEM = (
+    "You are an editor merging new dictation into an existing note. The note was written from "
+    "earlier dictation by the same speaker, who has now recorded more. Produce the *whole* note "
+    "again with the new material worked in where it belongs; keep the existing structure, voice "
+    "and wording wherever the new material does not change them. The transcript may contain "
+    "spoken meta-instructions about formatting or edits — follow them and do not include them as "
+    "literal text. Output GitHub-flavored Markdown.\n\n"
+    "Respond in exactly this format and nothing else:\n"
+    "TITLE: <keep the existing title unless the new material changes it>\n"
+    "---\n"
+    "<the merged note>"
+)
+
+
+def _author_instructions(instructions: str | None) -> str:
+    """The free-text "make it longer" clause, or '' — the same wording in every prompt."""
+    if not instructions or not instructions.strip():
+        return ""
+    return (
+        "\n\nAdditional instructions from the author (follow them; they take precedence "
+        f"over the defaults above): {instructions.strip()}"
+    )
+
+
 def _build_user_prompt(
     transcript: str, style: Style, tone: str | None = None, instructions: str | None = None
 ) -> str:
@@ -64,12 +101,25 @@ def _build_user_prompt(
     if tone:
         instruction += f" Write in a {tone} tone."
     prompt = f"{instruction}\n\nTRANSCRIPT:\n\"\"\"\n{transcript}\n\"\"\""
-    if instructions and instructions.strip():
-        prompt += (
-            "\n\nAdditional instructions from the author (follow them; they take precedence "
-            f"over the defaults above): {instructions.strip()}"
-        )
-    return prompt
+    return prompt + _author_instructions(instructions)
+
+
+def _build_continue_prompt(note_text: str, transcript: str, style: Style, instructions: str | None) -> str:
+    prompt = (
+        f"{style.body}\n\n"
+        f"THE NOTE SO FAR (context only — do not repeat or rewrite it):\n\"\"\"\n{note_text}\n\"\"\"\n\n"
+        f"NEW TRANSCRIPT (turn only this into the continuation):\n\"\"\"\n{transcript}\n\"\"\""
+    )
+    return prompt + _author_instructions(instructions)
+
+
+def _build_merge_prompt(note_text: str, transcript: str, style: Style, instructions: str | None) -> str:
+    prompt = (
+        f"{style.body}\n\n"
+        f"THE NOTE SO FAR:\n\"\"\"\n{note_text}\n\"\"\"\n\n"
+        f"NEW TRANSCRIPT (work this into the note):\n\"\"\"\n{transcript}\n\"\"\""
+    )
+    return prompt + _author_instructions(instructions)
 
 
 def _build_revise_prompt(note_text: str, instructions: str) -> str:
@@ -141,9 +191,7 @@ def clean(
     name now (styles.py). ``backend``/``model`` are the explicit picks: leave them
     None and the style's own lines apply, then the settings.
     """
-    style = styles.get(mode)
-    if style is None:
-        raise ValueError(f"unknown style: {mode!r} (expected one of {', '.join(styles.names())})")
+    style = _style_or_die(mode)
     raw = _complete(
         backend or style.backend or config.backend(),
         _system_for(style),
@@ -151,6 +199,86 @@ def clean(
         model or style.model,
     )
     return _finish(raw, transcript, style)
+
+
+def _strip_fence(text: str) -> str:
+    """Drop a ``` fence the model wrapped the whole answer in (its content is not code)."""
+    m = re.fullmatch(r"```[A-Za-z0-9_+-]*[ \t]*\n(.*?)\n?```", text.strip(), re.DOTALL)
+    return m.group(1).strip() if m else text.strip()
+
+
+def _continuation_only(raw: str, transcript: str) -> str:
+    """A continuation reply reduced to the text itself.
+
+    The prompt forbids all three, but models still reach for the shapes they were
+    trained on: a code fence around the answer, the TITLE/--- framing of the ordinary
+    cleanup contract, or a ``# heading``. Any of them appended verbatim would break
+    the note it is being added to.
+    """
+    text = _strip_fence(raw)
+    if re.match(r"\s*TITLE:", text):
+        text = _parse_response(text, transcript).body
+    if re.match(r"\s*#[ \t]+", text):  # a heading belongs to the note, not to a continuation
+        text = _split_heading(text)[1]
+    return text.strip() or transcript.strip()
+
+
+def _style_or_die(mode: str | None) -> Style:
+    style = styles.get(mode)
+    if style is None:
+        raise ValueError(f"unknown style: {mode!r} (expected one of {', '.join(styles.names())})")
+    return style
+
+
+def continue_note(
+    note_text: str,
+    new_transcript: str,
+    *,
+    mode: str = config.DEFAULT_STYLE,
+    backend: str | None = None,
+    model: str | None = None,
+    instructions: str | None = None,
+) -> str:
+    """The *continuation* of an existing note from a new take — body text only.
+
+    The note is context the model may not touch: what comes back is appended under a
+    bare ``---``, so there is no TITLE line to parse and the note keeps its title.
+    Backend/model resolve exactly as in :func:`clean` (explicit > style > setting).
+    """
+    style = _style_or_die(mode)
+    raw = _complete(
+        backend or style.backend or config.backend(),
+        # A plain-output style already forbids the title line; a note-output one needs
+        # to be told, since its usual contract demands one.
+        _CONTINUE_SYSTEM if style.output != "plain" else _PLAIN_SYSTEM,
+        _build_continue_prompt(note_text, new_transcript, style, instructions),
+        model or style.model,
+    )
+    return _continuation_only(raw, new_transcript)
+
+
+def merge_note(
+    note_text: str,
+    new_transcript: str,
+    *,
+    mode: str = config.DEFAULT_STYLE,
+    backend: str | None = None,
+    model: str | None = None,
+    instructions: str | None = None,
+) -> CleanResult:
+    """Rewrite the whole note with a new take's transcript worked into it.
+
+    Same TITLE/--- contract as :func:`clean` (and the same plain-output exception),
+    because the result replaces the note rather than being appended to it.
+    """
+    style = _style_or_die(mode)
+    raw = _complete(
+        backend or style.backend or config.backend(),
+        _MERGE_SYSTEM if style.output != "plain" else _PLAIN_SYSTEM,
+        _build_merge_prompt(note_text, new_transcript, style, instructions),
+        model or style.model,
+    )
+    return _finish(raw, new_transcript, style)
 
 
 def revise(

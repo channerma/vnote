@@ -110,6 +110,10 @@ Each note is a folder `voice-notes/YYYY-MM-DD-HHMM-<slug>/`:
 | `note.md` | the cleaned note — the thing you keep |
 | `meta.json` | model, durations, language, timestamps |
 | `versions/note-<n>.md` | every version of the note (the current one included) — edits, regenerations, revisions — restorable from the web UI |
+| `takes/<n>/` | once you continue a recording into the note, each take's own `audio.*` + `transcript.txt` (+ `transcript.original.txt`); the root `transcript.txt` becomes their join, rebuilt whenever a take is added, edited or deleted |
+
+Deleting a note or a take **moves** it to `voice-notes/trash/` — nothing is ever unlinked.
+vnote never empties the trash; that is your call, and restoring is a folder move back.
 
 ## Learn more
 

@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import __version__, config, output, stream, styles, versions
+from . import __version__, config, output, stream, styles, takes, versions
 from .audio import BYTES_PER_S, wav_bytes
 
 _infer_lock = threading.Lock()
@@ -149,6 +149,29 @@ def _keep_live_audio(pcm: bytes, sid: str) -> Path | None:
         return None
 
 
+def _cancel_keeping(session: stream.LiveSession) -> str | None:
+    """Close a cancelled session but park its recording in ``failed/`` first.
+
+    Returns where the WAV went, or None when there was nothing worth keeping (the same
+    ``_MIN_KEEP_PCM`` floor the TTL sweep uses). The spill is unlinked only once the
+    copy exists — never the other way round.
+    """
+    pcm_path = session.close(keep_audio=True)
+    try:
+        pcm = pcm_path.read_bytes() if pcm_path is not None else b""
+    except OSError:
+        return None
+    if len(pcm) < _MIN_KEEP_PCM:
+        if pcm_path is not None:
+            pcm_path.unlink(missing_ok=True)  # too short to be a take: the same as a plain cancel
+        return None
+    dest = _keep_live_audio(pcm, session.sid)
+    if dest is None:
+        return str(pcm_path)  # failed/ could not be written: the spill *is* the recording
+    pcm_path.unlink(missing_ok=True)
+    return str(dest)
+
+
 def _save_abandoned(session: stream.LiveSession) -> None:
     """A session that expired mid-recording still holds the only copy of that audio."""
     try:
@@ -229,10 +252,13 @@ def _session_path(name: str) -> Path | None:
 
 
 def _audio_file(session: Path) -> Path | None:
-    for p in sorted(session.glob("audio.*")):
-        if p.is_file() and p.suffix.lower() in _AUDIO_TYPES:
-            return p
-    return None
+    """The note's audio: the root file, or — once it has takes — the earliest take's.
+
+    The fallback is what keeps the pre-takes ``/audio`` route (and every page that
+    calls it) working after a note has been migrated into ``takes/``.
+    """
+    found = takes.audio_file(session)
+    return found if found is not None else takes.first_take_audio(session)
 
 
 def _read_text(path: Path) -> str | None:
@@ -304,7 +330,37 @@ def _note_detail(session: Path) -> dict:
         "audio_url": f"/api/notes/{session.name}/audio" if audio else None,
         "path": str(session),  # the page shows it (with a Copy button) next to the reveal action
         "versions": versions.entries(session),
+        "takes": [_take_payload(session, t) for t in takes.list_takes(session)],
+        "live": _registry.bound(session.name),  # a Continue is recording into it right now
     }
+
+
+def _take_payload(session: Path, entry: dict) -> dict:
+    """One row of the detail payload's ``takes``: the contract's fields, nothing else."""
+    n = entry["n"]
+    multi = takes.is_multi(session)
+    folder = takes.take_dir(session, n) if multi else session
+    audio = takes.take_audio(session, n)
+    if audio is None:
+        url = None
+    elif multi:
+        url = f"/api/notes/{session.name}/takes/{n}/audio"
+    else:
+        url = f"/api/notes/{session.name}/audio"  # a flat note: the route that already existed
+    return {
+        "n": n,
+        "created": entry.get("created"),
+        "duration_s": entry.get("duration_s"),
+        "transcript": takes.take_transcript(session, n),
+        # the kept copy of Whisper's output is the whole record of an edit, per take
+        "transcript_edited": (folder / "transcript.original.txt").is_file(),
+        "audio_url": url,
+    }
+
+
+def _trash_payload() -> dict:
+    """Where the trash is and how much is in it — the daemon never empties it."""
+    return {"path": str(takes.trash_dir()), "entries": takes.trash_entries()}
 
 
 def _reveal(path: Path) -> bool:
@@ -390,6 +446,73 @@ def _note_options(query: dict[str, list[str]]) -> tuple[str, str | None, str | N
     if backend is not None and backend not in config.setting("backend").choices:
         raise _BadRequest(f"bad backend: {backend!r}")
     return mode, backend, _one(query, "model"), raw
+
+
+_HOWS = ("continue", "append", "merge")  # pipeline.HOWS, without importing it at startup
+
+
+def _continue_style(session: Path, picked: str | None, default: str) -> str:
+    """The style a Continue runs with: the caller's pick > the note's own > the default."""
+    if picked:
+        return picked
+    saved = _read_meta(session).get("cleanup_mode")
+    return saved if saved and styles.get(saved) is not None else default
+
+
+def _how(query_value: str | None) -> str:
+    how = query_value or "continue"
+    if how not in _HOWS:
+        raise _BadRequest(f"bad how: {how!r} (one of {', '.join(_HOWS)})")
+    return how
+
+
+def _continue_from_audio(tmp: Path, session: Path, *, how: str, mode: str, backend: str | None,
+                         model: str | None, language: str | None, raw: bool, instructions: str | None,
+                         extra: dict) -> tuple[int, dict]:
+    """``tmp`` → the next take of ``session``, applied to its note → ``(status, payload)``.
+
+    Shared by /api/note?continue= and /stream/finish?continue=, and the same promise as
+    :func:`_note_from_audio`: ``tmp`` never survives the call. Once the take is on disk
+    the recording is safe, so a failing cleanup answers 500 with ``take`` and points
+    ``audio_kept`` at the take's own audio instead of spilling a second copy.
+    """
+    from . import cleanup, pipeline, transcribe
+
+    def locked_transcribe(path: Path, language: str | None = None):
+        with _infer_lock:  # guards the GPU model only
+            return transcribe.transcribe(path, language=language)
+
+    try:
+        try:
+            result = pipeline.continue_take(
+                session, audio_tmp=tmp, transcribe_fn=locked_transcribe, clean_fn=cleanup.clean,
+                continue_fn=cleanup.continue_note, merge_fn=cleanup.merge_note, how=how, mode=mode,
+                backend=backend, model=model, language=language, raw=raw, instructions=instructions,
+            )
+        except pipeline.EmptyTranscriptError:
+            return 400, {"error": "no speech detected"}
+        except pipeline.TakeCleanupError as exc:  # the take is on disk; only the note is unchanged
+            return 500, {"error": str(exc), "take": exc.take,
+                         "audio_kept": str(exc.audio_path) if exc.audio_path else None, **extra}
+        except Exception as exc:  # noqa: BLE001 - the upload is the only copy of the recording: keep it
+            kept = _preserve_upload(tmp)
+            return 500, {"error": f"{type(exc).__name__}: {exc}", "audio_kept": str(kept) if kept else None}
+        return 200, {**_note_detail(session), "take": result["take"], **extra}
+    finally:
+        tmp.unlink(missing_ok=True)  # the take folder (or failed/) holds its own copy now
+
+
+def _wav_tmp(pcm: bytes) -> Path:
+    """The daemon-held PCM as a temp WAV file — whoever takes it owns unlinking it."""
+    fd, name = tempfile.mkstemp(prefix="vnote-live-", suffix=".wav")
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(wav_bytes(pcm))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return tmp
 
 
 def _note_from_audio(tmp: Path, *, mode: str, backend: str | None, model: str | None, language: str | None,
@@ -573,6 +696,17 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._send(404, {"error": str(exc)})
                 entry = next((e for e in versions.entries(session) if e.get("n") == n), {})
                 return self._send(200, {**entry, "n": n, "text": text})
+            m = re.fullmatch(r"/api/notes/([^/]+)/takes/(\d+)/audio", path)
+            if m:
+                session = _session_path(m.group(1))
+                if session is None:
+                    return self._send(404, {"error": f"no such note: {m.group(1)}"})
+                audio = takes.take_audio(session, int(m.group(2)))
+                if audio is None:
+                    return self._send(404, {"error": f"no audio for take {m.group(2)}"})
+                return self._send_file(audio, _AUDIO_TYPES.get(audio.suffix.lower(), "application/octet-stream"))
+            if path == "/api/trash":
+                return self._send(200, _trash_payload())
             m = re.fullmatch(r"/api/notes/([^/]+)(/audio)?", path)
             if m:
                 session = _session_path(m.group(1))
@@ -607,6 +741,9 @@ class _Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/notes/([^/]+)/transcript", path)
             if m:
                 return self._api_save_transcript(m.group(1))
+            m = re.fullmatch(r"/api/notes/([^/]+)/takes/(\d+)/transcript", path)
+            if m:
+                return self._api_save_transcript(m.group(1), int(m.group(2)))
             m = re.fullmatch(r"/api/styles/([^/]+)", path)
             if m:
                 return self._api_save_style(unquote(m.group(1)))
@@ -624,7 +761,7 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
 
-    # --- DELETE (styles) ---
+    # --- DELETE (styles, takes, notes) ---
 
     def do_DELETE(self) -> None:
         if self._cross_site():
@@ -634,6 +771,12 @@ class _Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/styles/([^/]+)", path)
             if m:
                 return self._api_delete_style(unquote(m.group(1)))
+            m = re.fullmatch(r"/api/notes/([^/]+)/takes/(\d+)", path)
+            if m:
+                return self._api_delete_take(m.group(1), int(m.group(2)))
+            m = re.fullmatch(r"/api/notes/([^/]+)", path)
+            if m:
+                return self._api_delete_note(m.group(1))
             self._send(404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001
             self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
@@ -677,7 +820,18 @@ class _Handler(BaseHTTPRequestHandler):
         fmt = (_one(query, "format") or "webm").lower()
         if not _FORMAT_RE.fullmatch(fmt):
             return self._send(400, {"error": f"bad format: {fmt!r}"})
+        # ?continue=<name>: this recording is another take of an existing note, not a new one.
+        cont_name = _one(query, "continue")
+        cont = None
+        how = "continue"
+        if cont_name is not None:
+            cont = _session_path(cont_name)
+            if cont is None:
+                return self._send(404, {"error": f"no such note: {cont_name}"})
+            how = _how(_one(query, "how"))
         mode, backend, model, raw = _note_options(query)
+        if cont is not None:
+            mode = _continue_style(cont, _one(query, "mode"), mode)
         language = _one(query, "language") or config.language()
         if language and language.lower() == "auto":  # the page's way to override a saved language
             language = None
@@ -690,6 +844,10 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
+        if cont is not None:
+            return self._send(*_continue_from_audio(tmp, cont, how=how, mode=mode, backend=backend,
+                                                    model=model, language=language, raw=raw,
+                                                    instructions=_one(query, "instructions"), extra={}))
         self._send(*_note_from_audio(tmp, mode=mode, backend=backend, model=model, language=language,
                                      raw=raw, source="web", extra={}))
 
@@ -706,12 +864,13 @@ class _Handler(BaseHTTPRequestHandler):
         result = pipeline.save_edit(session, text)
         self._send(200, {"version": result.version, "title": result.title, "note": result.note_text})
 
-    def _api_save_transcript(self, name: str) -> None:
+    def _api_save_transcript(self, name: str, take: int | None = None) -> None:
         """PUT the raw transcript the user edited; Regenerate reads it from here on.
 
         Not a version: ``note.md`` is untouched. Empty text is allowed (clearing the
         pane is a legitimate edit), and Whisper's own output is kept once — see
-        :func:`versions.write_transcript`.
+        :func:`versions.write_transcript`. With ``take`` it is that take's transcript
+        that is replaced, and the note's joined one is rebuilt from the takes.
         """
         session = _session_path(name)
         if session is None:
@@ -719,8 +878,84 @@ class _Handler(BaseHTTPRequestHandler):
         text = self._read_json().get("text")
         if not isinstance(text, str):
             return self._send(400, {"error": "body must be {\"text\": \"...\"}"})
-        versions.write_transcript(session, text)
+        if take is None:
+            if takes.is_multi(session):
+                # the root transcript is derived from the takes now: writing it here would
+                # be silently undone by the next rebuild (and mint a bogus kept "original")
+                return self._send(409, {"error": "this note has takes: edit a take's transcript instead"})
+            versions.write_transcript(session, text)
+        else:
+            try:
+                takes.write_take_transcript(session, take, text)
+            except FileNotFoundError as exc:
+                return self._send(404, {"error": str(exc)})
         self._send(200, {"transcript": text, "transcript_edited": True})
+
+    def _api_delete_note(self, name: str) -> None:
+        """DELETE a note: its folder *moves* into ``<notes_dir>/trash/`` (nothing is unlinked)."""
+        session = _session_path(name)
+        if session is None:
+            return self._send(404, {"error": f"no such note: {name}"})
+        if _registry.bound(name):  # a Continue is recording into it: its take would land nowhere
+            return self._send(409, {"error": "a recording is still going into this note"})
+        try:
+            dest = takes.trash_note(session)
+        except OSError as exc:
+            return self._send(500, {"error": f"could not move the note to the trash: {exc}"})
+        self._send(200, {"name": name, "trashed": str(dest)})
+
+    def _api_delete_take(self, name: str, n: int) -> None:
+        """DELETE one take: it moves into ``trash/<note>/take-<n>/``; ``note.md`` is untouched."""
+        session = _session_path(name)
+        if session is None:
+            return self._send(404, {"error": f"no such note: {name}"})
+        if _registry.bound(name):
+            return self._send(409, {"error": "a recording is still going into this note"})
+        try:
+            dest = takes.delete_take(session, n)
+        except FileNotFoundError as exc:
+            return self._send(404, {"error": str(exc)})
+        except ValueError as exc:  # the last take: Delete note is the action for that
+            return self._send(409, {"error": str(exc)})
+        except OSError as exc:
+            return self._send(500, {"error": f"could not move the take to the trash: {exc}"})
+        self._send(200, {"name": name, "take": n, "trashed": str(dest)})
+
+    def _api_rerun_take(self, name: str, n: int) -> None:
+        """Apply an existing take to the *current* note again — a new version."""
+        session = _session_path(name)
+        if session is None:
+            return self._send(404, {"error": f"no such note: {name}"})
+        data = self._read_json()
+        try:
+            how = _how(data.get("how"))
+        except _BadRequest as exc:
+            return self._send(400, {"error": str(exc)})
+        picked = data.get("mode") or None
+        if picked is not None and styles.get(picked) is None:
+            return self._send(400, {"error": str(_bad_style(picked))})
+        mode = _continue_style(session, picked, config.default_style())
+        backend = data.get("backend") or None
+        if backend is not None and backend not in config.setting("backend").choices:
+            return self._send(400, {"error": f"bad backend: {backend!r}"})
+        from . import cleanup, pipeline
+
+        try:
+            result = pipeline.rerun_take(
+                session, n, clean_fn=cleanup.clean, continue_fn=cleanup.continue_note,
+                merge_fn=cleanup.merge_note, how=how, mode=mode, backend=backend,
+                model=data.get("model"), instructions=data.get("instructions"),
+            )
+        except FileNotFoundError as exc:
+            return self._send(404, {"error": str(exc)})
+        except pipeline.EmptyTranscriptError as exc:
+            return self._send(400, {"error": str(exc)})
+        except ValueError as exc:  # the note has never been cleaned: Regenerate is the action
+            return self._send(400, {"error": str(exc)})
+        except pipeline.TakeCleanupError as exc:  # the take is untouched; only the model failed
+            return self._send(500, {"error": str(exc), "take": exc.take})
+        self._send(200, {"title": result["title"], "note": result["note"],
+                         "version": result["version"], "take": result["take"]})
 
     def _api_save_style(self, name: str) -> None:
         """PUT a style file into Mine — a new one, or the override copy of a built-in."""
@@ -803,11 +1038,18 @@ class _Handler(BaseHTTPRequestHandler):
         backend = data.get("backend") or None  # blank = the style's backend, then the setting
         if backend is not None and backend not in config.setting("backend").choices:
             return self._send(400, {"error": f"bad backend: {backend!r}"})
+        picked = data.get("takes")
+        if picked is not None:
+            if not (isinstance(picked, list) and picked and all(
+                    isinstance(v, int) and not isinstance(v, bool) for v in picked)):
+                return self._send(400, {"error": "takes must be a non-empty list of take numbers"})
+            picked = sorted(set(picked))  # the raw record is a sequence: duplicates and order mean nothing
         from . import cleanup, pipeline
 
         try:
             result = pipeline.reclean(session, clean_fn=cleanup.clean, mode=mode, backend=backend,
-                                      model=data.get("model"), instructions=data.get("instructions"))
+                                      model=data.get("model"), instructions=data.get("instructions"),
+                                      only_takes=picked)
         except FileNotFoundError as exc:
             return self._send(404, {"error": str(exc)})
         except pipeline.EmptyTranscriptError:
@@ -838,9 +1080,31 @@ class _Handler(BaseHTTPRequestHandler):
         query = parse_qs(url.query)
         want_note = (_one(query, "note") or "0").lower() in ("1", "true", "yes")
         mode = backend = model = None
+        how = "continue"
         raw = False
+        # ?continue=<name>: the recording becomes the next take of that note. Validated
+        # here, while the session is still alive — a 400/404 must leave it running.
+        cont_name = _one(query, "continue")
+        cont = None
+        if cont_name is not None:
+            cont = _session_path(cont_name)
+            if cont is None:
+                return self._send(404, {"error": f"no such note: {cont_name}"})
+        elif sess.note_name:
+            cont = _session_path(sess.note_name)
+            if cont is None:
+                # the note was trashed (or renamed) while this session recorded. The audio
+                # is the only thing that matters: keep it as a note of its own rather than
+                # 404-ing every Stop from a session that can never resolve again.
+                print(f"  live session {sid}: note {sess.note_name} is gone; saving a new note",
+                      flush=True)
+        if cont is not None:
+            how = _how(_one(query, "how"))
+            want_note = True
         if want_note:
             mode, backend, model, raw = _note_options(query)  # a bad mode/backend: 400, session intact
+            if cont is not None:
+                mode = _continue_style(cont, _one(query, "mode"), mode)
         language = _one(query, "language") or sess.language or config.language()
         if language and language.lower() == "auto":
             language = None
@@ -854,16 +1118,13 @@ class _Handler(BaseHTTPRequestHandler):
                 pcm_path.unlink(missing_ok=True)
             return self._send(400, {"error": "no audio received"})
         try:
-            if want_note:
-                fd, name = tempfile.mkstemp(prefix="vnote-live-", suffix=".wav")
-                tmp = Path(name)
-                try:
-                    with os.fdopen(fd, "wb") as f:
-                        f.write(wav_bytes(pcm))
-                except Exception:
-                    tmp.unlink(missing_ok=True)
-                    raise
-                status, payload = _note_from_audio(tmp, mode=mode, backend=backend, model=model,
+            if cont is not None:
+                status, payload = _continue_from_audio(_wav_tmp(pcm), cont, how=how, mode=mode,
+                                                       backend=backend, model=model, language=language,
+                                                       raw=raw, instructions=_one(query, "instructions"),
+                                                       extra={"live_transcript": live})
+            elif want_note:
+                status, payload = _note_from_audio(_wav_tmp(pcm), mode=mode, backend=backend, model=model,
                                                    language=language, raw=raw, source="web-live",
                                                    extra={"live_transcript": live})
             else:
@@ -888,8 +1149,15 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             url = urlparse(self.path)
             note_route = re.fullmatch(r"/api/notes/([^/]+)/(reclean|revise|restore|reveal)", url.path)
+            rerun_route = re.fullmatch(r"/api/notes/([^/]+)/takes/(\d+)/rerun", url.path)
             if url.path == "/api/note":
                 return self._api_note(parse_qs(url.query))
+            elif rerun_route:
+                return self._api_rerun_take(rerun_route.group(1), int(rerun_route.group(2)))
+            elif url.path == "/api/trash/reveal":
+                trash = takes.trash_dir()
+                return self._send(200, {"opened": _reveal(trash) if trash.is_dir() else False,
+                                        **_trash_payload()})
             elif note_route:
                 handler = {"reclean": self._api_reclean, "revise": self._api_revise,
                            "restore": self._api_restore, "reveal": self._api_reveal}[note_route.group(2)]
@@ -938,7 +1206,19 @@ class _Handler(BaseHTTPRequestHandler):
                 language = str(data.get("language") or "").strip()
                 if not language or language.lower() == "auto":  # same rule as finish and /api/note
                     language = None
-                self._send(200, {"session_id": _registry.start(language).sid})
+                # ?continue=<name> binds the session to a note: the page's Continue. The note
+                # is refused a delete for as long as this session lives (_registry.bound).
+                note_name = _one(parse_qs(url.query), "continue")
+                if note_name is not None and _session_path(note_name) is None:
+                    return self._send(404, {"error": f"no such note: {note_name}"})
+                try:
+                    # One note, one live take — the check is inside start(), under the
+                    # registry's lock: two tabs pressing Continue together would each pass
+                    # a separate check out here and both bind.
+                    session = _registry.start(language, note_name)
+                except stream.NoteBusy:
+                    return self._send(409, {"error": "a recording is already going into this note"})
+                self._send(200, {"session_id": session.sid, "note": note_name})
             elif url.path == "/stream/ping":
                 found = self._stream_session(url)
                 if found is None:
@@ -952,12 +1232,20 @@ class _Handler(BaseHTTPRequestHandler):
                 n = self._body_len()
                 self._send(200, found[1].append(self.rfile.read(n) if n else b""))
             elif url.path == "/stream/cancel":
-                sid = (parse_qs(url.query).get("sid") or [""])[0]
+                query = parse_qs(url.query)
+                sid = (query.get("sid") or [""])[0]
+                keep = (_one(query, "keep") or "0").lower() in ("1", "true", "yes")
                 sess = _registry.pop(sid)
                 if sess is None:
                     return self._send(404, {"error": f"unknown stream session: {sid!r}"})
-                sess.close(keep_audio=False)  # the user backed out: drop the session and its audio
-                self._send(200, {"cancelled": True})
+                if not keep:
+                    sess.close(keep_audio=False)  # the user backed out: drop the session and its audio
+                    return self._send(200, {"cancelled": True})
+                # ?keep=1: the page is dropping a session whose recording it still holds a
+                # Retry for (a failed Stop). Closing it must not take the audio with it —
+                # a tab closed instead of retried used to lose the take, since a cancelled
+                # session never reaches the TTL sweep that parks an abandoned one.
+                self._send(200, {"cancelled": True, "audio_kept": _cancel_keeping(sess)})
             elif url.path == "/stream/finish":
                 self._stream_finish(url)
             else:

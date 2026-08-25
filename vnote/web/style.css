@@ -211,6 +211,14 @@ input[type=checkbox] { accent-color:var(--accent); width:15px; height:15px; marg
    warning, a reprocess result. It is hidden per state above — show it in any state
    whenever it actually has something to say. */
 [data-state] #process-status:not(:empty) { display:block; }
+/* the continue strip: which note this take is going into, and what to do with it.
+   It rides above the stage in every state, because the pick is read on Stop. */
+#continue-bar { display:none; }
+.app[data-continue="yes"] #continue-bar {
+  display:flex; align-items:flex-end; gap:18px; flex-wrap:wrap;
+  padding:12px 26px; border-bottom:1px solid var(--line); background:var(--panel);
+}
+#continue-target { font-size:13.5px; font-weight:600; }
 @media (prefers-reduced-motion: reduce) {
   .progress > span { animation:none; width:100%; opacity:.4; }
   .topbar .dot { animation:none !important; }
@@ -270,10 +278,24 @@ input[type=checkbox] { accent-color:var(--accent); width:15px; height:15px; marg
    status span that follows the .micro label — both panes push from there */
 .pane-head .micro + .inline-status { margin-left:auto; }
 .pane-raw .pane-head .micro + .btn { margin-left:auto; }
-/* both panes are plain textareas: the note's Markdown and the raw transcript */
+/* the note pane is a plain textarea; the raw pane is a column of take sections */
 .pane-text { flex:1; min-height:0; width:100%; resize:none; border:0; overflow-y:auto; overflow-wrap:break-word; }
 #note-editor { background:var(--bg); padding:24px 22px; font:400 16.5px/1.72 var(--font); color:var(--text); }
-#note-raw { background:var(--panel); padding:18px; font:400 12.5px/1.72 var(--mono); color:var(--dim); }
+#note-raw { background:var(--panel); display:flex; flex-direction:column; }
+/* grow: one take has to fill the pane, and several share it (the textarea inside
+   each grows with its section) */
+.take { flex:1 0 auto; display:flex; flex-direction:column; min-height:140px; border-bottom:1px solid var(--line); }
+.take:last-child { border-bottom:0; }
+.take.is-current { box-shadow:inset 3px 0 0 var(--accent); }
+.take-head { flex:0 0 auto; display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 16px; }
+.take-head .micro + .inline-status { margin-left:auto; }
+.take-head select { font-family:var(--mono); font-size:11.5px; }
+.take-text {
+  flex:1; min-height:120px; width:100%; resize:none; border:0; overflow-y:auto; overflow-wrap:break-word;
+  background:var(--panel); padding:0 16px 14px; font:400 12.5px/1.72 var(--mono); color:var(--dim);
+}
+.take-audio { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.take-audio audio { height:34px; width:340px; max-width:100%; }
 #note-editor.viewing-old { color:var(--dim); }
 .note[data-raw="hidden"] .pane-raw { display:none; }
 
@@ -289,7 +311,7 @@ input[type=checkbox] { accent-color:var(--accent); width:15px; height:15px; marg
 .note-foot { flex:0 0 auto; border-top:2px solid var(--rule); background:var(--panel); padding:14px 22px; display:flex; flex-direction:column; gap:12px; }
 .reprocess { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
 .artefacts { display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding-top:12px; border-top:1px solid var(--line); }
-#note-audio { height:34px; width:340px; max-width:100%; }
+#note-audio-list { display:flex; flex-direction:column; gap:8px; }
 #note-path { border:1px solid var(--line); padding:5px 8px; font-size:11.5px; color:var(--dim); }
 
 /* — settings ——————————————————————————————————————————— */
@@ -354,7 +376,8 @@ table.settings td select, table.settings td input { width:100%; }
   .pane-note { flex:0 0 auto; border-right:0; border-bottom:2px solid var(--rule); min-height:340px; }
   .pane-raw { flex:0 0 auto; max-width:none; }
   #note-editor { min-height:280px; }
-  #note-raw { max-height:240px; }
+  /* the drawer scrolls as one, so a note with many takes does not push the page down */
+  #note-raw { max-height:320px; overflow-y:auto; }
   .note-head, .note-foot { position:static; }
 }
 @media (max-width:860px) {

@@ -16,9 +16,11 @@ function eq(a, b, name) { ok(JSON.stringify(a) === JSON.stringify(b), name, { go
 
 /* ------------------------------------------------------------------ fake DOM */
 
+const scrolledInto = [];   // what focusTake() asked to be brought into view
+
 class El {
   constructor(tag) {
-    this.tagName = tag; this.id = ''; this.children = []; this.parentNode = null;
+    this.tagName = tag; this._id = ''; this.children = []; this.parentNode = null;
     this._text = ''; this.hidden = false; this.disabled = false; this.value = '';
     this.checked = false; this.title = ''; this.dataset = {}; this.style = {};
     this.listeners = {}; this.readOnly = false; this.spellcheck = false;
@@ -29,6 +31,10 @@ class El {
       toggle: (c, on) => (on ? set.add(c) : set.delete(c)), contains: c => set.has(c)
     };
   }
+  // app.js builds the take sections at runtime and finds their controls by id, so an
+  // id registers the element the way appending it to a real document would
+  get id() { return this._id; }
+  set id(v) { this._id = String(v); if (this._id) byId[this._id] = this; }
   get childNodes() { return this.children; }
   // a <select> reaches the options inside its <optgroup>s too
   get options() {
@@ -42,7 +48,9 @@ class El {
   }
   set textContent(v) { this.children.length = 0; this._text = String(v); }
   get innerHTML() { return ''; }
-  set innerHTML(v) { this.children.length = 0; this._text = ''; }
+  // clearing a container drops its ids too, as taking the nodes out of a document does
+  set innerHTML(v) { this.children.forEach(c => c._unregister()); this.children.length = 0; this._text = ''; }
+  _unregister() { if (this._id && byId[this._id] === this) delete byId[this._id]; this.children.forEach(c => c._unregister()); }
   appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
   removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); c.parentNode = null; return c; }
   setAttribute(k, v) { this[k] = v; }
@@ -55,6 +63,7 @@ class El {
   querySelector() { return new El('div'); }
   querySelectorAll() { return []; }
   select() {} setSelectionRange() {} load() {} blur() {} removeAttribute(k) { delete this[k]; }
+  scrollIntoView() { scrolledInto.push(this.dataset.take !== undefined ? 'take ' + this.dataset.take : this.id); }
 }
 
 // the markup, minus the explanatory comments (which name ids too)
@@ -257,9 +266,19 @@ const NOTES = [
   { name: 'n2', title: 'Standup notes', created: iso(0, 9, 58), duration_s: 182, mode: 'summary' },
   { name: 'n3', title: 'Older thing', created: iso(8, 16, 47), duration_s: 269, mode: null }
 ];
+// PHASE10 F: the detail payload carries takes, and a flat note reports one of them.
+const oneTake = (extra) => Object.assign({
+  n: 1, created: iso(0, 14, 12), duration_s: 401, transcript: 'raw words here',
+  transcript_edited: false, audio_url: '/api/notes/n1/audio'
+}, extra || {});
+const twoTakes = () => [
+  oneTake({ duration_s: 241, transcript: 'first take words' }),
+  { n: 2, created: iso(0, 14, 44), duration_s: 160, transcript: 'second take words',
+    transcript_edited: false, audio_url: '/api/notes/n1/takes/2/audio' }
+];
 let noteDetail = () => ({
   name: 'n1', title: 'A note', created: iso(0, 14, 12), duration_s: 401,
-  mode: 'edit', backend: 'ollama',
+  mode: 'edit', backend: 'ollama', live: false, takes: [oneTake()],
   note: '# A note\n\nthe body', transcript: 'raw words here',
   meta: {
     whisper_model: 'large-v3-turbo', language: 'en', cleanup_mode: 'edit',
@@ -315,23 +334,59 @@ function baseRoutes() {
                                      warm: true, ollama: 'ready' } }),
     '/api/settings': async () => ({ body: { settings: [] } }),
     '/api/note': async () => ({ body: NOTE }),
-    '/stream/start': async () => ({ body: { session_id: 'SID1' } }),
+    '/stream/start': async (url) => ({ body: { session_id: 'SID1',
+                                              note: (/[?&]continue=([^&]*)/.exec(url) || [])[1] || null } }),
     '/stream/append': async () => {
       if (appendHang) return new Promise(() => {});   // never answers: the timeout must
       return appendFail ? { status: appendStatus, body: { error: 'boom' } } : { body: appendReply };
     },
     '/stream/ping': async () => ({ body: { ok: true } }),
-    '/stream/cancel': async () => ({ body: { cancelled: true } }),
+    // keep=1: the daemon parks its own PCM under failed/ instead of unlinking it
+    '/stream/cancel': async (url) => ({ body: /[?&]keep=1\b/.test(url)
+      ? { cancelled: true, audio_kept: '/x/voice-notes/failed/live-1755.wav' }
+      : { cancelled: true } }),
     '/stream/finish': async () => ({ body: NOTE }),
     '/api/notes': async () => ({ body: { notes: NOTES } }),
-    '/api/notes/n1': async () => ({ body: noteDetail() }),
+    '/api/notes/n1': async (url, opts) => {
+      if (opts && opts.method === 'DELETE') { deletedNote = 'n1'; return { body: { name: 'n1', trashed: '/x/voice-notes/trash/n1' } }; }
+      return { body: noteDetail() };
+    },
     '/api/notes/n1/note': async () => ({ body: { version: 3 } }),
     '/api/notes/n1/versions/1': async () => ({ body: { text: '# A note\n\nv1 body' } }),
     '/api/notes/n1/restore': async () => ({ body: { version: 4 } }),
     '/api/notes/n1/revise': async () => ({ body: { title: 'A note', note: '# A note\n\nshorter', version: 3 } }),
     '/api/vocab': async () => ({ body: { text: 'vnote\nollama' } }),
+    '/api/trash': async () => ({ body: { path: '/x/voice-notes/trash', entries: 3 } }),
+    '/api/trash/reveal': async () => ({ body: { opened: true, path: '/x/voice-notes/trash', entries: 3 } }),
+    ...takeRoutes(),
     ...styleRoutes()
   };
+}
+
+/* PHASE10 F's per-take routes, for takes 1 and 2 of n1. */
+let putTake = null;        // {n, text} of the last per-take transcript PUT
+let lastRerun = null;      // {n, body} of the last re-run
+let deletedTake = null;
+let deletedNote = null;
+
+function takeRoutes() {
+  const out = {};
+  [1, 2].forEach(n => {
+    out['/api/notes/n1/takes/' + n + '/transcript'] = async (url, opts) => {
+      putTake = { n, text: JSON.parse(opts.body).text };
+      return { body: { transcript: putTake.text, transcript_edited: true } };
+    };
+    out['/api/notes/n1/takes/' + n + '/rerun'] = async (url, opts) => {
+      lastRerun = { n, body: JSON.parse(opts.body) };
+      return { body: { title: 'A note', note: '# A note\n\ncontinued', version: 6 } };
+    };
+    out['/api/notes/n1/takes/' + n] = async (url, opts) => {
+      if (!opts || opts.method !== 'DELETE') return { status: 405, body: { error: 'method' } };
+      deletedTake = n;
+      return { body: { name: 'n1', take: n, trashed: '/x/voice-notes/trash/n1/take-' + n } };
+    };
+  });
+  return out;
 }
 
 function feed(bytes) { workletPort.onmessage({ data: new Uint8Array(bytes).buffer }); }
@@ -497,7 +552,7 @@ const appendCalls = () => calls.filter(c => c.url.startsWith('/stream/append'));
   ok(state() === 'note', 'the finished note took the stage', state());
   ok($('note-editor').value === '# A note\n\nthe body', 'the note is open on the stage', $('note-editor').value);
   ok($('note-title').textContent === 'A note', 'title from the "# " heading', $('note-title').textContent);
-  ok($('note-raw').value === 'raw words here', 'raw transcript in the drawer');
+  ok($('take-1-text').value === 'raw words here', 'raw transcript in the drawer');
   ok($('note').dataset.raw === 'shown', 'the raw drawer starts open');
   ok(!!calls.find(c => c.url === '/api/notes/n1'), 'the note was opened the way the sidebar opens it');
   ok(rows().length === 3, 'the sidebar was refreshed', rows().length);
@@ -673,6 +728,10 @@ const appendCalls = () => calls.filter(c => c.url.startsWith('/stream/append'));
      'the missing seconds are named', $('retry-detail').textContent);
   ok($('retry-wrap').hidden === false, 'Retry offered');
   ok(!!G.lastUpload && !!G.lastUpload.pcm && G.lastUpload.pcm.length === 2, 'the whole take is the safety copy');
+  const parked = calls.find(c => c.url.startsWith('/stream/cancel'));
+  ok(!!parked && /[?&]keep=1\b/.test(parked.url),
+     'the session is ended with keep=1: the daemon parks its copy under failed/',
+     parked && parked.url);
   ok(G.live === null && $('stop').disabled, 'transport back to ready');
   appendHang = false;
   G.LIVE_MIN_REQUEST_MS = 0;
@@ -841,45 +900,54 @@ const appendCalls = () => calls.filter(c => c.url.startsWith('/stream/append'));
   ok($('note').dataset.processed === undefined, 'a processed note clears the state');
   ok($('regenerate-mode').value === 'edit', 'and keeps the mode it was made with');
 
-  console.log('\n24f3. the raw pane is an editor; Save rewrites transcript.txt');
-  let putTranscript = null;
-  routes['/api/notes/n1/transcript'] = async (url, opts) => {
-    putTranscript = JSON.parse(opts.body);
-    return { body: { transcript: putTranscript.text, transcript_edited: true } };
-  };
-  ok($('note-raw').value === 'raw words here', 'the transcript fills the pane', $('note-raw').value);
-  ok($('note-raw-save').disabled === true, 'nothing to save on a fresh load');
-  $('note-raw').value = 'raw words, fixed';
-  $('note-raw').fire('input');
-  ok($('note-raw-save').disabled === false, 'an edit enables Save');
+  console.log('\n24f3. one take: the section is "Transcript"; Save rewrites its transcript.txt');
+  const takeHeads = () => $('note-raw').children.map(s => s.children[0].children[0].textContent);
+  eq($('note-raw').children.map(s => s.dataset.take), ['1'], 'one section for a flat note');
+  eq(takeHeads(), ['Transcript'], 'and it is not called a take');
+  ok(!$('take-1-include'), 'no include box when there is nothing to choose between');
+  ok($('take-1-delete').disabled === true, 'and the only take cannot be deleted');
+  ok($('take-1-text').value === 'raw words here', 'the transcript fills it', $('take-1-text').value);
+  ok($('take-1-save').disabled === true, 'nothing to save on a fresh load');
+  $('take-1-text').value = 'raw words, fixed';
+  $('take-1-text').fire('input');
+  ok($('take-1-save').disabled === false, 'an edit enables Save');
   calls.length = 0;
-  await G.saveTranscript();
-  const putRaw = calls.find(c => c.url === '/api/notes/n1/transcript');
-  ok(!!putRaw && putRaw.method === 'PUT' && putTranscript.text === 'raw words, fixed',
+  await G.saveTake(1);
+  const putRaw = calls.find(c => c.url === '/api/notes/n1/takes/1/transcript');
+  ok(!!putRaw && putRaw.method === 'PUT' && putTake.text === 'raw words, fixed',
      'PUT the edited transcript', putRaw && putRaw.url);
-  ok(G.rawDirty() === false && $('note-raw-save').disabled === true,
+  ok(G.rawDirty() === false && $('take-1-save').disabled === true,
      'and nothing is pending afterwards');
+  ok(G.currentNote.transcript === 'raw words, fixed',
+     'a flat note has no join to derive: the root transcript is what was PUT',
+     G.currentNote.transcript);
   await G.showVersion(1);
-  ok($('note-raw-save').disabled === true, 'Save is off while an old version is previewed');
+  ok($('take-1-save').disabled === true, 'Save is off while an old version is previewed');
   await G.loadNote('n1');
-  noteDetail = () => Object.assign(detail(), { transcript_edited: true });
+  noteDetail = () => Object.assign(detail(), { takes: [oneTake({ transcript_edited: true })] });
   await G.loadNote('n1');
-  ok($('note-raw-status').textContent === 'edited', 'a transcript that was edited says so',
-     $('note-raw-status').textContent);
+  ok($('take-1-status').textContent === 'edited', 'a transcript that was edited says so',
+     $('take-1-status').textContent);
   noteDetail = detail;
   await G.loadNote('n1');
-  ok($('note-raw-status').textContent === '', 'an untouched one says nothing');
+  ok($('take-1-status').textContent === '', 'an untouched one says nothing');
+  noteDetail = () => { const d = detail(); delete d.takes; return d; };
+  await G.loadNote('n1');
+  ok($('take-1-text').value === 'raw words here',
+     'a payload with no takes field still reads as one take', $('take-1-text').value);
+  noteDetail = detail;
+  await G.loadNote('n1');
 
   console.log('\n24f4. an unsaved transcript edit survives a note save; Regenerate offers to use it');
   await G.loadNote('n1');
-  $('note-raw').value = 'transcript in progress';
-  $('note-raw').fire('input');
+  $('take-1-text').value = 'transcript in progress';
+  $('take-1-text').fire('input');
   $('note-editor').value = '# A note\n\nedited body';
   $('note-editor').fire('input');
   await G.saveNote();
-  ok($('note-raw').value === 'transcript in progress',
-     'the reload after Save did not drop the raw edit', $('note-raw').value);
-  ok(G.rawDirty() === true && $('note-raw-save').disabled === false, 'and it is still pending');
+  ok($('take-1-text').value === 'transcript in progress',
+     'the reload after Save did not drop the raw edit', $('take-1-text').value);
+  ok(G.rawDirty() === true && $('take-1-save').disabled === false, 'and it is still pending');
 
   routes['/api/notes/n1/reclean'] = async () => ({
     body: { title: 'A note', note: '# A note\n\nregenerated', version: 5 } });
@@ -887,14 +955,137 @@ const appendCalls = () => calls.filter(c => c.url.startsWith('/stream/append'));
   confirmAnswer = false;
   await G.regenerateNote();
   ok(!calls.find(c => c.url === '/api/notes/n1/reclean'), 'Cancel regenerates nothing');
-  ok($('note-raw').value === 'transcript in progress', 'and keeps the edit');
+  ok($('take-1-text').value === 'transcript in progress', 'and keeps the edit');
   confirmAnswer = true;
   calls.length = 0;
   await G.regenerateNote();
   eq(calls.filter(c => /transcript$|reclean$/.test(c.url)).map(c => c.url),
-     ['/api/notes/n1/transcript', '/api/notes/n1/reclean'],
+     ['/api/notes/n1/takes/1/transcript', '/api/notes/n1/reclean'],
      'OK saves the transcript first, then regenerates from it');
-  ok(putTranscript.text === 'transcript in progress', 'and what it saved is the edit', putTranscript);
+  ok(putTake.text === 'transcript in progress', 'and what it saved is the edit', putTake);
+
+  console.log('\n24f5. two takes: a section each, with include boxes and Re-run');
+  noteDetail = () => Object.assign(detail(), { takes: twoTakes(), transcript: 'first take words\n\nsecond take words' });
+  await G.loadNote('n1');
+  eq($('note-raw').children.map(s => s.dataset.take), ['1', '2'], 'one section per take');
+  ok(/^Take 1 · \d\d:\d\d · 4:01$/.test(takeHeads()[0]), 'take 1 header: number, time, duration', takeHeads()[0]);
+  ok(/^Take 2 · \d\d:\d\d · 2:40$/.test(takeHeads()[1]), 'take 2 header', takeHeads()[1]);
+  ok($('take-2-text').value === 'second take words', 'each holds its own words', $('take-2-text').value);
+  ok($('take-1-include').checked && $('take-2-include').checked, 'both takes are included by default');
+  ok($('take-1-delete').disabled === false && $('take-2-delete').disabled === false,
+     'with two takes either can go');
+  calls.length = 0;
+  $('take-2-text').value = 'second take, fixed';
+  $('take-2-text').fire('input');
+  ok(G.rawDirty() === true && $('take-1-save').disabled === true && $('take-2-save').disabled === false,
+     'dirtiness is per take');
+  await G.saveTake(2);
+  ok(!!calls.find(c => c.url === '/api/notes/n1/takes/2/transcript' && c.method === 'PUT'),
+     'the PUT names take 2', calls.map(c => c.url));
+  ok(G.rawDirty() === false, 'and take 2 is settled again');
+  // takes.rebuild_join: the stripped transcripts, a blank line between, one trailing newline
+  ok(G.currentNote.transcript === 'first take words\n\nsecond take, fixed\n',
+     'the root join Copy reads matches what a reload would give', G.currentNote.transcript);
+
+  noteDetail = () => Object.assign(detail(), { takes: [
+    oneTake(), { n: 2, created: iso(0, 14, 44), duration_s: null, transcript: 'second take words',
+                 transcript_edited: false, audio_url: '/api/notes/n1/takes/2/audio' }] });
+  await G.loadNote('n1');
+  ok(/^Take 2 · \d\d:\d\d$/.test(takeHeads()[1]),
+     'a take the daemon could not measure drops the duration, not the header', takeHeads()[1]);
+  noteDetail = () => Object.assign(detail(), { takes: twoTakes(), transcript: 'first take words\n\nsecond take words\n' });
+  await G.loadNote('n1');
+
+  console.log('\n24f6. Regenerate sends the ticked takes, and refuses none');
+  calls.length = 0;
+  await G.regenerateNote();
+  const bothTakes = calls.find(c => c.url === '/api/notes/n1/reclean');
+  eq(JSON.parse(bothTakes.body).takes, [1, 2], 'both takes ride on the body');
+  await G.loadNote('n1');
+  $('take-1-include').checked = false;
+  $('take-1-include').fire('change');
+  calls.length = 0;
+  await G.regenerateNote();
+  eq(JSON.parse(calls.find(c => c.url === '/api/notes/n1/reclean').body).takes, [2],
+     'unticking one drops it from the run');
+  await G.loadNote('n1');
+  $('take-1-include').checked = false;
+  $('take-2-include').checked = false;
+  $('take-2-include').fire('change');
+  ok($('regenerate').disabled === true, 'no take ticked -> Regenerate is off');
+  ok($('process-status').textContent === 'pick at least one take', 'and it says what to do',
+     $('process-status').textContent);
+  $('take-2-include').checked = true;
+  $('take-2-include').fire('change');
+  ok($('regenerate').disabled === false && $('process-status').textContent === '',
+     'ticking one back takes the message away');
+
+  console.log('\n24f7. Re-run a take against the current note');
+  await G.loadNote('n1');
+  ok($('take-2-how').value === 'continue', 'the how pick defaults to continue', $('take-2-how').value);
+  $('take-2-how').value = 'merge';
+  $('revise-instructions').value = '';
+  calls.length = 0;
+  await G.rerunTake(2);
+  const rerun = calls.find(c => c.url === '/api/notes/n1/takes/2/rerun');
+  ok(!!rerun && rerun.method === 'POST', 'POST the take\u2019s rerun route', rerun && rerun.url);
+  eq(lastRerun.body, { how: 'merge' }, 'with the how it was asked for');
+  ok(/done — v6/.test($('process-status').textContent), 'the new version is reported',
+     $('process-status').textContent);
+  noteDetail = () => Object.assign(detail(), { takes: twoTakes(), note: null,
+                                               meta: { cleanup_mode: null }, versions: [] });
+  await G.loadNote('n1');
+  ok(!$('take-2-rerun') && !$('take-2-how'), 'a note with no note.md offers no Re-run');
+  ok($('take-2-save').disabled === true, 'but the takes are still editable');
+
+  console.log('\n24f8. delete take: never the last one, never while a session is bound');
+  noteDetail = () => Object.assign(detail(), { takes: twoTakes() });
+  await G.loadNote('n1');
+  confirmAnswer = false;
+  calls.length = 0;
+  await G.deleteTake(2);
+  ok(!calls.find(c => c.method === 'DELETE'), 'Cancel deletes nothing');
+  confirmAnswer = true;
+  deletedTake = null;
+  // unsaved text in both editors: the confirm promised the note text is not touched
+  $('note-editor').value = '# A note\n\nnot saved yet';
+  $('note-editor').fire('input');
+  $('take-1-text').value = 'take 1, mid-edit';
+  $('take-1-text').fire('input');
+  noteDetail = () => Object.assign(detail(), { takes: [oneTake()] });   // what is left after it
+  calls.length = 0;
+  await G.deleteTake(2);
+  const del = calls.find(c => c.url === '/api/notes/n1/takes/2');
+  ok(!!del && del.method === 'DELETE' && deletedTake === 2, 'DELETE the take', del && del.method);
+  ok(!!calls.find(c => c.url === '/api/notes'), 'the sidebar is refreshed: the duration changed');
+  eq($('note-raw').children.map(s => s.dataset.take), ['1'], 'the pane re-rendered without it');
+  ok(!$('take-2-text') && $('take-1-delete').disabled === true,
+     'and the take that is left is the last one');
+  ok($('note-editor').value === '# A note\n\nnot saved yet',
+     'the unsaved note text survived the reload', $('note-editor').value);
+  ok($('note-save').disabled === false, 'and is still pending');
+  ok($('take-1-text').value === 'take 1, mid-edit',
+     'so did the other take\u2019s edit', $('take-1-text').value);
+  ok(G.rawDirty() === true, 'which is still pending too');
+  noteDetail = () => Object.assign(detail(), { takes: twoTakes(), live: true });
+  await G.loadNote('n1');
+  ok($('take-2-delete').disabled === true, 'a bound session blocks the delete');
+  ok(/continuing this note/.test($('take-2-delete').title), 'and says why', $('take-2-delete').title);
+
+  console.log('\n24f9. the Audio tab is one player per take');
+  noteDetail = () => Object.assign(detail(), { takes: twoTakes() });
+  await G.loadNote('n1');
+  const players = $('note-audio-list').children;
+  ok(players.length === 2 && $('note-audio-list').hidden === false, 'one row per take', players.length);
+  eq(players.map(p => p.children[1].src),
+     ['/api/notes/n1/audio', '/api/notes/n1/takes/2/audio'], 'each points at its own take');
+  ok(/^Take 2 · /.test(players[1].children[0].textContent), 'labelled like the section',
+     players[1].children[0].textContent);
+  noteDetail = () => Object.assign(detail(), { takes: [oneTake({ audio_url: '' })], audio_url: null });
+  await G.loadNote('n1');
+  ok($('note-audio-list').hidden === true, 'no audio anywhere -> no list');
+  noteDetail = detail;
+  await G.loadNote('n1');
 
   console.log('\n24g. the raw drawer and the phone tabs');
   ok($('note').dataset.raw === 'shown' && $('note-raw-toggle').textContent === 'Hide', 'the drawer starts open');
@@ -1361,6 +1552,170 @@ const appendCalls = () => calls.filter(c => c.url.startsWith('/stream/append'));
   delete store['vnote.picks'];
   routes = baseRoutes();
   await G.boot();
+
+  console.log('\n24aa. Continue recording: when it is offered');
+  await G.loadNote('n1');
+  ok($('note-continue').disabled === false, 'a note that is open and idle can be continued');
+  await G.showVersion(1);
+  ok($('note-continue').disabled === true, 'not while an old version is previewed');
+  await G.loadNote('n1');
+  noteDetail = () => Object.assign(detail(), { live: true });
+  await G.loadNote('n1');
+  ok($('note-continue').disabled === true, 'nor while a session is already bound to it');
+  ok($('note-continue').title === 'a recording is already continuing this note',
+     'and it says so', $('note-continue').title);
+  noteDetail = detail;
+  await G.loadNote('n1');
+  const health2 = routes['/health'];
+  delete routes['/health'];
+  await G.checkHealth();
+  ok($('note-continue').disabled === true, 'nor with the daemon down');
+  routes['/health'] = health2;
+  await G.checkHealth();
+  ok($('note-continue').disabled === false, 'and it comes back with the daemon');
+  G.newNote();
+  ok($('note-continue').disabled === true, 'nothing open -> nothing to continue');
+
+  console.log('\n24ab. the continue flow: continue= and how= on both capture paths');
+  confirmAnswer = true;
+  noteDetail = () => Object.assign(detail(), { takes: twoTakes() });   // the take the continue adds
+  await G.loadNote('n1');
+  $('pick-how').value = 'merge';
+  $('pick-how').fire('change');
+  ok(JSON.parse(store['vnote.picks']).how === 'merge', 'the how pick travels with the others');
+  $('live-toggle').checked = true;
+  calls.length = 0;
+  await G.continueNote();
+  ok(state() === 'recording', 'the stage became a take', state());
+  ok($('app').dataset.continue === 'yes', 'the shell says a note is being continued');
+  ok($('continue-target').textContent === 'Continuing: A note', 'and which one',
+     $('continue-target').textContent);
+  ok($('pick-how').disabled === false, 'the how pick stays live while recording');
+  const bound = calls.find(c => c.url.startsWith('/stream/start'));
+  ok(bound.url === '/stream/start?continue=n1', 'the session is bound at start', bound.url);
+  routes['/stream/finish'] = async () => ({ body: Object.assign(noteDetail(), { take: 2 }) });
+  scrolledInto.length = 0;
+  calls.length = 0;
+  await G.stopLive();
+  const finished = calls.find(c => c.url.startsWith('/stream/finish'));
+  ok(finished.url.endsWith('&continue=n1&how=merge'), 'the finish request carries the pair',
+     finished.url);
+  ok(state() === 'note', 'the note came back on the stage', state());
+  ok(G.continueTarget === null && $('app').dataset.continue === undefined,
+     'and the continue state is cleared');
+  ok(scrolledInto.includes('take 2'), 'the new take was scrolled into view', scrolledInto);
+  ok(G.noteQuery('webm').indexOf('continue=') === -1, 'the next take is a new note again');
+
+  // the MediaRecorder path sends the same pair on /api/note, from the real button
+  await G.loadNote('n1');
+  $('live-toggle').checked = false;
+  await G.continueNote();
+  // ondataavailable wants a Blob-shaped chunk (it tests .size), as the browser sends
+  G.recorder.ondataavailable({ data: { size: 3, length: 3 } });
+  calls.length = 0;
+  G.stopRecording();
+  await sleep(20);
+  const uploaded = calls.find(c => c.url.startsWith('/api/note'));
+  ok(uploaded.url.indexOf('continue=n1&how=merge') !== -1, 'so does the upload path',
+     uploaded.url);
+  $('live-toggle').checked = true;
+
+  console.log('\n24ac. an abandoned continue clears it; a 500 that carries a take does not lose it');
+  await G.loadNote('n1');
+  let releaseMic;
+  navigator.mediaDevices.getUserMedia = () => new Promise(r => {
+    releaseMic = () => r({ getTracks: () => [{ stop() { micTracksStopped++; } }] });
+  });
+  const starting = G.continueNote();
+  ok(G.continueTarget !== null, 'a take is running into the note');
+  $('stop').fire('click');    // Cancel while the microphone is still being asked for
+  releaseMic();
+  await starting;
+  ok(G.continueTarget === null, 'abandoning the take clears the target');
+  ok(state() === 'idle', 'and the stage is idle again', state());
+  navigator.mediaDevices.getUserMedia = async () => ({ getTracks: () => [{ stop() { micTracksStopped++; } }] });
+
+  await G.loadNote('n1');
+  routes['/stream/finish'] = async () => ({ status: 500,
+    body: { error: 'ollama refused', take: 2 } });
+  await G.continueNote();
+  calls.length = 0;
+  await G.stopLive();
+  ok(G.continueTarget === null, 'the continue state is cleared either way');
+  ok(!!calls.find(c => c.url === '/api/notes/n1'), 'the note is opened anyway: the take exists');
+  ok(/take 2 was saved/.test($('process-status').textContent), 'and the failure is on the status line',
+     $('process-status').textContent);
+  ok($('retry-wrap').hidden === true, 'Retry is not offered — that would record it twice');
+
+  console.log('\n24ac2. a finish that fails without a take pins the note to the Retry');
+  await G.loadNote('n1');
+  routes['/stream/finish'] = async () => ({ status: 500, body: { error: 'gpu fell over' } });
+  await G.continueNote();
+  calls.length = 0;
+  await G.stopLive();
+  ok(G.continueTarget === null, 'the take is over: nothing is being continued any more');
+  ok($('retry-wrap').hidden === false, 'the recording is held for Retry');
+  ok(!calls.find(c => c.url.startsWith('/stream/cancel')),
+     'a finish that was answered consumed the session: no cancel to send');
+  ok(G.lastUpload && G.lastUpload.note === 'n1' && G.lastUpload.how === 'merge',
+     'and it remembers which note it was going into', G.lastUpload && G.lastUpload.note);
+  routes['/stream/finish'] = async () => ({ body: NOTE });
+  calls.length = 0;
+  $('retry').fire('click');
+  await sleep(20);
+  const retryPost = calls.find(c => c.url.startsWith('/api/note'));
+  ok(retryPost.url.indexOf('continue=n1&how=merge') !== -1,
+     'Retry still uploads it into that note', retryPost.url);
+  // ... and the plain Record that follows it does not — the leak this guards against
+  calls.length = 0;
+  $('live-toggle').checked = true;
+  await G.startRecording();
+  const fresh = calls.find(c => c.url.startsWith('/stream/start'));
+  ok(fresh.url === '/stream/start', 'a fresh Record binds no note', fresh.url);
+  ok(G.finishQuery('S9').indexOf('continue=') === -1, 'and its finish carries no note',
+     G.finishQuery('S9'));
+  await G.stopLive();
+  noteDetail = detail;
+
+  console.log('\n24ad. Delete note: a confirm, then the trash and the idle stage');
+  await G.loadNote('n1');
+  confirmAnswer = false;
+  calls.length = 0;
+  await G.deleteNote();
+  ok(!calls.find(c => c.method === 'DELETE'), 'Cancel deletes nothing');
+  ok(state() === 'note', 'and the note stays open', state());
+  confirmAnswer = true;
+  deletedNote = null;
+  calls.length = 0;
+  await G.deleteNote();
+  const gone = calls.find(c => c.url === '/api/notes/n1' && c.method === 'DELETE');
+  ok(!!gone && deletedNote === 'n1', 'DELETE the note');
+  ok(!!calls.find(c => c.url === '/api/notes'), 'the sidebar is refreshed');
+  ok(state() === 'idle', 'the stage goes idle', state());
+  ok($('process-status').textContent === 'moved to trash', 'and says where it went',
+     $('process-status').textContent);
+  noteDetail = () => Object.assign(detail(), { live: true });
+  await G.loadNote('n1');
+  ok($('note-delete').disabled === true, 'a note a session is writing to cannot be deleted');
+  noteDetail = detail;
+  await G.loadNote('n1');
+
+  console.log('\n24ae. Settings names the trash folder');
+  G.trashLoaded = false;   // 24l already paid the first visit; ask again as if it had not
+  calls.length = 0;
+  G.setView('settings');
+  await sleep(10);
+  ok(!!calls.find(c => c.url === '/api/trash'), 'the first visit asks for it');
+  ok($('trash-path').textContent === '/x/voice-notes/trash', 'the path is shown',
+     $('trash-path').textContent);
+  ok($('trash-status').textContent === '3 items', 'with what is in it', $('trash-status').textContent);
+  calls.length = 0;
+  G.setView('note');
+  G.setView('settings');
+  ok(!calls.find(c => c.url === '/api/trash'), 'a second visit does not ask again');
+  await G.revealTrash();
+  ok(!!calls.find(c => c.url === '/api/trash/reveal'), 'Open folder posts the reveal');
+  G.setView('note');
 
   console.log('\n25. pcm-worklet resampling');
   const posted = [];

@@ -13,7 +13,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import config, output, styles, versions
+from . import config, output, styles, takes, versions
+
+HOWS = ("continue", "append", "merge")  # what a new take does to the note it lands in
 
 
 class EmptyTranscriptError(ValueError):
@@ -22,6 +24,20 @@ class EmptyTranscriptError(ValueError):
 
 class TranscriptionError(RuntimeError):
     """The transcription backend failed; the original exception is chained."""
+
+
+class TakeCleanupError(RuntimeError):
+    """A cleanup failed *after* the take was written; the recording is safe on disk.
+
+    The take (audio + transcript) is already in the note folder and the note itself
+    is untouched — the caller reports the failure with ``take`` so the page can offer
+    a re-run instead of implying the recording was lost.
+    """
+
+    def __init__(self, message: str, *, take: int, audio_path: Path | None) -> None:
+        super().__init__(message)
+        self.take = take
+        self.audio_path = audio_path
 
 
 def resolved_backend(mode: str | None, backend: str | None) -> str:
@@ -256,6 +272,7 @@ def reclean(
     backend: str | None = None,
     model: str | None = None,
     instructions: str | None = None,
+    only_takes: list[int] | None = None,
 ) -> RecleanResult:
     """Re-run cleanup on a saved note (or a bare transcript file); no transcription.
 
@@ -263,10 +280,20 @@ def reclean(
     version of the note (``op: "regenerate"``). ``instructions`` is free text appended
     to the cleanup prompt ("make it longer").
 
+    ``only_takes`` regenerates from a subset of the note's takes — their transcripts
+    joined, in the order given — and records which ones on the version entry. The
+    takes themselves are untouched: the raw record always keeps every take.
+
     Missing paths raise FileNotFoundError, an empty transcript raises
     EmptyTranscriptError, and cleanup failures propagate to the caller.
     """
-    transcript, session_dir = resolve_redo(path)
+    if only_takes is not None:
+        session_dir = Path(path).expanduser()
+        if not session_dir.is_dir():
+            raise FileNotFoundError(f"no such note folder: {session_dir}")
+        transcript = takes.joined_transcript(session_dir, only_takes)  # FileNotFoundError: no such take
+    else:
+        transcript, session_dir = resolve_redo(path)
     if not transcript:
         raise EmptyTranscriptError("transcript is empty")
 
@@ -278,6 +305,7 @@ def reclean(
         version, _ = versions.commit(
             session_dir, note_text, op="regenerate", title=result.title, mode=mode,
             backend=backend, model=resolved_model(backend, model, mode), instructions=instructions,
+            extra={"takes": list(only_takes)} if only_takes is not None else None,
         )
     return RecleanResult(session_dir=session_dir, title=result.title, note_text=note_text,
                          transcript=transcript, version=version)
@@ -364,3 +392,169 @@ def restore(session_dir: Path, n: int) -> RecleanResult:
     title = versions.heading_title(text) or meta.get("title") or session_dir.name
     version, _ = versions.commit(session_dir, text, op="restore", title=title, restored_from=n)
     return _committed(session_dir, title, version, text)
+
+
+# --- continue a note with another take ---------------------------------------
+
+
+def _appended(current: str, body: str) -> str:
+    """The note with ``body`` added under a bare ``---`` — the shape both appends share.
+
+    A note whose last line is already a rule (the take before this one ended there, or
+    the author typed one) gets a blank line instead: ``---`` twice over reads as an
+    empty section, and every further take would add another.
+    """
+    text = versions.normalized(current)
+    rule = "\n" if text.rstrip("\n").rsplit("\n", 1)[-1].strip() == "---" else "\n---\n\n"
+    return text + rule + body.strip() + "\n"
+
+
+def _apply_take(
+    session_dir: Path,
+    transcript: str,
+    *,
+    take: int,
+    how: str,
+    mode: str,
+    backend: str | None,
+    model: str | None,
+    instructions: str | None,
+    clean_fn,
+    continue_fn,
+    merge_fn,
+) -> RecleanResult:
+    """Run one take's transcript against the *current* note per ``how``; commit the result.
+
+    Shared by :func:`continue_take` (a fresh recording) and :func:`rerun_take` (a take
+    that is already on disk), so both write the same version entry. A failing model
+    raises :class:`TakeCleanupError`: by this point the take exists and nothing that
+    happens here may take it — or the note — with it.
+    """
+    session_dir = Path(session_dir)
+    current = (session_dir / "note.md").read_text(encoding="utf-8")
+    meta = versions.read_meta(session_dir)
+    backend = resolved_backend(mode, backend)  # the style's backend unless the caller picked one
+    try:
+        if how == "merge":
+            result = merge_fn(current, transcript, mode=mode, backend=backend, model=model,
+                              instructions=instructions)
+            # A style that has since been deleted cannot say whether this note carries a
+            # heading; the note itself can (same rule as revise()).
+            heading = None if styles.get(mode) else versions.heading_title(current) is not None
+            note_text = note_markdown(result.title, result.body, mode, heading=heading)
+            # Without a heading there was no TITLE line to parse: CleanResult.title is then
+            # the new take's first few words, which must not become the note's title.
+            titled = heading if heading is not None else wants_heading(mode)
+            title = result.title if titled else (
+                versions.heading_title(current) or meta.get("title") or session_dir.name)
+            op = "merge"
+        elif how == "append":
+            note_text = _appended(current, clean_fn(transcript, mode=mode, backend=backend, model=model,
+                                                    instructions=instructions).body)
+            title, op = versions.heading_title(current) or meta.get("title") or session_dir.name, "continue"
+        else:
+            note_text = _appended(current, continue_fn(current, transcript, mode=mode, backend=backend,
+                                                       model=model, instructions=instructions))
+            title, op = versions.heading_title(current) or meta.get("title") or session_dir.name, "continue"
+    except Exception as exc:  # noqa: BLE001 - the take is on disk; the caller reports which one
+        raise TakeCleanupError(str(exc), take=take, audio_path=takes.take_audio(session_dir, take)) from exc
+
+    version, _ = versions.commit(
+        session_dir, note_text, op=op,
+        title=title if how == "merge" else None,  # an append keeps the note's own title
+        mode=mode, backend=backend, model=resolved_model(backend, model, mode),
+        instructions=instructions, extra={"take": take, "how": how},
+    )
+    return _committed(session_dir, title, version, note_text)
+
+
+def _take_result(session_dir: Path, take: int, result: RecleanResult | None) -> dict:
+    meta = versions.read_meta(session_dir)
+    return {
+        "take": take,
+        "version": result.version if result else None,
+        "title": result.title if result else (meta.get("title") or Path(session_dir).name),
+        "note": result.note_text if result else None,
+        "transcript": takes.take_transcript(session_dir, take),
+    }
+
+
+def continue_take(
+    session_dir: Path,
+    *,
+    audio_tmp: Path,
+    transcribe_fn,
+    clean_fn,
+    continue_fn,
+    merge_fn,
+    how: str = "continue",
+    mode: str = config.DEFAULT_STYLE,
+    backend: str | None = None,
+    model: str | None = None,
+    language: str | None = None,
+    raw: bool = False,
+    instructions: str | None = None,
+    when: datetime | None = None,
+) -> dict:
+    """Transcribe ``audio_tmp``, add it to ``session_dir`` as the next take, apply it.
+
+    The audio is *moved* into the take folder, so it survives everything after that
+    point: a raw note (or one that was never cleaned) simply keeps the take and
+    writes no version, and a cleanup failure raises :class:`TakeCleanupError` with
+    the take number rather than losing the recording.
+    """
+    session_dir = Path(session_dir)
+    if how not in HOWS:
+        raise ValueError(f"bad how: {how!r} (expected one of {', '.join(HOWS)})")
+    started = when or datetime.now()
+    try:
+        transcript, tmeta = transcribe_fn(audio_tmp, language=language)
+    except Exception as exc:  # noqa: BLE001 - same contract as make_note: a backend failure is ours
+        raise TranscriptionError(str(exc)) from exc
+    if not transcript:
+        raise EmptyTranscriptError("transcript is empty (no speech detected?)")
+
+    duration = tmeta.get("audio_duration_s")
+    if not isinstance(duration, (int, float)):  # measured before the move: the WAV is still ours
+        duration = takes.wav_duration(audio_tmp)
+    take = takes.add_take(session_dir, audio_tmp, transcript,
+                          started.isoformat(timespec="seconds"), duration)
+
+    if raw or not (session_dir / "note.md").is_file():
+        return _take_result(session_dir, take, None)  # a raw note grows by takes alone
+    result = _apply_take(session_dir, transcript, take=take, how=how, mode=mode, backend=backend,
+                         model=model, instructions=instructions, clean_fn=clean_fn,
+                         continue_fn=continue_fn, merge_fn=merge_fn)
+    return _take_result(session_dir, take, result)
+
+
+def rerun_take(
+    session_dir: Path,
+    n: int,
+    *,
+    clean_fn,
+    continue_fn,
+    merge_fn,
+    how: str = "continue",
+    mode: str = config.DEFAULT_STYLE,
+    backend: str | None = None,
+    model: str | None = None,
+    instructions: str | None = None,
+) -> dict:
+    """Apply an existing take to the *current* note again — a new version.
+
+    There is no way back to the pre-take note here by design: restore the version
+    the take produced first if that is what you want (the version list names it).
+    """
+    session_dir = Path(session_dir)
+    if how not in HOWS:
+        raise ValueError(f"bad how: {how!r} (expected one of {', '.join(HOWS)})")
+    if not (session_dir / "note.md").is_file():
+        raise ValueError("this note has never been cleaned; regenerate it instead")
+    transcript = takes.take_transcript(session_dir, n)  # FileNotFoundError when there is no take n
+    if not transcript.strip():
+        raise EmptyTranscriptError("this take's transcript is empty")
+    result = _apply_take(session_dir, transcript, take=n, how=how, mode=mode, backend=backend,
+                         model=model, instructions=instructions, clean_fn=clean_fn,
+                         continue_fn=continue_fn, merge_fn=merge_fn)
+    return _take_result(session_dir, n, result)

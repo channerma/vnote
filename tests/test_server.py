@@ -47,7 +47,8 @@ def test_health(live_server):
     h = daemon.health(timeout=5)  # generous: the 0.3s production probe can flake on a busy test box
     assert h is not None
     assert h["status"] == "ok"
-    assert h["whisper_model"] == config.WHISPER_MODEL
+    # No model is loaded in the test server, so /health reports what *would* load.
+    assert h["whisper_model"] == config.whisper_model()
     assert "device" in h and "uptime_s" in h
 
 
@@ -200,3 +201,19 @@ def test_promote_empty_store_is_client_error(live_server, tmp_path, monkeypatch)
     monkeypatch.setattr(output, "NOTES_DIR", tmp_path)
     with pytest.raises(RuntimeError, match="no flow history"):
         daemon.promote("last")
+
+
+def test_client_sends_an_absolute_path(monkeypatch, tmp_path):
+    """The daemon opens the path in its own cwd — wherever `vnote --serve` was
+    started. A relative path from anywhere else failed with a bare 'no such file'."""
+    sent: dict = {}
+    monkeypatch.setattr(
+        daemon, "_post", lambda path, payload, timeout: sent.update(payload) or {"transcript": "", "meta": {}}
+    )
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "memo.wav").write_bytes(b"")
+
+    daemon.transcribe(Path("memo.wav"))
+
+    assert sent["audio_path"] == str((tmp_path / "memo.wav").resolve())
+    assert Path(sent["audio_path"]).is_absolute()

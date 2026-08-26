@@ -122,7 +122,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "version": __version__,
                 "device": transcribe._device or "cpu",
-                "whisper_model": config.WHISPER_MODEL,
+                "whisper_model": transcribe._model_name or config.whisper_model(),
                 "uptime_s": round(time.monotonic() - _started, 1),
             })
         else:
@@ -254,9 +254,16 @@ def serve() -> int:
         print("       (is another `vnote --serve` already running?)", file=sys.stderr)
         return 1
     _started = time.monotonic()
-    print(f"vnote daemon — warming {config.WHISPER_MODEL} ...", flush=True)
+    pinned = config.whisper_model_override()
+    print(f"vnote daemon — warming {pinned or 'whisper (model follows the device)'} ...", flush=True)
     device = _warm()
-    print(f"  warm on {device}; listening on http://{host}:{port}  (Ctrl-C to stop)", flush=True)
+    from . import transcribe
+
+    print(
+        f"  warm: {transcribe._model_name} on {device}; "
+        f"listening on http://{host}:{port}  (Ctrl-C to stop)",
+        flush=True,
+    )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

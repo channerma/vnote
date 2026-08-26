@@ -96,7 +96,8 @@ def _show_config() -> int:
     print(f"  opencode    : {config.OPENCODE_BIN} (--backend opencode; "
           f"model {config.opencode_model() or 'opencode default'})")
     print(f"  dictation   : {config.dictation_model()} (vnote-flow --clean)")
-    print(f"  whisper     : {config.WHISPER_MODEL}")
+    pinned = config.whisper_model_override()
+    print(f"  whisper     : {pinned or 'auto (small on CPU, large-v3-turbo on CUDA)'}")
     print(f"  ollama_host : {config.OLLAMA_HOST}")
     daemon_host, daemon_port = config.daemon_addr()
     print(f"  daemon      : {daemon_host}:{daemon_port} (start one with `vnote --serve`)")

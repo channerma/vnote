@@ -65,7 +65,11 @@ def _post(path: str, payload: dict, timeout: float) -> dict:
 
 
 def transcribe(audio_path: Path, language: str | None = None) -> tuple[str, dict]:
-    d = _post("/transcribe", {"audio_path": str(audio_path), "language": language}, timeout=600)
+    # Absolute, always: the daemon opens this path in *its own* working directory,
+    # which is wherever `vnote --serve` was started — usually not the caller's. A
+    # relative path failed with a bare "no such file" from anywhere else.
+    # (Clients that don't share the daemon's filesystem use transcribe_bytes().)
+    d = _post("/transcribe", {"audio_path": str(Path(audio_path).resolve()), "language": language}, timeout=600)
     return d["transcript"], d["meta"]
 
 

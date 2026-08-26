@@ -8,10 +8,11 @@ import os
 import sys
 from pathlib import Path
 
-from .config import WHISPER_MODEL
+from . import config
 
 _model = None  # lazily loaded, cached for the process
 _device = None
+_model_name = None  # which model _model actually is (the device decides by default)
 
 
 def _preload_cuda_libs() -> None:
@@ -34,11 +35,13 @@ def _preload_cuda_libs() -> None:
 
 
 def _build(device: str):
+    global _model_name
     from faster_whisper import WhisperModel
 
+    _model_name = config.whisper_model(device)
     if device == "cuda":
-        return WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
-    return WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+        return WhisperModel(_model_name, device="cuda", compute_type="float16")
+    return WhisperModel(_model_name, device="cpu", compute_type="int8")
 
 
 def _is_cuda_problem(exc: BaseException) -> bool:
@@ -109,7 +112,7 @@ def transcribe(audio_path: Path, language: str | None = None) -> tuple[str, dict
         else:
             raise
     meta = {
-        "whisper_model": WHISPER_MODEL,
+        "whisper_model": _model_name,
         "device": _device,
         "language": info.language,
         "language_probability": round(float(info.language_probability), 3),

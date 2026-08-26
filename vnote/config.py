@@ -90,12 +90,28 @@ def _default_notes_dir() -> Path:
 NOTES_DIR = Path(os.environ.get("VNOTE_DIR") or _default_notes_dir())
 
 # --- Whisper ---
-# `small` over `large-v3-turbo`: the default has to be usable for flow dictation,
-# where you wait on every utterance. On CPU (macOS — CTranslate2 has no Metal
-# build) large-v3-turbo runs ~1x realtime: a 22s note took 24.9s to transcribe.
-# `small` is ~3x faster. On a CUDA box large-v3-turbo is the better pick — set
-# VNOTE_WHISPER_MODEL=large-v3-turbo there.
-WHISPER_MODEL = os.environ.get("VNOTE_WHISPER_MODEL", "small")
+# No single default is right for both machines this runs on, so the default follows
+# the device. On CPU (macOS: CTranslate2 has no Metal build) large-v3-turbo runs
+# ~1x realtime — a 22s note took 24.9s — which is fine for a memo but unusable for
+# flow dictation, where you wait on every utterance; `small` is ~3x faster. On CUDA
+# large-v3-turbo is also ~realtime, so there accuracy is free. VNOTE_WHISPER_MODEL
+# (or `whisper_model` in config.json) overrides both.
+WHISPER_MODEL_BY_DEVICE = {"cuda": "large-v3-turbo", "cpu": "small"}
+
+
+def whisper_model(device: str = "cpu") -> str:
+    """The Whisper model to load on ``device``: explicit override, else per-device.
+
+    Resolved at load time rather than import time because the device is not known
+    until CUDA has been tried.
+    """
+    override = os.environ.get("VNOTE_WHISPER_MODEL") or load_config().get("whisper_model")
+    return override or WHISPER_MODEL_BY_DEVICE.get(device, "small")
+
+
+def whisper_model_override() -> str | None:
+    """The pinned model, or ``None`` when the device decides. For status output."""
+    return os.environ.get("VNOTE_WHISPER_MODEL") or load_config().get("whisper_model") or None
 SAMPLE_RATE = 16_000  # Whisper's native rate; we record straight at it.
 CHANNELS = 1
 

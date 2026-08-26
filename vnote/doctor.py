@@ -21,14 +21,17 @@ BAD = "[FAIL]"
 
 
 def _check_recorder() -> tuple[str, str]:
-    for tool in ("parec", "pw-record", "ffmpeg"):
-        if shutil.which(tool):
-            return OK, f"recorder: `{tool}` found"
-    try:
-        import sounddevice  # noqa: F401
-        return OK, "recorder: `sounddevice` (PortAudio) library available"
-    except Exception:  # noqa: BLE001 - import or PortAudio load failure
+    # Ask record.py what it will actually pick rather than re-deriving the order
+    # here: the two lists drifted once, and doctor cheerfully reported "`ffmpeg`
+    # found" on a Mac where the ffmpeg branch cannot work at all.
+    from .record import selected_backend
+
+    backend = selected_backend()
+    if backend is None:
         return BAD, "no recorder found — install pulseaudio-utils (parec) or ffmpeg (file mode still works)"
+    if backend == "sounddevice":
+        return OK, "recorder: `sounddevice` (PortAudio) library available"
+    return OK, f"recorder: `{backend}` found"
 
 
 def _check_gpu() -> tuple[str, str]:

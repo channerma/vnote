@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import wave
@@ -82,20 +83,33 @@ def _record_via_raw_pcm(cmd: list[str], dest: Path) -> float:
 
 # --- backend: ffmpeg pulling from PulseAudio ---
 
-def _record_via_ffmpeg(dest: Path) -> float:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
+def _ffmpeg_cmd(dest: Path) -> list[str]:
+    # -f pulse is Linux/WSL only; see _pulse_ffmpeg_available() for why this is
+    # never reached elsewhere.
+    return [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-f", "pulse", "-i", "default",
         "-ac", str(CHANNELS), "-ar", str(SAMPLE_RATE),
         str(dest),
-    ]
+    ]  # fmt: skip
+
+
+def _record_via_ffmpeg(dest: Path) -> float:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    cmd = _ffmpeg_cmd(dest)
     stop = threading.Event()
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    threading.Thread(target=_wait_for_enter, args=(stop,), daemon=True).start()
-    _run_with_timer(proc, stop)
+    # stderr to a temp file, not DEVNULL: when ffmpeg refuses the input format the
+    # message is the whole diagnosis, and swallowing it turns a clear error into a
+    # bare "nothing recorded". A file rather than PIPE so a long take cannot fill
+    # the pipe buffer while _run_with_timer is blocked waiting on the process.
+    with tempfile.TemporaryFile() as errf:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errf)
+        threading.Thread(target=_wait_for_enter, args=(stop,), daemon=True).start()
+        _run_with_timer(proc, stop)
+        errf.seek(0)
+        err = errf.read().decode(errors="replace").strip()
     if not dest.exists():
-        return 0.0
+        raise RuntimeError(f"ffmpeg captured nothing (exit {proc.returncode})" + (f":\n    {err}" if err else ""))
     with wave.open(str(dest), "rb") as w:
         return w.getnframes() / w.getframerate()
 
@@ -138,6 +152,38 @@ def _record_via_sounddevice(dest: Path) -> float:
     return len(audio) / SAMPLE_RATE
 
 
+def _pulse_ffmpeg_available() -> bool:
+    """Whether the ``-f pulse`` ffmpeg branch can work here.
+
+    Gated to Linux on purpose. PulseAudio is a Linux/WSL thing; macOS would need
+    ``-f avfoundation`` and Windows ``-f dshow``. Before this gate, Homebrew ffmpeg
+    on a Mac won the backend race and died instantly with "Unknown input format:
+    'pulse'", so every `vnote` recording aborted at 0.2s with "Nothing recorded
+    (too short)" (verified 2026-08-26). sounddevice is the documented and working
+    path on macOS/Windows, so gate this branch rather than grow per-platform flags.
+    """
+    return sys.platform.startswith("linux") and shutil.which("ffmpeg") is not None
+
+
+def selected_backend() -> str | None:
+    """Name of the capture backend :func:`record_to_wav` will use, or ``None``.
+
+    Single source of truth so ``--doctor`` cannot claim a recorder that recording
+    will not actually choose.
+    """
+    if shutil.which("parec"):
+        return "parec"
+    if shutil.which("pw-record"):
+        return "pw-record"
+    if _pulse_ffmpeg_available():
+        return "ffmpeg"
+    try:
+        import sounddevice  # noqa: F401
+    except Exception:  # noqa: BLE001 - import or PortAudio load failure
+        return None
+    return "sounddevice"
+
+
 def record_to_wav(dest: Path) -> float:
     """Record from the default mic until Enter is pressed; write a 16 kHz mono WAV.
 
@@ -145,15 +191,13 @@ def record_to_wav(dest: Path) -> float:
     """
     print("● Recording — speak now. Press Enter to stop.")
 
-    raw_cmd = _raw_pcm_cmd()
-    if raw_cmd is not None:
-        return _record_via_raw_pcm(raw_cmd, dest)
-    if shutil.which("ffmpeg"):
+    backend = selected_backend()
+    if backend in ("parec", "pw-record"):
+        return _record_via_raw_pcm(_raw_pcm_cmd(), dest)
+    if backend == "ffmpeg":
         return _record_via_ffmpeg(dest)
-    try:
-        import sounddevice  # noqa: F401
-    except OSError as exc:
-        raise RuntimeError(f"{exc}\n\n{_INSTALL_HINT}") from exc
+    if backend is None:
+        raise RuntimeError(_INSTALL_HINT)
     try:
         return _record_via_sounddevice(dest)
     except Exception as exc:  # noqa: BLE001 - PortAudio "no device" etc.

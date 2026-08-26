@@ -51,19 +51,28 @@ setup and names anything missing. (On WSL, **CLI** mic recording additionally ne
 ## Quickstart — Web UI
 
 ```bash
-vnote --serve --open        # loads the models once, opens http://127.0.0.1:8760
+vnote --serve --open        # the page is up at once; the models warm in the background
 ```
+
+![vnote's web UI — sidebar of notes, the note with its raw transcript beside it](docs/images/web-ui.png)
 
 - **Record** → talk → **Pause** / **Resume** (or Space) → **Stop**. With **Live transcript**
   on, the words appear as you speak and stay copyable — while paused, and while the note is
-  being cleaned up after Stop. Pick the cleanup style (light / edit / summary / dictation /
-  raw) and the backend per recording.
+  being cleaned up after Stop. Pick the **style** (light / edit / summary / dictation /
+  prompt / email / raw — or your own) and the backend per recording. Turn **Process on
+  stop** off to get the raw transcript first, fix it, then **Regenerate**.
 - The note appears with a **Copy** button; it is also saved under `voice-notes/`.
 - **Notes**: every note you've made, newest first — play the audio, copy, **edit** the
-  Markdown, regenerate in another mode or **revise** it with an instruction ("make it
-  shorter"); every change is a version you can restore. **Settings**: every setting with a
-  description, saved to `~/.config/vnote/config.json` (the CLI reads the same file), plus
-  your custom vocabulary.
+  Markdown, edit the raw transcript, regenerate in another style or **revise** the note with
+  an instruction ("make it shorter"); every change is a version you can restore.
+  **Continue recording** adds a take to a note you already stopped; takes can be re-run,
+  left out of a regenerate, or deleted. Deleting anything moves it to `voice-notes/trash/`.
+- **Styles** are Markdown files — a few lines of front matter and the instruction the model
+  gets. The built-ins ship with vnote; edit one in **Settings → Styles** and your copy lands in
+  `~/.config/vnote/styles/`. The `prompt` style turns a spoken brief into a Claude Code
+  session prompt and runs on the `claude-code` backend by default.
+- **Settings**: every setting with a description, saved to `~/.config/vnote/config.json`
+  (the CLI reads the same file), plus your custom vocabulary.
 - **WSL2:** run the daemon in WSL and open the page in your Windows browser — `localhost` just
   works. Leave the daemon running (a systemd unit for Linux is in the
   [User Guide](docs/USER_GUIDE.md#warm-daemon)).

@@ -90,7 +90,12 @@ def _default_notes_dir() -> Path:
 NOTES_DIR = Path(os.environ.get("VNOTE_DIR") or _default_notes_dir())
 
 # --- Whisper ---
-WHISPER_MODEL = os.environ.get("VNOTE_WHISPER_MODEL", "large-v3-turbo")
+# `small` over `large-v3-turbo`: the default has to be usable for flow dictation,
+# where you wait on every utterance. On CPU (macOS — CTranslate2 has no Metal
+# build) large-v3-turbo runs ~1x realtime: a 22s note took 24.9s to transcribe.
+# `small` is ~3x faster. On a CUDA box large-v3-turbo is the better pick — set
+# VNOTE_WHISPER_MODEL=large-v3-turbo there.
+WHISPER_MODEL = os.environ.get("VNOTE_WHISPER_MODEL", "small")
 SAMPLE_RATE = 16_000  # Whisper's native rate; we record straight at it.
 CHANNELS = 1
 

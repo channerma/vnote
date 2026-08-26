@@ -46,9 +46,27 @@ def _is_cuda_problem(exc: BaseException) -> bool:
     return any(t in text for t in ("cuda", "cublas", "cudnn", "cudart", "nvrtc", "gpu", "device"))
 
 
+def _cuda_plausible() -> bool:
+    """Whether trying CUDA here can possibly succeed.
+
+    CTranslate2 publishes no CUDA-enabled macOS wheel (and no Metal/MPS backend),
+    so on darwin the attempt fails 100% of the time — it printed "GPU init failed:
+    This CTranslate2 package was not compiled with CUDA support" on every single
+    run. That is noise, not a diagnosis. Everywhere else the attempt is still worth
+    making and its failure still worth printing: a Linux box with a half-installed
+    CUDA stack genuinely needs to be told. `--doctor` is where macOS users are told
+    they are on CPU, once, instead of on every transcription.
+    """
+    return sys.platform != "darwin"
+
+
 def _load_model():
     global _model, _device
     if _model is not None:
+        return _model
+    if not _cuda_plausible():
+        _model = _build("cpu")
+        _device = "cpu"
         return _model
     _preload_cuda_libs()
     try:

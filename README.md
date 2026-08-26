@@ -39,15 +39,15 @@ already downloaded:
 
 | `VNOTE_WHISPER_MODEL` | time | notes |
 |---|---|---|
-| `base` | 1.3 s | fine for flow dictation |
-| `small` | 2.8 s | good balance |
-| `large-v3-turbo` (default) | 10.1 s | best accuracy, ~realtime |
+| `base` | 1.3 s | fastest; fine for flow dictation |
+| `small` (default) | 2.8 s | good balance — the default |
+| `large-v3-turbo` | 10.1 s | best accuracy; the right pick on CUDA |
 
-So for long-form notes the default is fine; for **flow** dictation, where you wait on every
-utterance, drop down:
+`small` is the default for that reason — it keeps flow dictation responsive on CPU. On a
+CUDA box, where `large-v3-turbo` runs about realtime, prefer accuracy:
 
 ```bash
-export VNOTE_WHISPER_MODEL=small
+export VNOTE_WHISPER_MODEL=large-v3-turbo
 ```
 
 Mic recording and the flow hotkey both need macOS permissions, granted to *the terminal or

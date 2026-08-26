@@ -411,7 +411,7 @@ directory is auto-loaded (see `.env.example`).
 | var | default |
 |---|---|
 | `VNOTE_DIR` | `./voice-notes` |
-| `VNOTE_WHISPER_MODEL` | `large-v3-turbo` |
+| `VNOTE_WHISPER_MODEL` | `small` |
 | `VNOTE_BACKEND` | `ollama` (`ollama` \| `claude-code` \| `opencode` \| `claude`) |
 | `VNOTE_OLLAMA_MODEL` | `qwen2.5:14b-instruct` |
 | `VNOTE_CLAUDE_CODE_BIN` | `claude` (path to the Claude Code CLI; `--backend claude-code`) |

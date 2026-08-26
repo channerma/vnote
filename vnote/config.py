@@ -70,8 +70,24 @@ def save_config(cfg: dict) -> None:
 BUILTIN_BACKEND = "ollama"
 BUILTIN_OLLAMA_MODEL = "qwen2.5:14b-instruct"
 
+
+def _default_notes_dir() -> Path:
+    """Where session folders go when ``VNOTE_DIR`` is unset.
+
+    From a source checkout this is ``<repo>/voice-notes`` — where a developer
+    expects them, and what .gitignore already covers. Installed as a tool the
+    *same* relative path lands inside site-packages, so anchor to ``~`` instead.
+    Verified 2026-08-26: `uv tool install` wrote notes to
+    ``~/.local/share/uv/tools/vnote/lib/python3.14/site-packages/voice-notes/``.
+    The marker is pyproject.toml beside the package, not the presence of .git —
+    an sdist unpacked for a `pip install -e .` has one and no other.
+    """
+    root = Path(__file__).resolve().parent.parent
+    return root / "voice-notes" if (root / "pyproject.toml").is_file() else Path.home() / "voice-notes"
+
+
 # Where session folders are written. Override with VNOTE_DIR.
-NOTES_DIR = Path(os.environ.get("VNOTE_DIR", Path(__file__).resolve().parent.parent / "voice-notes"))
+NOTES_DIR = Path(os.environ.get("VNOTE_DIR") or _default_notes_dir())
 
 # --- Whisper ---
 WHISPER_MODEL = os.environ.get("VNOTE_WHISPER_MODEL", "large-v3-turbo")

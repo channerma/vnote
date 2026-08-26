@@ -82,3 +82,27 @@ def test_env_on_defaults_on_and_honors_off_values(monkeypatch):
         assert cfg._env_on("VNOTE_HISTORY_AUDIO") is False
     monkeypatch.setenv("VNOTE_HISTORY_AUDIO", "1")
     assert cfg._env_on("VNOTE_HISTORY_AUDIO") is True
+
+
+def test_default_notes_dir_uses_repo_root_in_a_source_checkout(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / "vnote").mkdir(parents=True)
+    (repo / "pyproject.toml").write_text("[project]\n")
+    monkeypatch.setattr(config, "__file__", str(repo / "vnote" / "config.py"))
+
+    assert config._default_notes_dir() == (repo / "voice-notes").resolve()
+
+
+def test_default_notes_dir_never_lands_in_site_packages(tmp_path, monkeypatch):
+    """Installed as a tool there is no pyproject.toml beside the package, and the
+    repo-relative path would resolve *inside* site-packages. Anchor to ~ instead."""
+    site = tmp_path / "site-packages"
+    (site / "vnote").mkdir(parents=True)  # deliberately no pyproject.toml
+    home = tmp_path / "home"
+    monkeypatch.setattr(config, "__file__", str(site / "vnote" / "config.py"))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    notes = config._default_notes_dir()
+    assert notes == home / "voice-notes"
+    assert site.resolve() not in notes.parents

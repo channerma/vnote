@@ -162,6 +162,7 @@ def make_note(
     cleanup_backend: str | None = None
     cleanup_model: str | None = None
     cleanup_error: str | None = None
+    variant: dict | None = None  # {title, body, temperature} of the second, varied pass
     if raw:
         title = _fallback_title(transcript)
     else:
@@ -171,7 +172,16 @@ def make_note(
         on_stage("cleaning", backend=backend, mode=mode)
         t0 = time.monotonic()
         try:
-            result = clean_fn(transcript, mode=mode, backend=backend, model=model, instructions=instructions)
+            if config.double_clean():
+                # Double-clean runs both passes in-process so the temperature actually
+                # reaches the model (a warm daemon's cleaner has no temperature knob):
+                # a deterministic baseline at 0.0, then a varied pass. Uses the same
+                # backend/model/style chain as the single pass would.
+                from .cleanup import clean as _inproc_clean
+
+                result = _inproc_clean(transcript, mode=mode, backend=backend, model=model, temperature=0.0)
+            else:
+                result = clean_fn(transcript, mode=mode, backend=backend, model=model, instructions=instructions)
         except Exception as exc:  # noqa: BLE001 - never fatal: an LLM HTTP 500 or timeout keeps the raw transcript
             cleanup_error = str(exc)
             title = _fallback_title(transcript)
@@ -183,6 +193,17 @@ def make_note(
             note_body = result.body
             cleanup_backend = backend
             cleanup_model = resolved_model(backend, model, mode)
+            if config.double_clean():
+                _variant_temp = config.variant_temperature()
+                try:
+                    from .cleanup import clean as _inproc_clean
+
+                    vres = _inproc_clean(transcript, mode=mode, backend=backend, model=model,
+                                         temperature=_variant_temp)
+                except Exception as exc:  # noqa: BLE001 - the baseline note still stands
+                    on_stage("variant_failed", error=str(exc))
+                else:
+                    variant = {"title": vres.title, "body": vres.body, "temperature": _variant_temp}
 
     session_dir = output.make_session_dir(title, when=started)
     meta = {
@@ -196,6 +217,7 @@ def make_note(
         "cleanup_model": cleanup_model,
         "cleanup_seconds": cleanup_s,
         "title": title,
+        **({"cleanup_variant_temperature": variant["temperature"]} if variant else {}),
         **tmeta,
     }
     if note_body is not None:
@@ -219,6 +241,20 @@ def make_note(
             mode=mode, backend=backend, model=cleanup_model, when=started,
             instructions=instructions,
         )
+        if variant is not None:
+            # The user's two named comparison files, alongside the app's canonical
+            # note.md (which the web UI / versions / takes keep reading).
+            #   <folder>_note.md            = the deterministic (temp-0) baseline
+            #   <folder>_note_variant_tN.md = the varied pass; N encodes the temperature
+            temp_frac = str(variant["temperature"]).split(".")[-1] or "0"
+            (session_dir / f"{session_dir.name}_note.md").write_text(note_text, encoding="utf-8")
+            (session_dir / f"{session_dir.name}_note_variant_t{temp_frac}.md").write_text(
+                note_markdown(variant["title"], variant["body"], mode), encoding="utf-8"
+            )
+        elif config.double_clean():
+            # The varied pass failed — the deterministic baseline alone still gets its
+            # named file, so the pair layout stays predictable.
+            (session_dir / f"{session_dir.name}_note.md").write_text(note_text, encoding="utf-8")
     return NoteResult(
         session_dir=session_dir,
         title=title,

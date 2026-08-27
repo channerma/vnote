@@ -234,6 +234,17 @@ SETTINGS: tuple[Setting, ...] = (
         "Model for the opencode backend as provider/model (blank = opencode's own default; "
         "`opencode models` lists the ids).",
     ),
+    Setting(
+        "double_clean", "VNOTE_DOUBLE_CLEAN", "0",
+        "After cleaning a note, run a second, varied cleanup and keep both: the baseline at temperature 0 "
+        "plus a varied pass at variant_temperature, written as <folder>_note.md and "
+        "<folder>_note_variant_tN.md next to the note. 0 = off, 1 = on.",
+    ),
+    Setting(
+        "variant_temperature", "VNOTE_VARIANT_TEMPERATURE", "0.3",
+        "Sampling temperature for the second (varied) cleanup when double_clean is on; the variant file "
+        "name encodes it (t3 = 0.3, t4 = 0.4, ...).",
+    ),
     # --- bound at startup: shown read-only; set the env var and restart the daemon ---
     Setting(
         "whisper_model", "VNOTE_WHISPER_MODEL", "small",
@@ -312,6 +323,14 @@ def _coerce(s: Setting, raw: object) -> object:
             raise ValueError(f"{s.key} must be one of {', '.join(choices)}; got {value!r}")
     if s.key == "ollama_host" and not value.startswith(("http://", "https://")):
         raise ValueError(f"ollama_host must start with http:// or https://; got {value!r}")
+    if s.key == "double_clean" and str(value).strip().lower() not in ("0", "1", "false", "true", "off", "on"):
+        raise ValueError(f"{s.key} must be 0 or 1; got {value!r}")
+    if s.key == "variant_temperature":
+        try:
+            if not 0 <= float(value) <= 2:
+                raise ValueError
+        except ValueError:
+            raise ValueError(f"{s.key} must be a temperature between 0 and 2; got {value!r}") from None
     # Ollama reads a bare number as seconds (-1 = until it exits) and anything else with
     # Go's time.ParseDuration, which insists on a unit — reject what it would 400 on.
     if s.key == "ollama_keep_alive" and not re.fullmatch(r"-?\d+|(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+", value):
@@ -440,6 +459,19 @@ def opencode_model() -> str | None:
     ``opencode models`` to see the valid names.
     """
     return str(get("opencode_model")) or None
+
+
+def double_clean() -> bool:
+    """Whether to save a second, varied cleanup alongside the baseline note."""
+    return str(get("double_clean")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def variant_temperature() -> float:
+    """Sampling temperature for the varied cleanup; the file name encodes it (0.3 -> t3)."""
+    try:
+        return float(str(get("variant_temperature")))
+    except ValueError:
+        return 0.3
 
 
 def default_style() -> str:

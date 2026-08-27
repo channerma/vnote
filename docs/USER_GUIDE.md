@@ -418,6 +418,8 @@ default. A `.env` in the current directory is auto-loaded (see `.env.example`).
 | `claude_code_bin` | `VNOTE_CLAUDE_CODE_BIN` | `claude` | name or path of the Claude Code CLI |
 | `opencode_bin` | `VNOTE_OPENCODE_BIN` | `opencode` | name or path of the opencode CLI |
 | `opencode_model` | `VNOTE_OPENCODE_MODEL` | — | model for the `opencode` backend as `provider/model` (blank = opencode's own default; `opencode models` lists the ids) |
+| `double_clean` | `VNOTE_DOUBLE_CLEAN` | `0` | after cleaning, save a second varied cleanup alongside the baseline: `0` = off, `1` = on. Written next to the note as `<folder>_note.md` (temperature-0 baseline) and `<folder>_note_variant_tN.md` (varied pass) |
+| `variant_temperature` | `VNOTE_VARIANT_TEMPERATURE` | `0.3` | sampling temperature for the second (`double_clean`) pass; the variant file name encodes it (`t3` = 0.3, `t4` = 0.4, …) |
 | `whisper_model` | `VNOTE_WHISPER_MODEL` | `small` (CPU) / `large-v3-turbo` (CUDA) | faster-whisper model loaded at daemon start (~1.6 GB on first use) — **restart to apply** |
 | `notes_dir` | `VNOTE_DIR` | `./voice-notes` | where note folders are written — **restart to apply** |
 | `daemon_host` | `VNOTE_DAEMON_HOST` | `127.0.0.1` | address the daemon binds (keep it on localhost — no auth) — **restart to apply** |

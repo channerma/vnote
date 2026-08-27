@@ -90,8 +90,8 @@ def _record_complete(monkeypatch):
     """Capture what clean() hands the backend, without running one."""
     rec: dict = {}
 
-    def fake(backend, system, user, model):
-        rec.update(backend=backend, system=system, user=user, model=model)
+    def fake(backend, system, user, model, temperature=None):
+        rec.update(backend=backend, system=system, user=user, model=model, temperature=temperature)
         return "TITLE: T\n---\nbody"
 
     monkeypatch.setattr(cleanup, "_complete", fake)
@@ -324,8 +324,28 @@ def test_opencode_agent_file_disables_tools(tmp_path, monkeypatch):
     agent = (tmp_path / ".opencode" / "agent" / "vnote.md").read_text(encoding="utf-8")
     assert "mode: primary" in agent
     assert "you are an editor" in agent
+    assert "temperature: 0.3" in agent  # the backend's default
     for tool in ("write", "bash", "read", "webfetch", "task"):
         assert f"  {tool}: false" in agent
+
+
+def test_opencode_agent_writes_the_requested_temperature(tmp_path):
+    cleanup._write_opencode_agent(tmp_path, "you are an editor", temperature=0.0)
+    agent = (tmp_path / ".opencode" / "agent" / "vnote.md").read_text(encoding="utf-8")
+    assert "temperature: 0.0" in agent
+
+
+def test_clean_passes_temperature_through_to_opencode(monkeypatch):
+    rec: dict = {}
+    temps: list = []
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_opencode_run(rec))
+    monkeypatch.setattr(
+        cleanup, "_write_opencode_agent",
+        lambda sandbox, system, temperature=None: temps.append(temperature),
+    )
+    clean("x", backend="opencode", temperature=0.4)
+    assert temps == [0.4]
 
 
 def test_opencode_text_drops_reasoning_and_banner_lines():

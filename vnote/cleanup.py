@@ -194,12 +194,15 @@ def clean(
     model: str | None = None,
     tone: str | None = None,
     instructions: str | None = None,
+    temperature: float | None = None,
 ) -> CleanResult:
     """Clean ``transcript`` with the named style.
 
     ``mode`` keeps its name — every caller passes ``mode=`` — but it holds a *style*
     name now (styles.py). ``backend``/``model`` are the explicit picks: leave them
-    None and the style's own lines apply, then the settings.
+    None and the style's own lines apply, then the settings. ``temperature`` is
+    passed through to backends that accept it (opencode) — None means the backend's
+    own default.
     """
     style = _style_or_die(mode)
     raw = _complete(
@@ -207,6 +210,7 @@ def clean(
         _system_for(style),
         _build_user_prompt(transcript, style, tone, instructions),
         model or style.model,
+        temperature=temperature,
     )
     return _finish(raw, transcript, style)
 
@@ -320,8 +324,12 @@ def revise(
     return result
 
 
-def _complete(backend: str, system: str, user: str, model: str | None) -> str:
-    """Run one prompt through the chosen backend; returns the raw model text."""
+def _complete(backend: str, system: str, user: str, model: str | None, temperature: float | None = None) -> str:
+    """Run one prompt through the chosen backend; returns the raw model text.
+
+    ``temperature`` is honoured by backends that can set it (opencode); the rest
+    use their own default — pass None to leave every backend at that default.
+    """
     if backend == "ollama":
         return _ollama_complete(system, user, model or ollama_model())
     if backend == "claude-code":
@@ -333,7 +341,7 @@ def _complete(backend: str, system: str, user: str, model: str | None) -> str:
     if backend == "opencode":
         # No default model: let opencode use whatever provider/model the user has
         # already configured, unless the caller pinned one. `opencode models` lists them.
-        return _opencode_complete(system, user, model or config.opencode_model())
+        return _opencode_complete(system, user, model or config.opencode_model(), temperature=temperature)
     raise ValueError(
         f"unknown backend: {backend!r} (expected 'ollama', 'claude-code', 'opencode' or 'claude')"
     )
@@ -526,7 +534,7 @@ def _opencode_pure() -> bool:
     return os.environ.get("VNOTE_OPENCODE_PURE", "").strip().lower() not in ("0", "false", "no", "off")
 
 
-def _write_opencode_agent(sandbox: Path, system: str) -> None:
+def _write_opencode_agent(sandbox: Path, system: str, temperature: float | None = None) -> None:
     """Write a throwaway, tool-free opencode agent whose prompt is vnote's own.
 
     opencode has no ``--system-prompt`` flag; the supported way to set one is an
@@ -542,7 +550,7 @@ def _write_opencode_agent(sandbox: Path, system: str) -> None:
         "---\n"
         "description: vnote transcript cleanup (pure text transform)\n"
         "mode: primary\n"
-        "temperature: 0.3\n"
+        f"temperature: {0.3 if temperature is None else temperature}\n"
         "tools:\n"
         f"{tools}\n"
         "---\n"
@@ -574,12 +582,13 @@ def _opencode_text(stdout: str) -> str:
     return "".join(chunks)
 
 
-def _opencode_complete(system: str, user: str, model: str | None = None) -> str:
+def _opencode_complete(system: str, user: str, model: str | None = None, temperature: float | None = None) -> str:
     """Run one prompt through the opencode CLI; returns the raw model text.
 
     Like the claude-code backend: tools disabled, the user prompt on stdin (argv
     would cap out on a long transcript), and no model pinned unless the caller
     asked for one — opencode uses whatever provider/model the user configured.
+    ``temperature`` lands in the agent file (None = opencode's 0.3 default).
     """
     exe = opencode_bin()
     if exe is None:
@@ -594,7 +603,7 @@ def _opencode_complete(system: str, user: str, model: str | None = None) -> str:
     # otherwise turn a successful cleanup into a crash at teardown.
     with tempfile.TemporaryDirectory(prefix="vnote-opencode-", ignore_cleanup_errors=True) as tmp:
         sandbox = Path(tmp)
-        _write_opencode_agent(sandbox, system)
+        _write_opencode_agent(sandbox, system, temperature)
         cmd = [exe, "run", "--dir", str(sandbox), "--agent", "vnote", "--format", "json"]
         if _opencode_pure():
             cmd.insert(1, "--pure")

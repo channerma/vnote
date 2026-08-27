@@ -519,3 +519,103 @@ def test_an_append_does_not_stack_a_second_rule(tmp_path, monkeypatch):
         merge_fn=_merger("x"), how="continue", mode="light",
     )
     assert result["note"] == "# Deploy Notes\n\nStep one.\n\n---\n\nthe continuation\n"
+
+
+# --- double-clean (two compared outputs per saved note) ----------------------
+
+
+def _double_clean_runner(calls: list):
+    """A fake in-process cleanup.clean that resolves each pass by temperature."""
+    from vnote.cleanup import CleanResult
+
+    def fake(transcript, mode="edit", backend="ollama", model=None, instructions=None, temperature=None):
+        calls.append({"temperature": temperature, "transcript": transcript, "mode": mode,
+                      "backend": backend, "model": model})
+        if temperature == 0.0:
+            return CleanResult(title="Baseline Title", body="deterministic body")
+        return CleanResult(title="Variant Title", body=f"varied body at {temperature}")
+
+    return fake
+
+
+def test_double_clean_writes_named_baseline_and_variant(tmp_path, monkeypatch):
+    from vnote import cleanup as _inproc_mod
+
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    monkeypatch.setattr(output, "NOTES_DIR", notes)
+    monkeypatch.setattr(config, "double_clean", lambda: True)
+    monkeypatch.setattr(config, "variant_temperature", lambda: 0.3)
+    calls: list = []
+    monkeypatch.setattr(_inproc_mod, "clean", _double_clean_runner(calls))
+    src = _audio(tmp_path)
+
+    res = make_note(
+        src, transcribe_fn=_transcriber("a long transcript to compare"),
+        clean_fn=_cleaner(),  # must NOT be reached while double-clean is on
+        mode="edit", backend="ollama", source="file", source_path=str(src), rec_duration=3.0,
+    )
+
+    # Baseline runs at 0.0 (deterministic), the variant at the configured temperature.
+    assert [(c["temperature"]) for c in calls] == [0.0, 0.3]
+    assert all(c["backend"] == "ollama" for c in calls)
+
+    folder = res.session_dir.name
+    baseline = res.session_dir / f"{folder}_note.md"
+    variant = res.session_dir / f"{folder}_note_variant_t3.md"
+    assert baseline.read_text() == "# Baseline Title\n\ndeterministic body\n"
+    assert variant.read_text() == "# Variant Title\n\nvaried body at 0.3\n"
+    # The app's canonical note.md is the baseline copy (web UI / versions keep reading it).
+    assert (res.session_dir / "note.md").read_text() == baseline.read_text()
+    assert res.note_text == baseline.read_text()
+
+    meta = json.loads((res.session_dir / "meta.json").read_text())
+    assert meta["cleanup_variant_temperature"] == 0.3
+
+
+def test_double_clean_variant_filename_reflects_temperature(tmp_path, monkeypatch):
+    from vnote import cleanup as _inproc_mod
+
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    monkeypatch.setattr(output, "NOTES_DIR", notes)
+    monkeypatch.setattr(config, "double_clean", lambda: True)
+    monkeypatch.setattr(config, "variant_temperature", lambda: 0.4)
+    calls: list = []
+    monkeypatch.setattr(_inproc_mod, "clean", _double_clean_runner(calls))
+    src = _audio(tmp_path)
+
+    res = make_note(
+        src, transcribe_fn=_transcriber("x"), clean_fn=_cleaner(),
+        mode="edit", backend="ollama", source="file", source_path=str(src), rec_duration=1.0,
+    )
+    assert (res.session_dir / f"{res.session_dir.name}_note_variant_t4.md").exists()
+    assert not (res.session_dir / f"{res.session_dir.name}_note_variant_t3.md").exists()
+
+
+def test_double_clean_variant_failure_keeps_the_baseline_note(tmp_path, monkeypatch):
+    from vnote import cleanup as _inproc_mod
+    from vnote.cleanup import CleanResult
+
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    monkeypatch.setattr(output, "NOTES_DIR", notes)
+    monkeypatch.setattr(config, "double_clean", lambda: True)
+    monkeypatch.setattr(config, "variant_temperature", lambda: 0.3)
+
+    def boom_then_ok(transcript, mode="edit", backend="ollama", model=None, instructions=None, temperature=None):
+        if temperature == 0.0:
+            return CleanResult(title="Keep This", body="the safe baseline")
+        raise RuntimeError("variant blew up")
+
+    monkeypatch.setattr(_inproc_mod, "clean", boom_then_ok)
+    src = _audio(tmp_path)
+    res = make_note(
+        src, transcribe_fn=_transcriber("x"), clean_fn=_cleaner(),
+        mode="edit", backend="ollama", source="file", source_path=str(src), rec_duration=1.0,
+    )
+    assert res.cleanup_error is None  # the note itself never fails
+    assert (res.session_dir / "note.md").read_text().startswith("# Keep This")
+    # No variant file, but the named baseline is still written.
+    assert (res.session_dir / f"{res.session_dir.name}_note.md").exists()
+    assert not any("_note_variant_" in p.name for p in res.session_dir.iterdir())

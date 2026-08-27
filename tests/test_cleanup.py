@@ -2,7 +2,6 @@
 
 import json
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -218,6 +217,126 @@ def test_claude_code_timeout_is_reported(monkeypatch):
     monkeypatch.setattr(cleanup.subprocess, "run", boom)
     with pytest.raises(RuntimeError, match="timed out"):
         clean("x", backend="claude-code")
+
+
+# --- opencode backend (whatever provider/model opencode is configured with) ----
+
+
+def _opencode_json_stdout(*parts):
+    return "".join(
+        json.dumps({"type": "text", "part": {"text": part}}) + "\n" for part in parts
+    )
+
+
+def _fake_opencode_run(recorder, *, stdout=None, returncode=0, stderr=""):
+    if stdout is None:
+        stdout = _opencode_json_stdout("TITLE: T\n---\nbody")
+    def run(cmd, **kwargs):
+        recorder["cmd"] = cmd
+        recorder["input"] = kwargs.get("input")
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+
+    return run
+
+
+def test_opencode_missing_cli_explains_how_to_fix(monkeypatch):
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: None)
+    with pytest.raises(RuntimeError, match="opencode CLI") as exc:
+        clean("hi", backend="opencode")
+    assert "VNOTE_OPENCODE_BIN" in str(exc.value)
+
+
+def test_opencode_disables_tools_and_pipes_prompt_on_stdin(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_opencode_run(rec))
+
+    result = clean("um so the parser broke", mode="edit", backend="opencode")
+
+    assert rec["cmd"][0] == "/usr/bin/opencode"
+    assert "run" in rec["cmd"]
+    # Runs in an empty scratch directory under its own agent — never the user's project.
+    assert "--dir" in rec["cmd"]
+    assert rec["cmd"][rec["cmd"].index("--agent") + 1] == "vnote"
+    assert "--format" in rec["cmd"] and rec["cmd"][rec["cmd"].index("--format") + 1] == "json"
+    # Isolation on by default; pinned model only when asked for.
+    assert "--pure" in rec["cmd"]
+    assert "--model" not in rec["cmd"]
+    # Transcript travels on stdin, not argv.
+    assert "um so the parser broke" in rec["input"]
+    assert not any("um so the parser broke" in part for part in rec["cmd"])
+    assert (result.title, result.body) == ("T", "body")
+
+
+def test_opencode_passes_model_only_when_given(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_opencode_run(rec))
+    clean("x", backend="opencode", model="anthropic/claude-opus-5")
+    assert rec["cmd"][rec["cmd"].index("--model") + 1] == "anthropic/claude-opus-5"
+
+
+def test_opencode_uses_configured_model_when_none_given(monkeypatch):
+    # With no --model, the backend resolves the setting (here pinned in the config file).
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_opencode_run(rec))
+    config.save_config({"opencode_model": "openai/gpt-5"})
+    try:
+        clean("x", backend="opencode")
+    finally:
+        config.save_config({})
+    assert rec["cmd"][rec["cmd"].index("--model") + 1] == "openai/gpt-5"
+
+
+def test_opencode_plain_style_returns_plain_text(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(
+        cleanup.subprocess, "run",
+        _fake_opencode_run(rec, stdout=_opencode_json_stdout("cleaned words")),
+    )
+    result = clean("raw words", mode="dictation", backend="opencode")
+    assert result.body == "cleaned words"  # no TITLE framing parsed for output: plain
+
+
+def test_opencode_nonzero_exit_surfaces_stderr(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(
+        cleanup.subprocess, "run", _fake_opencode_run(rec, returncode=1, stdout="", stderr="provider not signed in")
+    )
+    with pytest.raises(RuntimeError, match="provider not signed in"):
+        clean("x", backend="opencode")
+
+
+def test_opencode_empty_output_is_an_error(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_opencode_run(rec, stdout="   \n"))
+    with pytest.raises(RuntimeError, match="empty response"):
+        clean("x", backend="opencode")
+
+
+def test_opencode_agent_file_disables_tools(tmp_path, monkeypatch):
+    # The sandbox is the whole point: the model must see an empty project, no tools.
+    cleanup._write_opencode_agent(tmp_path, "you are an editor")
+    agent = (tmp_path / ".opencode" / "agent" / "vnote.md").read_text(encoding="utf-8")
+    assert "mode: primary" in agent
+    assert "you are an editor" in agent
+    for tool in ("write", "bash", "read", "webfetch", "task"):
+        assert f"  {tool}: false" in agent
+
+
+def test_opencode_text_drops_reasoning_and_banner_lines():
+    stream = (
+        "opencode 1.0 (command not a json line)\n"
+        + json.dumps({"type": "reasoning", "part": {"text": "secret scratchpad"}})
+        + "\n"
+        + _opencode_json_stdout("clean, ", "final.")
+    )
+    assert cleanup._opencode_text(stream) == "clean, final."
+    assert "secret scratchpad" not in cleanup._opencode_text(stream)
 
 
 # --- free-text instructions on cleanup ---------------------------------------

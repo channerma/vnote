@@ -39,28 +39,27 @@ already downloaded:
 
 | `VNOTE_WHISPER_MODEL` | time | notes |
 |---|---|---|
-| `base` | 1.3 s | fastest; fine for flow dictation |
+| `base` | 1.3 s | fastest; fine for quick notes |
 | `small` (default) | 2.8 s | good balance — the default |
 | `large-v3-turbo` | 10.1 s | best accuracy; the right pick on CUDA |
 
-`small` is the default for that reason — it keeps flow dictation responsive on CPU. On a
+`small` is the default for that reason — it keeps live transcription responsive on CPU. On a
 CUDA box, where `large-v3-turbo` runs about realtime, prefer accuracy:
 
 ```bash
 export VNOTE_WHISPER_MODEL=large-v3-turbo
 ```
 
-Mic recording and the flow hotkey both need macOS permissions, granted to *the terminal or
-app that launches vnote* (System Settings → Privacy & Security):
+Mic permissions depend on how you record:
 
-- **Microphone** — for `vnote` with no file argument.
-- **Accessibility** — for `vnote-flow`: reading the global hotkey, injecting the
-  paste, and reading the frontmost app's window title as AppleScript all go through
-  it. Without it the hotkey silently never fires.
+- **Web UI** — the recording happens in your *browser*, so the Microphone grant goes to the
+  browser, not to vnote (System Settings → Privacy & Security → Microphone, tick your browser;
+  Safari/Chrome also ask on first record).
+- **CLI** (`vnote` with no file argument) — the grant goes to the *terminal* that launches it.
 
-Beyond those two, nothing else on macOS needs installing:
+That's all macOS needs installed — nothing else:
 
-- **No audio tools.** Mic capture uses `sounddevice` with its bundled PortAudio.
+- **No audio tools.** Command-line mic capture uses `sounddevice` with its bundled PortAudio.
   `parec`/`pw-record` are WSL/Linux-only — don't install `pulseaudio-utils` here.
   A Homebrew `ffmpeg` on PATH is harmless: vnote ignores it for mic capture (its
   `-f pulse` input is Linux-only). Audio *files* (`vnote memo.m4a`) decode through
@@ -69,15 +68,9 @@ Beyond those two, nothing else on macOS needs installing:
   CUDA on this platform — you never see "GPU init failed … not compiled with CUDA";
   `vnote --doctor`/`--config` just report CPU. (Off macOS the probe and its error
   still run, so a broken Linux CUDA stack stays loud.)
-- **Pasting is ⌘V.** `vnote-flow` sends Cmd+V on macOS (Ctrl+V elsewhere) — that's
-  one more reason the Accessibility grant must be to the launching app.
-- **Per-app tone reads the window title via AppleScript** (System Events), only if
-  you add an `app_tones` map to `~/.config/vnote/config.json`. The first read
-  prompts once for Automation control of System Events; decline and tone just
-  falls back to `--tone`.
-- **Always-on is manual so far.** No launchd unit ships yet — run
-  `vnote --serve` and `vnote-flow --tray` yourself, or add your own LaunchAgent,
-  for at-login dictation (see the User Guide's always-on section).
+- **Always-on is manual so far.** No launchd unit ships yet — run `vnote --serve`
+  yourself, or add your own LaunchAgent (absolute paths — launchd runs with a
+  minimal PATH), to keep the daemon + web UI at login.
 
 </details>
 
@@ -91,6 +84,8 @@ You also need **a cleanup backend** — one of:
 
 - **[Claude Code](https://claude.com/product/claude-code)** — best quality, uses your Claude
   subscription, no API key. Nothing to download.
+- **[opencode](https://opencode.ai)** — reuses whatever provider you already set it up
+  with (a local server, or a hosted provider). No extra key for vnote.
 - **[Ollama](https://ollama.com)** — local, offline, free: `ollama pull qwen2.5:14b-instruct`
   (~10 GB VRAM; lighter options exist).
 

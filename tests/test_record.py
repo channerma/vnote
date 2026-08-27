@@ -383,3 +383,47 @@ def test_record_via_pipe_ends_at_source_eof_without_a_key(monkeypatch, tmp_path)
     assert seconds == pytest.approx(8000 / BYTES_PER_S)
     with wave.open(str(dest), "rb") as w:
         assert w.getnframes() == 8000 // (2 * CHANNELS) and w.getframerate() == SAMPLE_RATE
+
+
+# --- backend selection (the Mac/Homebrew-ffmpeg regression) ------------------
+
+
+def _which_only(tool: str) -> object:
+    """shutil.which stub: only ``tool`` exists (ffmpeg at the Homebrew path on a Mac)."""
+    return lambda name: "/opt/homebrew/bin/ffmpeg" if name == "ffmpeg" and tool == "ffmpeg" else None
+
+
+def test_macos_never_selects_the_pulse_ffmpeg_backend(monkeypatch):
+    """ffmpeg's -f pulse is Linux-only. With Homebrew ffmpeg on PATH and no
+    parec/pw-record, macOS must fall through to sounddevice — selecting ffmpeg
+    makes every recording abort at 0.2s with 'Nothing recorded (too short)'."""
+    monkeypatch.setattr(record.sys, "platform", "darwin")
+    monkeypatch.setattr(record.shutil, "which", _which_only("ffmpeg"))
+    assert record.selected_backend() == "sounddevice"
+
+
+def test_linux_still_uses_ffmpeg_when_no_pulse_cli_is_present(monkeypatch):
+    monkeypatch.setattr(record.sys, "platform", "linux")
+    monkeypatch.setattr(record.shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+    assert record.selected_backend() == "ffmpeg"
+
+
+def test_parec_still_wins_on_wsl(monkeypatch):
+    monkeypatch.setattr(record.sys, "platform", "linux")
+    monkeypatch.setattr(record.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert record.selected_backend() == "parec"
+
+
+def test_record_to_wav_uses_the_gated_selection(monkeypatch, tmp_path):
+    # record_to_wav must respect the gate too: the helpers aren't dead code.
+    monkeypatch.setattr(record.sys, "platform", "darwin")
+    monkeypatch.setattr(record.shutil, "which", _which_only("ffmpeg"))
+    calls: list[str] = []
+
+    def recorded(dest):
+        calls.append("sounddevice")
+
+    monkeypatch.setattr(record, "_record_via_sounddevice", recorded)
+    monkeypatch.setattr(record, "_record_via_pipe", lambda cmd, dest: calls.append("pipe"))
+    record.record_to_wav(tmp_path / "x.wav")
+    assert calls == ["sounddevice"]

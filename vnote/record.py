@@ -24,7 +24,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -466,15 +465,13 @@ def record_to_wav(dest: Path) -> float:
 
     Returns the recording duration in seconds.
     """
-    raw_cmd = _raw_pcm_cmd()
-    if raw_cmd is not None:
-        return _record_via_pipe(raw_cmd, dest)
-    if sys.platform != "win32" and shutil.which("ffmpeg"):
+    backend = selected_backend()
+    if backend in ("parec", "pw-record"):
+        return _record_via_pipe(_raw_pcm_cmd(), dest)
+    if backend == "ffmpeg":
         return _record_via_pipe(_ffmpeg_cmd(), dest)
-    try:
-        import sounddevice  # noqa: F401
-    except OSError as exc:
-        raise RuntimeError(f"{exc}\n\n{_INSTALL_HINT}") from exc
+    if backend is None:
+        raise RuntimeError(_INSTALL_HINT)
     try:
         return _record_via_sounddevice(dest)
     except Exception as exc:  # noqa: BLE001 - PortAudio "no device" etc.

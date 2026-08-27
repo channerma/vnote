@@ -13,6 +13,7 @@ from . import config
 
 _model = None  # lazily loaded, cached for the process
 _device = None
+_model_name = None  # which model _model actually is (the device decides by default)
 _load_lock = threading.Lock()  # the daemon warms on a background thread while requests arrive
 
 
@@ -55,6 +56,20 @@ def is_warm() -> bool:
     return _model is not None
 
 
+def _cuda_plausible() -> bool:
+    """Whether trying CUDA here can possibly succeed.
+
+    CTranslate2 publishes no CUDA-enabled macOS wheel (and no Metal/MPS backend),
+    so on darwin the attempt fails 100% of the time — it printed "GPU init failed:
+    This CTranslate2 package was not compiled with CUDA support" on every single
+    run. That is noise, not a diagnosis. Everywhere else the attempt is still worth
+    making and its failure still worth printing: a Linux box with a half-installed
+    CUDA stack genuinely needs to be told. `--doctor` is where macOS users are told
+    they are on CPU, once, instead of on every transcription.
+    """
+    return sys.platform != "darwin"
+
+
 def _load_model():
     """Load the model once, even when several threads ask at the same time.
 
@@ -68,12 +83,18 @@ def _load_model():
     with _load_lock:
         if _model is not None:  # another thread built it while we waited
             return _model
-        _preload_cuda_libs()
-        try:
-            model, device = _build("cuda"), "cuda"
-        except Exception as exc:  # noqa: BLE001
-            print(f"  (GPU init failed: {exc}; using CPU)", file=sys.stderr)
+        if not _cuda_plausible():
+            # macOS has no CUDA build; probing can only fail, so don't. (Off macOS
+            # the probe below and its error message still run — a broken CUDA stack
+            # there genuinely needs to be heard.)
             model, device = _build("cpu"), "cpu"
+        else:
+            _preload_cuda_libs()
+            try:
+                model, device = _build("cuda"), "cuda"
+            except Exception as exc:  # noqa: BLE001
+                print(f"  (GPU init failed: {exc}; using CPU)", file=sys.stderr)
+                model, device = _build("cpu"), "cpu"
         _device = device
         _model = model  # published last: is_warm() must not go true before _device is set
         return _model

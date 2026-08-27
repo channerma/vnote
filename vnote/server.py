@@ -660,7 +660,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "status": "ok",
                     "version": __version__,
                     "device": transcribe._device or "cpu",
-                    "whisper_model": config.WHISPER_MODEL,
+                    "whisper_model": transcribe._model_name or config.WHISPER_MODEL,
                     "uptime_s": round(time.monotonic() - _started, 1),
                     "warm": transcribe.is_warm(),
                     "warm_error": _warm_error,

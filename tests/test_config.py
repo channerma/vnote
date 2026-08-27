@@ -182,7 +182,7 @@ def test_describe_rows_carry_the_contract_fields(tmp_path, monkeypatch):
     for row in rows.values():
         assert {"key", "env", "value", "default", "description", "kind", "source", "editable"} <= set(row)
         assert row["source"] in ("env", "file", "default")
-    assert rows["backend"]["choices"] == ["ollama", "claude-code", "claude"]
+    assert rows["backend"]["choices"] == ["ollama", "claude-code", "opencode", "claude"]
     # default_style has no fixed list: the choices are whatever the style files say
     from vnote import styles
 

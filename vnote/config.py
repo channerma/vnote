@@ -98,11 +98,20 @@ NOTES_DIR = Path(os.environ.get("VNOTE_DIR") or _default_notes_dir())
 # --- Whisper ---
 # No single default is right for both machines this runs on, so the default follows
 # the device. On CPU (macOS: CTranslate2 has no Metal build) large-v3-turbo runs
-# ~1x realtime — a 22s note took 24.9s — which is fine for a memo but unusable for
-# flow dictation, where you wait on every utterance; `small` is ~3x faster. On CUDA
+# ~1x realtime — a 22s note took 24.9s — which is fine for a memo but makes the
+# live transcript lag while you keep talking; `small` is ~3x faster. On CUDA
 # large-v3-turbo is also ~realtime, so there accuracy is free. VNOTE_WHISPER_MODEL
 # (or `whisper_model` in config.json) overrides both.
 WHISPER_MODEL_BY_DEVICE = {"cuda": "large-v3-turbo", "cpu": "small"}
+
+# The model the daemon *reports* (health, banner, settings): the explicit pick, or
+# the CPU default. The actual build is decided device-aware at load time by
+# whisper_model(device) — on a CUDA box with no override that is large-v3-turbo.
+WHISPER_MODEL = (
+    os.environ.get("VNOTE_WHISPER_MODEL")
+    or str(load_config().get("whisper_model") or "")
+    or WHISPER_MODEL_BY_DEVICE["cpu"]
+)
 
 
 def whisper_model(device: str = "cpu") -> str:
@@ -183,8 +192,9 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         "backend", "VNOTE_BACKEND", BUILTIN_BACKEND,
         "Which LLM cleans up transcripts: ollama (local, offline, free), claude-code (your Claude "
-        "subscription through the Claude Code CLI, no API key), or claude (the Anthropic API, billed per token).",
-        "choice", ("ollama", "claude-code", "claude"),
+        "subscription through the Claude Code CLI, no API key), opencode (whatever provider/model opencode "
+        "is configured with), or claude (the Anthropic API, billed per token).",
+        "choice", ("ollama", "claude-code", "opencode", "claude"),
     ),
     Setting(
         "default_style", "VNOTE_STYLE", DEFAULT_STYLE,
@@ -215,10 +225,20 @@ SETTINGS: tuple[Setting, ...] = (
         "claude_code_bin", "VNOTE_CLAUDE_CODE_BIN", "claude",
         "Name or path of the Claude Code CLI used by the claude-code backend.",
     ),
+    Setting(
+        "opencode_bin", "VNOTE_OPENCODE_BIN", "opencode",
+        "Name or path of the opencode CLI used by the opencode backend.",
+    ),
+    Setting(
+        "opencode_model", "VNOTE_OPENCODE_MODEL", "",
+        "Model for the opencode backend as provider/model (blank = opencode's own default; "
+        "`opencode models` lists the ids).",
+    ),
     # --- bound at startup: shown read-only; set the env var and restart the daemon ---
     Setting(
-        "whisper_model", "VNOTE_WHISPER_MODEL", "large-v3-turbo",
-        "faster-whisper model loaded when the daemon starts (about 1.6 GB, downloaded on first use).",
+        "whisper_model", "VNOTE_WHISPER_MODEL", "small",
+        "faster-whisper model loaded when the daemon starts (about 1.6 GB, downloaded on first use). "
+        "Default follows the device: small on CPU, large-v3-turbo on CUDA — set this env var to pin it.",
         editable=False,
     ),
     Setting(
@@ -401,9 +421,25 @@ def backend() -> str:
     return str(get("backend"))
 
 
+# Name or path of the opencode CLI, for the `--backend opencode` path. Always an
+# env var (not an editable setting): pointing at a CLI is a per-invocation choice,
+# and doctor/cleanup resolve it the moment the backend is used.
+OPENCODE_BIN = os.environ.get("VNOTE_OPENCODE_BIN", "opencode")
+
+
 def ollama_model() -> str:
     """Resolve the Ollama cleanup model."""
     return str(get("ollama_model"))
+
+
+def opencode_model() -> str | None:
+    """Resolve the opencode backend model as ``provider/model``.
+
+    ``None`` means "don't pass ``-m``" — opencode then uses whatever default the
+    user configured, so vnote never overrides their provider choice. Run
+    ``opencode models`` to see the valid names.
+    """
+    return str(get("opencode_model")) or None
 
 
 def default_style() -> str:

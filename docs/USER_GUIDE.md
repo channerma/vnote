@@ -408,7 +408,7 @@ default. A `.env` in the current directory is auto-loaded (see `.env.example`).
 
 | setting | env var | default | what it does |
 |---|---|---|---|
-| `backend` | `VNOTE_BACKEND` | `ollama` | `ollama` (local, offline, free) · `claude-code` (your Claude subscription via the Claude Code CLI, no API key) · `claude` (Anthropic API, billed per token) |
+| `backend` | `VNOTE_BACKEND` | `ollama` | `ollama` (local, offline, free) · `claude-code` (your Claude subscription via the Claude Code CLI, no API key) · `opencode` (whatever provider/model [opencode](https://opencode.ai) is configured with) · `claude` (Anthropic API, billed per token) |
 | `default_style` | `VNOTE_STYLE` | `edit` | [style](#styles) used when none is picked — the choices are whatever your style folders hold. The old `default_mode` / `VNOTE_MODE` names are still read (deprecated) |
 | `language` | `VNOTE_LANGUAGE` | — | transcription language code (`en`, `de`, …); blank = auto-detect per recording |
 | `ollama_model` | `VNOTE_OLLAMA_MODEL` | `qwen2.5:14b-instruct` | Ollama model for note cleanup (`ollama pull` it once); a style can name its own instead |
@@ -416,7 +416,9 @@ default. A `.env` in the current directory is auto-loaded (see `.env.example`).
 | `ollama_keep_alive` | `VNOTE_OLLAMA_KEEP_ALIVE` | `30m` | how long Ollama keeps the model loaded after a request — a duration with a unit (`30m`, `1h30m`), a bare number of seconds (`300`), or `-1` = until Ollama exits (Ollama's own default is `5m`) |
 | `claude_model` | `VNOTE_CLAUDE_MODEL` | `claude-sonnet-5` | model for the `claude` (API) backend; `claude-code` uses the CLI's own choice |
 | `claude_code_bin` | `VNOTE_CLAUDE_CODE_BIN` | `claude` | name or path of the Claude Code CLI |
-| `whisper_model` | `VNOTE_WHISPER_MODEL` | `large-v3-turbo` | faster-whisper model loaded at daemon start (~1.6 GB on first use) — **restart to apply** |
+| `opencode_bin` | `VNOTE_OPENCODE_BIN` | `opencode` | name or path of the opencode CLI |
+| `opencode_model` | `VNOTE_OPENCODE_MODEL` | — | model for the `opencode` backend as `provider/model` (blank = opencode's own default; `opencode models` lists the ids) |
+| `whisper_model` | `VNOTE_WHISPER_MODEL` | `small` (CPU) / `large-v3-turbo` (CUDA) | faster-whisper model loaded at daemon start (~1.6 GB on first use) — **restart to apply** |
 | `notes_dir` | `VNOTE_DIR` | `./voice-notes` | where note folders are written — **restart to apply** |
 | `daemon_host` | `VNOTE_DAEMON_HOST` | `127.0.0.1` | address the daemon binds (keep it on localhost — no auth) — **restart to apply** |
 | `daemon_port` | `VNOTE_DAEMON_PORT` | `8760` | port the daemon listens on — **restart to apply** |

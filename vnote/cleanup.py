@@ -330,6 +330,10 @@ def _complete(backend: str, system: str, user: str, model: str | None) -> str:
         return _claude_code_complete(system, user, model)
     if backend == "claude":
         return _claude_complete(system, user, model or str(config.get("claude_model")))
+    if backend == "opencode":
+        # No default model: let opencode use whatever provider/model the user has
+        # already configured, unless the caller pinned one. `opencode models` lists them.
+        return _opencode_complete(system, user, model or config.opencode_model())
     raise ValueError(
         f"unknown backend: {backend!r} (expected 'ollama', 'claude-code', 'opencode' or 'claude')"
     )
@@ -510,7 +514,7 @@ _OPENCODE_TOOLS_OFF = (
 
 def opencode_bin() -> str | None:
     """Path to the opencode executable, or None if it isn't installed."""
-    return shutil.which(OPENCODE_BIN)
+    return shutil.which(config.OPENCODE_BIN)
 
 
 def _opencode_pure() -> bool:
@@ -522,7 +526,7 @@ def _opencode_pure() -> bool:
     return os.environ.get("VNOTE_OPENCODE_PURE", "").strip().lower() not in ("0", "false", "no", "off")
 
 
-def _write_opencode_agent(sandbox: Path, mode: str) -> None:
+def _write_opencode_agent(sandbox: Path, system: str) -> None:
     """Write a throwaway, tool-free opencode agent whose prompt is vnote's own.
 
     opencode has no ``--system-prompt`` flag; the supported way to set one is an
@@ -542,7 +546,7 @@ def _write_opencode_agent(sandbox: Path, mode: str) -> None:
         "tools:\n"
         f"{tools}\n"
         "---\n"
-        f"{_system_for(mode)}\n",
+        f"{system}\n",
         encoding="utf-8",
     )
 
@@ -570,18 +574,17 @@ def _opencode_text(stdout: str) -> str:
     return "".join(chunks)
 
 
-def _clean_opencode(
-    transcript: str, mode: str, model: str | None = None, tone: str | None = None
-) -> CleanResult:
-    """Clean up via the opencode CLI, using the provider/model it's configured with.
+def _opencode_complete(system: str, user: str, model: str | None = None) -> str:
+    """Run one prompt through the opencode CLI; returns the raw model text.
 
-    Like the claude-code backend: tools disabled, prompt on stdin (argv would cap
-    out on a long transcript), and no model pinned unless the user asked for one.
+    Like the claude-code backend: tools disabled, the user prompt on stdin (argv
+    would cap out on a long transcript), and no model pinned unless the caller
+    asked for one — opencode uses whatever provider/model the user configured.
     """
     exe = opencode_bin()
     if exe is None:
         raise RuntimeError(
-            f"The opencode backend needs the opencode CLI on PATH (looked for {OPENCODE_BIN!r}).\n"
+            f"The opencode backend needs the opencode CLI on PATH (looked for {config.OPENCODE_BIN!r}).\n"
             "    Install it:              https://opencode.ai\n"
             "    Or point vnote at it:    VNOTE_OPENCODE_BIN=/path/to/opencode\n"
             "    Or use the local backend:  --backend ollama"
@@ -591,7 +594,7 @@ def _clean_opencode(
     # otherwise turn a successful cleanup into a crash at teardown.
     with tempfile.TemporaryDirectory(prefix="vnote-opencode-", ignore_cleanup_errors=True) as tmp:
         sandbox = Path(tmp)
-        _write_opencode_agent(sandbox, mode)
+        _write_opencode_agent(sandbox, system)
         cmd = [exe, "run", "--dir", str(sandbox), "--agent", "vnote", "--format", "json"]
         if _opencode_pure():
             cmd.insert(1, "--pure")
@@ -600,7 +603,7 @@ def _clean_opencode(
         try:
             proc = subprocess.run(
                 cmd,
-                input=_build_user_prompt(transcript, mode, tone),
+                input=user,
                 capture_output=True,
                 text=True,
                 timeout=_OPENCODE_TIMEOUT_S,
@@ -623,7 +626,7 @@ def _clean_opencode(
             "empty response from opencode" + (f": {detail}" if detail else "")
             + "\n    Is a model configured and reachable?  opencode models"
         )
-    return _finish(content, transcript, mode)
+    return content
 
 
 # --- Claude (optional metered API backend) ---

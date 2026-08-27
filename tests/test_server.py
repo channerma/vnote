@@ -600,7 +600,7 @@ def test_settings_get_and_put(live_server, clean_env):
     status, data = _get_json("/api/settings")
     assert status == 200
     rows = {row["key"]: row for row in data["settings"]}
-    assert rows["backend"]["choices"] == ["ollama", "claude-code", "claude"]
+    assert rows["backend"]["choices"] == ["ollama", "claude-code", "opencode", "claude"]
     assert rows["backend"]["source"] == "default" and rows["whisper_model"]["editable"] is False
     status, data = _send_json("PUT", "/api/settings", {"backend": "claude-code", "language": "en"})
     assert status == 200 and data["saved"] == ["backend", "language"]

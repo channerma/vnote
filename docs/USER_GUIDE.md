@@ -401,6 +401,13 @@ systemctl --user enable --now vnote-daemon
 Daemon and client on the same machine — `pip install 'vnote[flow]'`, run `vnote --serve`
 and `vnote-flow --tray`. No WSL seam to bridge.
 
+On macOS there's no launchd unit yet; for at-login dictation add your own LaunchAgent
+(~/Library/LaunchAgents) — one for the daemon and one for `vnote-flow --tray`. launchd
+runs with a minimal PATH, so point `ProgramArguments` at the **absolute** path of each
+binary (`$(brew --prefix)/bin/vnote`, or `~/.local/bin/vnote` for `uv tool install`).
+And remember the client's Microphone/Accessibility grants go to whatever app launchd
+actually spawns.
+
 ---
 
 ## Environment variables

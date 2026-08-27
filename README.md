@@ -54,8 +54,30 @@ Mic recording and the flow hotkey both need macOS permissions, granted to *the t
 app that launches vnote* (System Settings → Privacy & Security):
 
 - **Microphone** — for `vnote` with no file argument.
-- **Accessibility** — for `vnote-flow`, which needs to read a global hotkey and inject
-  keystrokes into other apps. Without it the hotkey silently never fires.
+- **Accessibility** — for `vnote-flow`: reading the global hotkey, injecting the
+  paste, and reading the frontmost app's window title as AppleScript all go through
+  it. Without it the hotkey silently never fires.
+
+Beyond those two, nothing else on macOS needs installing:
+
+- **No audio tools.** Mic capture uses `sounddevice` with its bundled PortAudio.
+  `parec`/`pw-record` are WSL/Linux-only — don't install `pulseaudio-utils` here.
+  A Homebrew `ffmpeg` on PATH is harmless: vnote ignores it for mic capture (its
+  `-f pulse` input is Linux-only). Audio *files* (`vnote memo.m4a`) decode through
+  faster-whisper's bundled ffmpeg, so no separate binary is needed either.
+- **No CUDA noise.** CTranslate2 ships no macOS build, so vnote doesn't even probe
+  CUDA on this platform — you never see "GPU init failed … not compiled with CUDA";
+  `vnote --doctor`/`--config` just report CPU. (Off macOS the probe and its error
+  still run, so a broken Linux CUDA stack stays loud.)
+- **Pasting is ⌘V.** `vnote-flow` sends Cmd+V on macOS (Ctrl+V elsewhere) — that's
+  one more reason the Accessibility grant must be to the launching app.
+- **Per-app tone reads the window title via AppleScript** (System Events), only if
+  you add an `app_tones` map to `~/.config/vnote/config.json`. The first read
+  prompts once for Automation control of System Events; decline and tone just
+  falls back to `--tone`.
+- **Always-on is manual so far.** No launchd unit ships yet — run
+  `vnote --serve` and `vnote-flow --tray` yourself, or add your own LaunchAgent,
+  for at-login dictation (see the User Guide's always-on section).
 
 </details>
 

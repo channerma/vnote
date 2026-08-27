@@ -6,8 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from vnote import cleanup, config
-from vnote.cleanup import _build_user_prompt, _finish, _parse_response, clean
+from vnote import cleanup, config, styles
+from vnote.cleanup import _build_user_prompt, _finish, _parse_response, clean, revise
+
+
+def _style(name: str):
+    """The built-in style of that name — the prompt helpers take a Style, not a name."""
+    return styles.get(name)
 
 
 def test_parse_full_title_and_body():
@@ -43,51 +48,86 @@ def test_parse_empty_everything_yields_placeholder_title():
     assert r.body == ""
 
 
-def test_build_user_prompt_includes_mode_instruction_and_transcript():
-    prompt = _build_user_prompt("hello there", "light")
+def test_build_user_prompt_includes_the_style_body_and_transcript():
+    prompt = _build_user_prompt("hello there", _style("light"))
     assert "hello there" in prompt
     assert "filler" in prompt.lower()  # the 'light' instruction mentions filler words
 
 
-# --- dictation mode (flow client) --------------------------------------------
+# --- output: plain (no title framing) ---------------------------------------
 
 
-def test_dictation_finish_is_plain_text_not_title_framed():
-    r = _finish("TITLE: looks like a title\n---\nbut dictation takes it verbatim", "orig words here", "dictation")
+def test_plain_output_finish_is_not_title_framed():
+    r = _finish("TITLE: looks like a title\n---\nbut dictation takes it verbatim", "orig words here",
+                _style("dictation"))
     assert r.body == "TITLE: looks like a title\n---\nbut dictation takes it verbatim"
     assert r.title == "orig words here"  # fallback title from the transcript; flow ignores it
 
 
-def test_note_modes_still_parse_title_framing():
-    r = _finish("TITLE: A Note\n---\nbody", "x", "edit")
+def test_note_output_still_parses_title_framing():
+    r = _finish("TITLE: A Note\n---\nbody", "x", _style("edit"))
     assert (r.title, r.body) == ("A Note", "body")
 
 
 def test_dictation_prompt_mentions_spoken_commands():
-    prompt = _build_user_prompt("x", "dictation")
+    prompt = _build_user_prompt("x", _style("dictation"))
     assert "scratch that" in prompt
 
 
 def test_tone_lands_in_the_prompt():
-    assert "Write in a casual tone." in _build_user_prompt("x", "dictation", tone="casual")
-    assert "tone" not in _build_user_prompt("x", "light")  # no tone -> no tone sentence
+    assert "Write in a casual tone." in _build_user_prompt("x", _style("dictation"), tone="casual")
+    assert "tone" not in _build_user_prompt("x", _style("light"))  # no tone -> no tone sentence
 
 
-def test_clean_rejects_unknown_mode():
-    with pytest.raises(ValueError, match="unknown mode"):
+def test_clean_rejects_an_unknown_style():
+    with pytest.raises(ValueError, match="unknown style"):
         clean("x", mode="bogus")
 
 
-def test_dictation_model_resolution_order(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    monkeypatch.delenv("VNOTE_DICTATION_MODEL", raising=False)
-    monkeypatch.delenv("VNOTE_OLLAMA_MODEL", raising=False)
+# --- the style decides the prompt, the contract and the model ------------------
 
-    assert config.dictation_model() == config.ollama_model()  # falls back to the note model
-    config.save_config({"dictation_model": "qwen2.5:3b-instruct"})
-    assert config.dictation_model() == "qwen2.5:3b-instruct"
-    monkeypatch.setenv("VNOTE_DICTATION_MODEL", "llama3.2:3b")
-    assert config.dictation_model() == "llama3.2:3b"
+
+def _record_complete(monkeypatch):
+    """Capture what clean() hands the backend, without running one."""
+    rec: dict = {}
+
+    def fake(backend, system, user, model):
+        rec.update(backend=backend, system=system, user=user, model=model)
+        return "TITLE: T\n---\nbody"
+
+    monkeypatch.setattr(cleanup, "_complete", fake)
+    return rec
+
+
+def test_clean_uses_the_style_body_and_the_note_contract(monkeypatch):
+    rec = _record_complete(monkeypatch)
+    clean("transcript here", mode="summary")
+    assert styles.get("summary").body in rec["user"]
+    assert "TITLE:" in rec["system"]  # output: note keeps the title contract
+
+
+def test_a_plain_style_gets_the_plain_preamble_and_no_title_parsing(monkeypatch):
+    rec = _record_complete(monkeypatch)
+    result = clean("orig words here", mode="dictation")
+    assert "no title line" in rec["system"] and "TITLE:" not in rec["system"]
+    assert result.body == "TITLE: T\n---\nbody"  # taken verbatim, not parsed
+    assert result.title == "orig words here"      # derived from the transcript instead
+
+
+def test_backend_and_model_precedence_is_explicit_then_style_then_settings(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    styles.write("housestyle", "---\nbackend: claude-code\nmodel: tiny:1b\n---\nDo it.")
+    rec = _record_complete(monkeypatch)
+
+    clean("x", mode="housestyle")
+    assert (rec["backend"], rec["model"]) == ("claude-code", "tiny:1b")  # the style's own lines
+
+    clean("x", mode="housestyle", backend="ollama", model="big:14b")
+    assert (rec["backend"], rec["model"]) == ("ollama", "big:14b")  # an explicit pick wins
+
+    clean("x", mode="edit")  # a style with neither: the settings decide
+    assert (rec["backend"], rec["model"]) == (config.backend(), None)
+    styles._invalidate()
 
 
 # --- claude-code backend (subscription CLI; no network, no API key) -----------
@@ -143,12 +183,12 @@ def test_claude_code_passes_model_only_when_given(monkeypatch):
     assert rec["cmd"][rec["cmd"].index("--model") + 1] == "claude-opus-5"
 
 
-def test_claude_code_dictation_mode_returns_plain_text(monkeypatch):
+def test_claude_code_plain_style_returns_plain_text(monkeypatch):
     rec: dict = {}
     monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
     monkeypatch.setattr(cleanup.subprocess, "run", _fake_run(rec, stdout="cleaned words\n"))
     result = clean("raw words", mode="dictation", backend="claude-code")
-    assert result.body == "cleaned words"  # no TITLE framing parsed in dictation mode
+    assert result.body == "cleaned words"  # no TITLE framing parsed for output: plain
 
 
 def test_claude_code_nonzero_exit_surfaces_stderr(monkeypatch):
@@ -180,171 +220,220 @@ def test_claude_code_timeout_is_reported(monkeypatch):
         clean("x", backend="claude-code")
 
 
-# --- opencode backend (whatever provider/model opencode is configured with) ---
+# --- free-text instructions on cleanup ---------------------------------------
 
 
-def _oc_stream(*events: dict) -> str:
-    """opencode's `--format json` output: one JSON event per line."""
-    return "\n".join(json.dumps(e) for e in events) + "\n"
+def test_instructions_land_at_the_end_of_the_user_prompt():
+    prompt = _build_user_prompt("x", _style("edit"), instructions="keep the numbers exact")
+    assert prompt.rstrip().endswith("keep the numbers exact")
+    assert "take precedence" in prompt
 
 
-def _oc_text(text: str) -> dict:
-    return {"type": "text", "part": {"type": "text", "text": text}}
+def test_instructions_work_for_a_plain_style_too():
+    prompt = _build_user_prompt("x", _style("dictation"), instructions="british spelling")
+    assert "british spelling" in prompt
 
 
-def _fake_oc_run(recorder, *, stdout=None, returncode=0, stderr=""):
-    """Stand in for the opencode CLI, capturing the sandbox it was pointed at.
-
-    The agent file is read *during* the call because the sandbox is a
-    TemporaryDirectory — by the time the test body resumes it is gone.
-    """
-    if stdout is None:
-        stdout = _oc_stream(_oc_text("TITLE: T\n---\nbody"))
-
-    def run(cmd, **kwargs):
-        recorder["cmd"] = cmd
-        recorder["input"] = kwargs.get("input")
-        sandbox = Path(cmd[cmd.index("--dir") + 1])
-        recorder["agent"] = (sandbox / ".opencode" / "agent" / "vnote.md").read_text(encoding="utf-8")
-        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
-
-    return run
+def test_no_instructions_paragraph_when_none_or_blank():
+    assert "Additional instructions" not in _build_user_prompt("x", _style("edit"))
+    assert "Additional instructions" not in _build_user_prompt("x", _style("edit"), instructions="   ")
 
 
-def test_opencode_missing_cli_explains_how_to_fix(monkeypatch):
-    monkeypatch.setattr(cleanup, "opencode_bin", lambda: None)
-    with pytest.raises(RuntimeError, match="opencode CLI") as exc:
-        clean("hello", backend="opencode")
-    assert "VNOTE_OPENCODE_BIN" in str(exc.value)
-
-
-def test_opencode_runs_a_tool_free_agent_in_a_sandbox(monkeypatch):
+def test_instructions_reach_the_backend_prompt(monkeypatch):
     rec: dict = {}
-    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
-    monkeypatch.setattr(cleanup.subprocess, "run", _fake_oc_run(rec))
+    monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run(rec))
+    clean("raw words", backend="claude-code", instructions="cut the preamble")
+    assert "cut the preamble" in rec["input"]
 
-    result = clean("um so the parser broke", mode="edit", backend="opencode")
 
-    assert rec["cmd"][0] == "/usr/bin/opencode"
-    assert "run" in rec["cmd"]
-    assert rec["cmd"][rec["cmd"].index("--agent") + 1] == "vnote"
-    # JSON, not the pretty stream: it is parseable and it separates `text` parts
-    # from a thinking model's `reasoning` parts.
-    assert rec["cmd"][rec["cmd"].index("--format") + 1] == "json"
-    # Tools off: a pure text transform needs no filesystem/network access.
-    for tool in ("write", "edit", "bash", "read"):
-        assert f"{tool}: false" in rec["agent"]
-    # The agent body carries vnote's own system prompt (opencode has no flag for it).
-    assert "TITLE:" in rec["agent"]
-    # No --model unless asked: don't override the user's opencode config.
-    assert "--model" not in rec["cmd"]
-    # Transcript travels on stdin, not argv (argv caps out on long notes).
-    assert "um so the parser broke" in rec["input"]
-    assert not any("um so the parser broke" in part for part in rec["cmd"])
+# --- revise (instruction applied to an existing note) -------------------------
+
+
+def test_revise_builds_revise_prompts_and_strips_the_heading(monkeypatch):
+    rec: dict = {}
+    monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run(rec))
+
+    result = revise("# My Great Note\n\nFirst line.", "make it shorter", backend="claude-code")
+
+    system = rec["cmd"][rec["cmd"].index("--system-prompt") + 1]
+    assert "revise" in system.lower()
+    assert "INSTRUCTION:\nmake it shorter" in rec["input"]
+    assert "First line." in rec["input"]
+    assert "# My Great Note" not in rec["input"]  # heading stripped; it round-trips as the title
     assert (result.title, result.body) == ("T", "body")
 
 
-def test_opencode_runs_in_a_scratch_dir_not_the_users_project(monkeypatch, tmp_path):
+def test_revise_falls_back_to_the_existing_heading_as_title(monkeypatch):
     rec: dict = {}
-    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
-    monkeypatch.setattr(cleanup.subprocess, "run", _fake_oc_run(rec))
-    monkeypatch.chdir(tmp_path)
-    clean("x", backend="opencode")
-    sandbox = Path(rec["cmd"][rec["cmd"].index("--dir") + 1])
-    assert sandbox != tmp_path and tmp_path not in sandbox.parents
-    # …and it is cleaned up once the call returns.
-    assert not sandbox.exists()
+    monkeypatch.setattr(cleanup, "claude_code_bin", lambda: "/usr/bin/claude")
+    monkeypatch.setattr(cleanup.subprocess, "run", _fake_run(rec, stdout="just a revised body"))
+
+    result = revise("# Parser Notes\n\nold body", "make it shorter", backend="claude-code")
+    assert result.title == "Parser Notes"
+    assert result.body == "just a revised body"
 
 
-def test_opencode_passes_model_only_when_given(monkeypatch):
+def test_revise_rejects_blank_instruction_and_unknown_backend():
+    with pytest.raises(ValueError):
+        revise("# T\n\nbody", "   ")
+    with pytest.raises(ValueError, match="unknown backend"):
+        revise("# T\n\nbody", "shorter", backend="bogus")
+
+
+def test_revise_ollama_uses_the_note_model(monkeypatch):
+    """Revise is style-agnostic: no style's model: line can pull it onto a small model."""
     rec: dict = {}
-    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
-    monkeypatch.setattr(cleanup.subprocess, "run", _fake_oc_run(rec))
-    clean("x", backend="opencode", model="local/qwen")
-    assert rec["cmd"][rec["cmd"].index("--model") + 1] == "local/qwen"
+
+    def fake(system, user, model):
+        rec["model"] = model
+        return "TITLE: T\n---\nbody"
+
+    monkeypatch.setattr(cleanup, "_ollama_complete", fake)
+    monkeypatch.setattr(cleanup, "ollama_model", lambda: "big:14b")
+
+    assert revise("# T\n\nbody", "shorter").title == "T"
+    assert rec["model"] == "big:14b"
 
 
-def test_opencode_model_falls_back_to_the_saved_config(tmp_path, monkeypatch):
+# --- continue / merge (Phase 10 F: a new take against an existing note) --------
+
+
+def test_continue_note_forbids_the_title_line_and_shows_the_note_as_context(monkeypatch):
+    rec = _record_complete(monkeypatch)
+
+    body = cleanup.continue_note("# Deploy Notes\n\nStep one.", "and then step two",
+                                 mode="summary", backend="ollama")
+
+    assert "no title line" in rec["system"] and "TITLE:" not in rec["system"]
+    assert "never repeat it" in rec["system"].lower()
+    assert styles.get("summary").body in rec["user"]  # the style is still the editing instruction
+    assert "# Deploy Notes" in rec["user"] and "and then step two" in rec["user"]
+    assert "context only" in rec["user"]
+    assert body == "body"  # the reply is the continuation itself, not a titled note
+
+
+def test_continue_note_drops_the_framings_a_model_reaches_for(monkeypatch):
+    """The prompt forbids all three; appending any of them verbatim breaks the note."""
+    replies = iter([
+        "TITLE: A New Title\n---\nthe continuation",       # the ordinary cleanup contract
+        "```markdown\nthe continuation\n```",               # a fence around the whole answer
+        "# A New Heading\n\nthe continuation",              # a heading of its own
+        "```\n# A New Heading\n\nthe continuation\n```",   # both at once
+        "   \n",                                            # nothing usable at all
+    ])
+
+    def fake(backend, system, user, model):
+        return next(replies)
+
+    monkeypatch.setattr(cleanup, "_complete", fake)
+    for _ in range(4):
+        assert cleanup.continue_note("# T\n\nbody", "more words", mode="edit") == "the continuation"
+    assert cleanup.continue_note("# T\n\nbody", "more words", mode="edit") == "more words"
+
+
+def test_continue_note_resolves_the_backend_and_model_like_clean(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    monkeypatch.delenv("VNOTE_OPENCODE_MODEL", raising=False)
-    config.save_config({"backend": "opencode", "opencode_model": "local/saved"})
-    rec: dict = {}
-    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
-    monkeypatch.setattr(cleanup.subprocess, "run", _fake_oc_run(rec))
-    clean("x", backend="opencode")
-    assert rec["cmd"][rec["cmd"].index("--model") + 1] == "local/saved"
+    styles.write("housestyle", "---\nbackend: claude-code\nmodel: tiny:1b\n---\nDo it.")
+    rec = _record_complete(monkeypatch)
+
+    cleanup.continue_note("# T\n\nbody", "more", mode="housestyle")
+    assert (rec["backend"], rec["model"]) == ("claude-code", "tiny:1b")
+    cleanup.merge_note("# T\n\nbody", "more", mode="housestyle", backend="ollama", model="big:14b")
+    assert (rec["backend"], rec["model"]) == ("ollama", "big:14b")  # an explicit pick still wins
+    styles._invalidate()
 
 
-def test_opencode_pure_is_on_by_default_and_can_be_turned_off(monkeypatch):
-    rec: dict = {}
-    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
-    monkeypatch.setattr(cleanup.subprocess, "run", _fake_oc_run(rec))
-    monkeypatch.delenv("VNOTE_OPENCODE_PURE", raising=False)
-    clean("x", backend="opencode")
-    assert "--pure" in rec["cmd"]
-    # Escape hatch for users whose provider comes from an opencode plugin.
-    monkeypatch.setenv("VNOTE_OPENCODE_PURE", "0")
-    clean("x", backend="opencode")
-    assert "--pure" not in rec["cmd"]
+def test_merge_note_keeps_the_title_contract_and_sees_both_texts(monkeypatch):
+    rec = _record_complete(monkeypatch)
+
+    result = cleanup.merge_note("# Deploy Notes\n\nStep one.", "and then step two",
+                                mode="summary", instructions="keep it tight")
+
+    assert "TITLE:" in rec["system"] and "merg" in rec["system"].lower()
+    assert "# Deploy Notes" in rec["user"] and "and then step two" in rec["user"]
+    assert "keep it tight" in rec["user"]
+    assert (result.title, result.body) == ("T", "body")  # the whole note, title and all
 
 
-def test_opencode_joins_text_parts_and_ignores_reasoning_and_noise(monkeypatch):
-    rec: dict = {}
-    stream = (
-        "opencode banner line\n"  # not an event; must not break the parse
-        + _oc_stream(
-            {"type": "step_start", "part": {}},
-            {"type": "reasoning", "part": {"type": "reasoning", "text": "SECRET SCRATCHPAD"}},
-            _oc_text("TITLE: Split\n---\nfirst "),
-            _oc_text("second"),
-            {"type": "step_finish", "part": {}},
-        )
-    )
-    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
-    monkeypatch.setattr(cleanup.subprocess, "run", _fake_oc_run(rec, stdout=stream))
-    result = clean("x", backend="opencode")
-    assert (result.title, result.body) == ("Split", "first second")
-    assert "SECRET" not in result.body
+def test_a_plain_style_keeps_its_plain_contract_in_both(monkeypatch):
+    rec = _record_complete(monkeypatch)
+    cleanup.continue_note("plain body", "more", mode="dictation")
+    assert "no title line" in rec["system"]
+    result = cleanup.merge_note("plain body", "more", mode="dictation")
+    assert "no title line" in rec["system"] and result.body == "TITLE: T\n---\nbody"
 
 
-def test_opencode_dictation_mode_returns_plain_text(monkeypatch):
-    rec: dict = {}
-    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
-    monkeypatch.setattr(
-        cleanup.subprocess, "run", _fake_oc_run(rec, stdout=_oc_stream(_oc_text("cleaned words\n")))
-    )
-    result = clean("raw words", mode="dictation", backend="opencode")
-    assert result.body == "cleaned words"  # no TITLE framing parsed in dictation mode
+def test_continue_and_merge_reject_an_unknown_style():
+    with pytest.raises(ValueError, match="unknown style"):
+        cleanup.continue_note("# T\n\nbody", "more", mode="gone")
+    with pytest.raises(ValueError, match="unknown style"):
+        cleanup.merge_note("# T\n\nbody", "more", mode="gone")
 
 
-def test_opencode_nonzero_exit_surfaces_stderr(monkeypatch):
-    rec: dict = {}
-    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
-    monkeypatch.setattr(
-        cleanup.subprocess, "run",
-        _fake_oc_run(rec, returncode=1, stdout="", stderr="no provider configured"),
-    )
-    with pytest.raises(RuntimeError, match="no provider configured"):
-        clean("x", backend="opencode")
+# --- the Ollama HTTP payloads (no network: urlopen is faked) --------------------
 
 
-def test_opencode_stream_without_text_parts_is_an_error(monkeypatch):
-    rec: dict = {}
-    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
-    monkeypatch.setattr(
-        cleanup.subprocess, "run",
-        _fake_oc_run(rec, stdout=_oc_stream({"type": "step_finish", "part": {}})),
-    )
-    with pytest.raises(RuntimeError, match="empty response"):
-        clean("x", backend="opencode")
+class _FakeResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 
-def test_opencode_timeout_is_reported(monkeypatch):
-    monkeypatch.setattr(cleanup, "opencode_bin", lambda: "/usr/bin/opencode")
+def _capture_ollama(monkeypatch, body: bytes) -> list[dict]:
+    """Bypass the readiness probes and record what gets POSTed to /api/chat."""
+    posted: list[dict] = []
+    monkeypatch.setattr(cleanup, "_ensure_ollama_running", lambda: None)
+    monkeypatch.setattr(cleanup, "_ensure_model_present", lambda model: None)
 
-    def boom(cmd, **kwargs):
-        raise subprocess.TimeoutExpired(cmd, 600)
+    def fake_urlopen(req, timeout=None):
+        posted.append(json.loads(req.data))
+        return _FakeResponse(body)
 
-    monkeypatch.setattr(cleanup.subprocess, "run", boom)
-    with pytest.raises(RuntimeError, match="timed out"):
-        clean("x", backend="opencode")
+    monkeypatch.setattr(cleanup.urllib.request, "urlopen", fake_urlopen)
+    return posted
+
+
+def test_ollama_complete_sends_keep_alive(monkeypatch):
+    monkeypatch.setenv("VNOTE_OLLAMA_KEEP_ALIVE", "42m")
+    posted = _capture_ollama(monkeypatch, json.dumps({"message": {"content": "hello"}}).encode())
+
+    assert cleanup._ollama_complete("sys", "user", "big:14b") == "hello"
+    assert posted[0]["keep_alive"] == "42m" == str(config.get("ollama_keep_alive"))
+
+
+def test_preload_ollama_loads_the_model_with_an_empty_message_list(monkeypatch):
+    monkeypatch.setenv("VNOTE_OLLAMA_KEEP_ALIVE", "30m")
+    posted = _capture_ollama(monkeypatch, b"{}")
+
+    cleanup.preload_ollama("big:14b")
+
+    assert posted == [{"model": "big:14b", "messages": [], "keep_alive": "30m"}]
+
+
+def test_keep_alive_numbers_go_out_as_json_numbers(monkeypatch):
+    """Ollama parses a keep_alive *string* with Go's time.ParseDuration: "-1" is a 400,
+    -1 the number is "until Ollama exits" (checked against Ollama 0.23.1, 2026-08-25)."""
+    monkeypatch.setenv("VNOTE_OLLAMA_KEEP_ALIVE", "-1")
+    posted = _capture_ollama(monkeypatch, json.dumps({"message": {"content": "hi"}}).encode())
+
+    cleanup.preload_ollama("big:14b")
+    cleanup._ollama_complete("sys", "user", "big:14b")
+
+    assert posted[0]["keep_alive"] == -1 and isinstance(posted[0]["keep_alive"], int)
+    assert posted[1]["keep_alive"] == -1 and isinstance(posted[1]["keep_alive"], int)
+
+    monkeypatch.setenv("VNOTE_OLLAMA_KEEP_ALIVE", "30m")
+    posted.clear()
+    cleanup.preload_ollama("big:14b")
+    assert posted[0]["keep_alive"] == "30m"  # a unit stays a string
+

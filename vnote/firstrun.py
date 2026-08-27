@@ -161,7 +161,8 @@ def run(backend_flag: str | None, *, force: bool = False) -> None:
     )
     backend = choices[backend_idx][0]
 
-    cfg: dict = {"backend": backend}
+    cfg = config.load_config()  # keep every other saved setting (the web UI writes here too)
+    cfg["backend"] = backend
     if backend == "ollama":
         vram = _detect_vram_gb()
         if vram is not None:
@@ -195,7 +196,7 @@ def run(backend_flag: str | None, *, force: bool = False) -> None:
             print("  Install the CLI first:  https://claude.com/product/claude-code")
         print("  If it has never signed in here, run `claude` once interactively.")
     else:
-        print(f"\n✓ Using the Anthropic API backend ({config.CLAUDE_MODEL}).")
+        print(f"\n✓ Using the Anthropic API backend ({config.get('claude_model')}).")
         print("  This bills per token — `claude-code` uses your subscription instead.")
         if not os.environ.get("ANTHROPIC_API_KEY"):
             print("  Set ANTHROPIC_API_KEY before your first run (see .env.example).")

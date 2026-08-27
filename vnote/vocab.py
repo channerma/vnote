@@ -19,7 +19,6 @@ restart. Corrections run inside ``transcribe()``; hotwords go to
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
@@ -27,8 +26,7 @@ from . import config
 
 
 def vocab_file() -> Path:
-    env = os.environ.get("VNOTE_VOCAB")
-    return Path(env).expanduser() if env else config.config_dir() / "vocab.txt"
+    return config.vocab_file()
 
 
 _cache: tuple[tuple[str, float], list[str], list[tuple[re.Pattern, str]]] | None = None

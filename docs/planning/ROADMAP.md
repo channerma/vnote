@@ -6,6 +6,13 @@
 >
 > Sourced from a fact-checked research pass (25 verified claims). Citations are
 > inline as `[n]`; the list is at the bottom.
+>
+> **Status (2026-08-24): flow mode was retired.** Phases 1–7 shipped and were
+> used, but the OS-specific delivery layer (hotkey client, injection, tray,
+> always-on installers) cost more than it returned. Phase 8 replaces it with a
+> web UI served by the daemon — see `PHASE8.md`. The daemon (§2), ASR, the
+> cleanup profiles and vocabulary all carry forward; §3's injection layer, §9's
+> client items, and the flow-mode topologies below are historical.
 
 ---
 

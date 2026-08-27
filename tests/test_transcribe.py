@@ -1,47 +1,34 @@
-"""Tests for device selection in the transcription path."""
+"""Model loading: the daemon warms on a background thread while requests arrive."""
 
-import sys
+import threading
+import time
 
-from vnote import config, transcribe
-
-
-def test_cuda_is_not_attempted_on_macos(monkeypatch):
-    """CTranslate2 publishes no CUDA-enabled macOS wheel, so the attempt can only
-    ever fail — and it printed "GPU init failed" on stderr for every transcription."""
-    monkeypatch.setattr(sys, "platform", "darwin")
-
-    assert transcribe._cuda_plausible() is False
+from vnote import transcribe
 
 
-def test_cuda_is_still_attempted_off_macos(monkeypatch):
-    """A Linux box with a broken CUDA stack should still be told about it."""
-    monkeypatch.setattr(sys, "platform", "linux")
+def test_load_model_builds_once_under_concurrent_callers(monkeypatch):
+    """A warm thread and a request must share one model, not build two (two copies in VRAM)."""
+    builds: list[str] = []
 
-    assert transcribe._cuda_plausible() is True
+    def slow_build(device: str):
+        builds.append(device)
+        time.sleep(0.05)  # long enough for the other thread to reach the lock
+        return object()
 
+    monkeypatch.setattr(transcribe, "_model", None)  # restored after the test
+    monkeypatch.setattr(transcribe, "_device", None)
+    monkeypatch.setattr(transcribe, "_preload_cuda_libs", lambda: None)
+    monkeypatch.setattr(transcribe, "_build", slow_build)
+    assert transcribe.is_warm() is False
 
-def test_model_default_follows_the_device(monkeypatch, tmp_path):
-    """No single default suits both machines: CPU wants speed, CUDA gets accuracy free."""
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))  # no pinned model anywhere
-    monkeypatch.delenv("VNOTE_WHISPER_MODEL", raising=False)
+    got: list[object] = []
+    threads = [threading.Thread(target=lambda: got.append(transcribe._load_model())) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
 
-    assert config.whisper_model("cpu") == "small"
-    assert config.whisper_model("cuda") == "large-v3-turbo"
-    assert config.whisper_model_override() is None
-
-
-def test_an_explicit_model_overrides_both_devices(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    monkeypatch.setenv("VNOTE_WHISPER_MODEL", "base")
-
-    assert config.whisper_model("cpu") == "base"
-    assert config.whisper_model("cuda") == "base"
-    assert config.whisper_model_override() == "base"
-
-
-def test_config_file_can_pin_the_model(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    monkeypatch.delenv("VNOTE_WHISPER_MODEL", raising=False)
-    config.save_config({"whisper_model": "medium"})
-
-    assert config.whisper_model("cuda") == "medium"
+    assert builds == ["cuda"]  # exactly one build
+    assert got[0] is got[1] is transcribe._model
+    assert transcribe.is_warm() is True
+    assert transcribe._device == "cuda"

@@ -2,7 +2,7 @@
 
 Windows PowerShell 5.1 reads BOM-less .ps1 files as ANSI, so any non-ASCII
 byte can mangle into a curly quote and break parsing (an em-dash inside a
-string did exactly that). Same failure family as pystray's latin-1 titles:
+string did exactly that). Rule of thumb, kept after the tray client was retired:
 everything consumed by Windows-side tooling stays pure ASCII.
 """
 

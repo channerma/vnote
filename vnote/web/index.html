@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>vnote</title>
+<link rel="stylesheet" href="/static/style.css" />
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+
+<!--
+  vnote — layout 1a (stage + drawer), from docs/design/handoff.
+  All contract ids appear exactly once. No behaviour lives in this file:
+  every runtime value below is filled by app.js.
+
+  State is CSS-driven from the attributes app.js sets:
+    <div class="app" data-view="note|settings" [data-daemon="down"] [data-sidebar="collapsed"]
+         [data-continue="yes"]>                    a take is being recorded into a note
+    <section id="view-note" data-state="idle|recording|paused|processing|note"
+             data-live="on|off" [data-starting="true"] [data-retry="true"]>
+    <article id="note" class="note" data-raw="shown|hidden">
+    <aside id="sidebar" [data-open="true"]>        off-canvas below 860px
+  Plus `hidden` on #mic-help, #retry-wrap, #note-warning, the audio list and
+  #notes-empty / #notes-list.
+-->
+
+<div class="app" id="app" data-view="note">
+
+  <aside id="sidebar">
+    <div class="side-head">
+      <span class="brand">vnote</span>
+      <button id="sidebar-toggle" class="icon-btn" type="button" aria-expanded="true" aria-label="Hide sidebar" title="Hide sidebar">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
+      </button>
+    </div>
+
+    <div class="side-actions">
+      <button id="new-note" class="btn btn-primary btn-wide" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ico"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        <span>New note</span>
+      </button>
+      <input id="notes-search" type="search" placeholder="Search notes" autocomplete="off" />
+      <!-- stats strip: delete this one div to remove it -->
+      <div class="stats"><span id="stats-notes"></span><span id="stats-minutes"></span></div>
+    </div>
+
+    <div id="notes-list"></div>
+
+    <div id="notes-empty" hidden>
+      <strong>No notes yet</strong>
+      <p>Press New note and talk. Everything stays in <code id="notes-empty-dir">the notes folder</code> on this machine.</p>
+    </div>
+
+    <div class="side-foot">
+      <button id="nav-settings" class="link-btn" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="ico"><circle cx="12" cy="12" r="3"></circle><circle cx="12" cy="12" r="9"></circle></svg>
+        <span>Settings</span>
+      </button>
+      <div id="daemon-info">connecting…</div>
+    </div>
+  </aside>
+
+  <main class="stage">
+
+    <section id="view-note" data-state="idle" data-live="on">
+
+      <!-- transport / status bar -->
+      <header class="topbar">
+        <span class="dot" aria-hidden="true"></span>
+        <span id="rec-status">New note</span>
+        <span id="timer">0:00</span>
+        <div class="transport">
+          <button id="record" class="btn btn-primary" type="button">
+            <span class="rec-dot" aria-hidden="true"></span><span>Record</span>
+          </button>
+          <button id="pause" class="btn btn-secondary" type="button">Pause</button>
+          <button id="stop" class="btn btn-primary" type="button">Stop</button>
+        </div>
+        <div class="topbar-right">
+          <span id="live-copy-status" class="inline-status" role="status"></span>
+          <button id="live-copy" class="btn btn-secondary btn-sm" type="button">Copy text</button>
+        </div>
+      </header>
+
+      <div class="progress" aria-hidden="true"><span></span></div>
+      <p id="process-status" role="status"></p>
+
+      <!-- only while this take is being recorded into an open note (data-continue) -->
+      <div id="continue-bar">
+        <span id="continue-target"></span>
+        <p class="field">
+          <label for="pick-how">How</label>
+          <select id="pick-how"></select>
+        </p>
+      </div>
+
+      <!-- idle: the invitation and the per-recording picks -->
+      <div class="idle">
+        <h1>Ready when you are.</h1>
+        <p class="lede">2 to 7 minutes of thinking out loud is the sweet spot. <kbd>Space</kbd> pauses and resumes while you record.</p>
+        <hr class="rule" />
+        <div class="picks">
+          <p class="field">
+            <label for="pick-mode">Style</label>
+            <!-- filled from /api/styles: one optgroup per source, plus "raw" -->
+            <select id="pick-mode">
+              <option value="raw">raw — no LLM</option>
+            </select>
+          </p>
+          <p class="field">
+            <label for="pick-backend">Backend</label>
+            <select id="pick-backend"></select>
+          </p>
+          <p class="field">
+            <label for="pick-language">Language</label>
+            <select id="pick-language"></select>
+          </p>
+          <label class="check"><input id="process-toggle" type="checkbox" checked /> <span>Process on stop</span></label>
+          <label class="check"><input id="live-toggle" type="checkbox" /> <span>Show live transcript</span></label>
+        </div>
+        <p class="hint">These apply to this recording only; the defaults come from Settings.</p>
+      </div>
+
+      <!-- edge states -->
+      <div id="mic-help" class="banner" hidden>
+        <strong>The browser will not hand over the microphone.</strong>
+        <p>Either permission was denied for this origin, or the page is not on a secure context. Open <code>http://localhost:8760</code> — not the WSL IP — and allow the mic from the address-bar icon.</p>
+      </div>
+      <div class="banner" id="retry-wrap" hidden>
+        <strong>Upload failed — the recording is still here.</strong>
+        <p>The audio is held in this tab and nothing has been lost. <span id="retry-detail"></span> <button id="retry" class="btn btn-primary btn-sm" type="button">Retry upload</button></p>
+      </div>
+
+      <!-- live transcript is the whole stage while recording -->
+      <div id="live">
+        <div class="live-inner">
+          <div class="micro">Live transcript</div>
+          <p class="live-text"><span id="live-committed"></span> <span id="live-tail"></span></p>
+        </div>
+        <div class="big-timer" id="big-timer" aria-hidden="true">0:00</div>
+      </div>
+
+      <!-- the finished note -->
+      <article class="note tab-note" id="note" data-raw="shown">
+        <header class="note-head">
+          <div class="note-head-main">
+            <h1 id="note-title" contenteditable="true" spellcheck="false"></h1>
+            <div id="note-meta"></div>
+          </div>
+          <div class="note-head-actions">
+            <select id="version-select" aria-label="Version"></select>
+            <button id="version-restore" class="btn btn-secondary btn-sm" type="button">Restore</button>
+            <button id="note-continue" class="btn btn-secondary btn-sm" type="button">
+              <span class="rec-dot" aria-hidden="true"></span><span>Continue recording</span>
+            </button>
+          </div>
+        </header>
+
+        <div id="note-warning" hidden>
+          <strong>Cleanup failed</strong> — this is the raw transcript, unedited. The audio and transcript are saved.
+        </div>
+        <!-- the calm twin of the strip above: nothing failed, the LLM was simply not asked -->
+        <div id="note-unprocessed">
+          Raw transcript — not processed. Edit it below if you like, then Regenerate.
+        </div>
+
+        <!-- phone only: the stacked panes become Note / Raw / Audio tabs -->
+        <div class="note-tabs" role="tablist" aria-label="Note panes">
+          <button id="note-tab-note" class="note-tab is-active" type="button" role="tab" aria-selected="true">Note</button>
+          <button id="note-tab-raw" class="note-tab" type="button" role="tab" aria-selected="false">Raw</button>
+          <button id="note-tab-audio" class="note-tab" type="button" role="tab" aria-selected="false">Audio</button>
+        </div>
+
+        <div class="note-body">
+          <div class="pane pane-note">
+            <div class="pane-head">
+              <span class="micro">Note · Markdown</span>
+              <span id="note-save-status" class="inline-status" role="status"></span>
+              <span id="note-copy-status" class="inline-status" role="status"></span>
+              <button id="note-save" class="btn btn-primary btn-sm" type="button">Save</button>
+              <button id="note-copy" class="btn btn-secondary btn-sm" type="button">Copy</button>
+            </div>
+            <textarea id="note-editor" class="pane-text" spellcheck="false" aria-label="Note, Markdown"></textarea>
+          </div>
+
+          <div class="pane pane-raw">
+            <div class="pane-head">
+              <span class="micro">Raw transcript</span>
+              <span id="note-raw-status" class="inline-status" role="status"></span>
+              <button id="note-raw-copy" class="btn btn-secondary btn-sm" type="button">Copy</button>
+              <button id="note-raw-toggle" class="link-btn accent" type="button">Hide</button>
+            </div>
+            <!-- one .take section per take, built by app.js: header, textarea, Save /
+                 include / Re-run / Delete. A flat note has exactly one. -->
+            <div id="note-raw" class="pane-text"></div>
+          </div>
+        </div>
+
+        <footer class="note-foot">
+          <div class="reprocess">
+            <p class="field">
+              <label for="regenerate-mode">Regenerate from raw</label>
+              <!-- filled from /api/styles (no "raw" — Regenerate always runs the LLM) -->
+              <select id="regenerate-mode"></select>
+            </p>
+            <button id="regenerate" class="btn btn-secondary" type="button">Regenerate</button>
+            <span class="vrule" aria-hidden="true"></span>
+            <p class="field grow">
+              <label for="revise-instructions">Instructions — used by Regenerate and Revise</label>
+              <input id="revise-instructions" type="text" placeholder="turn the second half into a checklist" autocomplete="off" spellcheck="false" />
+            </p>
+            <button id="revise" class="btn btn-primary" type="button">Revise note</button>
+          </div>
+          <div class="artefacts">
+            <!-- one labelled <audio> per take, built by app.js -->
+            <div id="note-audio-list" hidden></div>
+            <code id="note-path"></code>
+            <button id="note-path-copy" class="btn btn-secondary btn-sm" type="button">Copy path</button>
+            <button id="note-reveal" class="link-btn accent" type="button">Open folder</button>
+            <button id="note-delete" class="link-btn accent" type="button">Delete note</button>
+            <span id="note-path-status" class="inline-status" role="status"></span>
+          </div>
+        </footer>
+      </article>
+    </section>
+
+    <section id="view-settings">
+      <header class="topbar topbar-plain">
+        <span class="micro">Settings</span>
+        <span id="settings-status" class="inline-status" role="status"></span>
+        <button id="settings-save" class="btn btn-primary btn-sm" type="button">Save</button>
+      </header>
+
+      <div class="settings-scroll">
+        <table class="settings">
+          <thead>
+            <tr><th>Setting</th><th>What it does</th><th>Value</th><th>Source</th></tr>
+          </thead>
+          <tbody id="settings-table"></tbody>
+        </table>
+
+        <hr class="rule" />
+
+        <div class="vocab-block">
+          <div class="vocab-head">
+            <h2>Vocabulary</h2>
+            <span id="vocab-status" class="inline-status" role="status"></span>
+            <button id="vocab-save" class="btn btn-secondary btn-sm" type="button">Save vocabulary</button>
+          </div>
+          <p class="hint">One entry per line. A bare word biases transcription toward it. <code>wrong -&gt; right</code> replaces it afterwards, so it fixes what the model insists on hearing.</p>
+          <textarea id="vocab" spellcheck="false" aria-label="Vocabulary"></textarea>
+        </div>
+
+        <hr class="rule" />
+
+        <div class="styles-block">
+          <div class="vocab-head">
+            <h2>Styles</h2>
+            <span id="style-status" class="inline-status" role="status"></span>
+            <button id="style-new" class="btn btn-secondary btn-sm" type="button">New</button>
+            <button id="style-duplicate" class="btn btn-secondary btn-sm" type="button">Duplicate</button>
+            <button id="style-delete" class="btn btn-secondary btn-sm" type="button">Delete</button>
+            <button id="style-save" class="btn btn-primary btn-sm" type="button">Save style</button>
+          </div>
+          <p class="hint">A style is one Markdown file: an optional front matter block (<code>description</code>, <code>output: note</code> or <code>plain</code>, and optionally <code>backend</code> and <code>model</code>) and then the instruction the model gets. Saving writes it to your own styles folder, which overrides the built-in of the same name.</p>
+          <div id="styles-problems" class="banner" hidden></div>
+          <div class="styles-editor">
+            <ul id="styles-list"></ul>
+            <div class="style-pane">
+              <p class="field">
+                <label for="style-name">File name</label>
+                <input id="style-name" type="text" spellcheck="false" autocomplete="off" />
+              </p>
+              <textarea id="style-text" spellcheck="false" aria-label="Style file"></textarea>
+            </div>
+          </div>
+        </div>
+
+        <hr class="rule" />
+
+        <div class="trash-block">
+          <div class="vocab-head">
+            <h2>Trash</h2>
+            <span id="trash-status" class="inline-status" role="status"></span>
+            <button id="trash-reveal" class="btn btn-secondary btn-sm" type="button">Open folder</button>
+          </div>
+          <p class="hint">Deleted notes and takes are <em>moved</em> here, never erased. vnote never empties it — drag a folder back to restore it, or delete it yourself when you are sure.</p>
+          <code id="trash-path"></code>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+</body>
+</html>

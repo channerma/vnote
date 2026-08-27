@@ -6,13 +6,14 @@ import ctypes
 import glob
 import os
 import sys
+import threading
 from pathlib import Path
 
 from . import config
 
 _model = None  # lazily loaded, cached for the process
 _device = None
-_model_name = None  # which model _model actually is (the device decides by default)
+_load_lock = threading.Lock()  # the daemon warms on a background thread while requests arrive
 
 
 def _preload_cuda_libs() -> None:
@@ -49,37 +50,33 @@ def _is_cuda_problem(exc: BaseException) -> bool:
     return any(t in text for t in ("cuda", "cublas", "cudnn", "cudart", "nvrtc", "gpu", "device"))
 
 
-def _cuda_plausible() -> bool:
-    """Whether trying CUDA here can possibly succeed.
-
-    CTranslate2 publishes no CUDA-enabled macOS wheel (and no Metal/MPS backend),
-    so on darwin the attempt fails 100% of the time — it printed "GPU init failed:
-    This CTranslate2 package was not compiled with CUDA support" on every single
-    run. That is noise, not a diagnosis. Everywhere else the attempt is still worth
-    making and its failure still worth printing: a Linux box with a half-installed
-    CUDA stack genuinely needs to be told. `--doctor` is where macOS users are told
-    they are on CPU, once, instead of on every transcription.
-    """
-    return sys.platform != "darwin"
+def is_warm() -> bool:
+    """True once the model is loaded — what the daemon's /health reports while it warms."""
+    return _model is not None
 
 
 def _load_model():
+    """Load the model once, even when several threads ask at the same time.
+
+    The daemon warms on a background thread while requests are already being
+    served, so a bare ``if _model is None`` would let two threads each build a
+    model (two copies in VRAM). Fast path stays lock-free once warm.
+    """
     global _model, _device
     if _model is not None:
         return _model
-    if not _cuda_plausible():
-        _model = _build("cpu")
-        _device = "cpu"
+    with _load_lock:
+        if _model is not None:  # another thread built it while we waited
+            return _model
+        _preload_cuda_libs()
+        try:
+            model, device = _build("cuda"), "cuda"
+        except Exception as exc:  # noqa: BLE001
+            print(f"  (GPU init failed: {exc}; using CPU)", file=sys.stderr)
+            model, device = _build("cpu"), "cpu"
+        _device = device
+        _model = model  # published last: is_warm() must not go true before _device is set
         return _model
-    _preload_cuda_libs()
-    try:
-        _model = _build("cuda")
-        _device = "cuda"
-    except Exception as exc:  # noqa: BLE001
-        print(f"  (GPU init failed: {exc}; using CPU)", file=sys.stderr)
-        _model = _build("cpu")
-        _device = "cpu"
-    return _model
 
 
 def _run(model, audio_path: Path, language: str | None, hotwords: str | None = None):

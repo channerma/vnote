@@ -29,51 +29,17 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import (
-    CLAUDE_CODE_BIN,
-    CLAUDE_MODEL,
-    OLLAMA_HOST,
-    OPENCODE_BIN,
-    dictation_model,
-    ollama_model,
-    opencode_model,
-)
+from . import config, styles
+from .config import ollama_model
+from .styles import Style
 
 # --- prompt construction -----------------------------------------------------
 
-_MODE_INSTRUCTIONS = {
-    "light": (
-        "Lightly clean the transcript: remove filler words (um, uh, you know, like), "
-        "false starts and accidental repetitions; fix grammar, punctuation and capitalization; "
-        "correct obvious mis-transcriptions using context. Keep the speaker's wording, content "
-        "and order intact. Do not reorganize."
-    ),
-    "edit": (
-        "Edit the transcript into a clean, well-organized note: remove filler words, false starts "
-        "and repetitions; fix grammar and punctuation; correct obvious mis-transcriptions; group "
-        "related thoughts into paragraphs; add headings or bullet lists where the content naturally "
-        "calls for it; smooth transitions. Preserve all of the speaker's points and detail — do not "
-        "summarize anything away and do not invent content."
-    ),
-    "summary": (
-        "Rewrite the transcript as a tight, well-organized note: everything in 'edit' mode, plus "
-        "cut tangents and trim verbose passages so the result is noticeably more concise than the "
-        "original while keeping every substantive point. Use headings and bullets freely."
-    ),
-    # Flow-mode dictation: the output is typed straight into whatever app has focus,
-    # so it must be fast (small model), faithful, and plain — no title, no structure.
-    "dictation": (
-        "Clean the dictated fragment: remove filler words (um, uh, you know) and false starts; fix "
-        "punctuation, capitalization and obvious mis-transcriptions. Apply any spoken formatting or "
-        "editing commands ('period', 'comma', 'quote ... unquote', 'scratch that') instead of writing "
-        "them out literally. Do not reorganize, summarize, or add anything; keep the speaker's wording."
-    ),
-}
-
-_DICTATION_SYSTEM = (
-    "You clean up dictated text so it can be typed directly into the app the speaker is using. "
-    "Follow the user's editing instructions exactly. "
-    "Respond with the cleaned text and nothing else — no title line, no preamble, no code fences."
+# The two output contracts a style picks between (`output:` in its front matter).
+_PLAIN_SYSTEM = (
+    "You rework a spoken, dictated transcript into text the speaker can paste straight into "
+    "whatever they are writing. Follow the instructions below exactly. "
+    "Respond with the text and nothing else — no title line, no preamble, no code fences."
 )
 
 _SYSTEM = (
@@ -89,15 +55,97 @@ _SYSTEM = (
 )
 
 
-def _build_user_prompt(transcript: str, mode: str, tone: str | None = None) -> str:
-    instruction = _MODE_INSTRUCTIONS[mode]
+_REVISE_SYSTEM = (
+    "You revise an existing Markdown note that was written from a dictated transcript. "
+    "Apply the author's instruction to the note. Keep everything the instruction does not "
+    "touch exactly as it is — the author's voice, the content, the structure, the wording. "
+    "Output GitHub-flavored Markdown.\n\n"
+    "Respond in exactly this format and nothing else:\n"
+    "TITLE: <keep the existing title unless the instruction changes it>\n"
+    "---\n"
+    "<the revised note>"
+)
+
+
+# The note carries on from where it stopped: the take that follows the note is new
+# dictation, and everything already written is context the model must not repeat.
+_CONTINUE_SYSTEM = (
+    "You continue a note that is being dictated in several sittings. The note so far is "
+    "read-only context: never repeat it, summarize it, re-title it or rewrite any of it. "
+    "A new stretch of the same dictation follows; turn *that* into the text that carries the "
+    "note on, in the same voice, structure and conventions the note already uses. "
+    "The transcript may contain spoken meta-instructions about formatting or edits — follow them "
+    "and do not include them as literal text.\n\n"
+    "Respond with the continuation and nothing else — no title line, no preamble, no code fences, "
+    "no repetition of the note you were given."
+)
+
+_MERGE_SYSTEM = (
+    "You are an editor merging new dictation into an existing note. The note was written from "
+    "earlier dictation by the same speaker, who has now recorded more. Produce the *whole* note "
+    "again with the new material worked in where it belongs; keep the existing structure, voice "
+    "and wording wherever the new material does not change them. The transcript may contain "
+    "spoken meta-instructions about formatting or edits — follow them and do not include them as "
+    "literal text. Output GitHub-flavored Markdown.\n\n"
+    "Respond in exactly this format and nothing else:\n"
+    "TITLE: <keep the existing title unless the new material changes it>\n"
+    "---\n"
+    "<the merged note>"
+)
+
+
+def _author_instructions(instructions: str | None) -> str:
+    """The free-text "make it longer" clause, or '' — the same wording in every prompt."""
+    if not instructions or not instructions.strip():
+        return ""
+    return (
+        "\n\nAdditional instructions from the author (follow them; they take precedence "
+        f"over the defaults above): {instructions.strip()}"
+    )
+
+
+def _build_user_prompt(
+    transcript: str, style: Style, tone: str | None = None, instructions: str | None = None
+) -> str:
+    instruction = style.body
     if tone:
         instruction += f" Write in a {tone} tone."
-    return f"{instruction}\n\nTRANSCRIPT:\n\"\"\"\n{transcript}\n\"\"\""
+    prompt = f"{instruction}\n\nTRANSCRIPT:\n\"\"\"\n{transcript}\n\"\"\""
+    return prompt + _author_instructions(instructions)
 
 
-def _system_for(mode: str) -> str:
-    return _DICTATION_SYSTEM if mode == "dictation" else _SYSTEM
+def _build_continue_prompt(note_text: str, transcript: str, style: Style, instructions: str | None) -> str:
+    prompt = (
+        f"{style.body}\n\n"
+        f"THE NOTE SO FAR (context only — do not repeat or rewrite it):\n\"\"\"\n{note_text}\n\"\"\"\n\n"
+        f"NEW TRANSCRIPT (turn only this into the continuation):\n\"\"\"\n{transcript}\n\"\"\""
+    )
+    return prompt + _author_instructions(instructions)
+
+
+def _build_merge_prompt(note_text: str, transcript: str, style: Style, instructions: str | None) -> str:
+    prompt = (
+        f"{style.body}\n\n"
+        f"THE NOTE SO FAR:\n\"\"\"\n{note_text}\n\"\"\"\n\n"
+        f"NEW TRANSCRIPT (work this into the note):\n\"\"\"\n{transcript}\n\"\"\""
+    )
+    return prompt + _author_instructions(instructions)
+
+
+def _build_revise_prompt(note_text: str, instructions: str) -> str:
+    return f"INSTRUCTION:\n{instructions}\n\nNOTE:\n\"\"\"\n{note_text}\n\"\"\""
+
+
+def _split_heading(note_text: str) -> tuple[str, str]:
+    """Split a leading '# Title' off a note: (title, note without that heading)."""
+    m = re.match(r"\s*#[ \t]+(.+?)[ \t]*(?:\n(.*))?$", note_text, re.DOTALL)
+    if m:
+        return m.group(1).strip(), (m.group(2) or "").strip()
+    return "", note_text.strip()
+
+
+def _system_for(style: Style) -> str:
+    return _PLAIN_SYSTEM if style.output == "plain" else _SYSTEM
 
 
 def _fallback_title(transcript: str) -> str:
@@ -105,9 +153,9 @@ def _fallback_title(transcript: str) -> str:
     return " ".join(words[:6]) if words else "voice note"
 
 
-def _finish(raw: str, transcript: str, mode: str) -> CleanResult:
-    """Turn a backend response into a CleanResult, per mode's output contract."""
-    if mode == "dictation":  # plain text out, no TITLE/--- framing to parse
+def _finish(raw: str, transcript: str, style: Style) -> CleanResult:
+    """Turn a backend response into a CleanResult, per the style's output contract."""
+    if style.output == "plain":  # no TITLE/--- framing to parse; the title is derived
         return CleanResult(title=_fallback_title(transcript), body=raw.strip() or transcript)
     return _parse_response(raw, transcript)
 
@@ -141,26 +189,147 @@ class CleanResult:
 
 def clean(
     transcript: str,
-    mode: str = "edit",
-    backend: str = "ollama",
+    mode: str = config.DEFAULT_STYLE,
+    backend: str | None = None,
     model: str | None = None,
     tone: str | None = None,
+    instructions: str | None = None,
 ) -> CleanResult:
-    if mode not in _MODE_INSTRUCTIONS:
-        raise ValueError(f"unknown mode: {mode!r} (expected one of {', '.join(_MODE_INSTRUCTIONS)})")
+    """Clean ``transcript`` with the named style.
+
+    ``mode`` keeps its name — every caller passes ``mode=`` — but it holds a *style*
+    name now (styles.py). ``backend``/``model`` are the explicit picks: leave them
+    None and the style's own lines apply, then the settings.
+    """
+    style = _style_or_die(mode)
+    raw = _complete(
+        backend or style.backend or config.backend(),
+        _system_for(style),
+        _build_user_prompt(transcript, style, tone, instructions),
+        model or style.model,
+    )
+    return _finish(raw, transcript, style)
+
+
+def _strip_fence(text: str) -> str:
+    """Drop a ``` fence the model wrapped the whole answer in (its content is not code)."""
+    m = re.fullmatch(r"```[A-Za-z0-9_+-]*[ \t]*\n(.*?)\n?```", text.strip(), re.DOTALL)
+    return m.group(1).strip() if m else text.strip()
+
+
+def _continuation_only(raw: str, transcript: str) -> str:
+    """A continuation reply reduced to the text itself.
+
+    The prompt forbids all three, but models still reach for the shapes they were
+    trained on: a code fence around the answer, the TITLE/--- framing of the ordinary
+    cleanup contract, or a ``# heading``. Any of them appended verbatim would break
+    the note it is being added to.
+    """
+    text = _strip_fence(raw)
+    if re.match(r"\s*TITLE:", text):
+        text = _parse_response(text, transcript).body
+    if re.match(r"\s*#[ \t]+", text):  # a heading belongs to the note, not to a continuation
+        text = _split_heading(text)[1]
+    return text.strip() or transcript.strip()
+
+
+def _style_or_die(mode: str | None) -> Style:
+    style = styles.get(mode)
+    if style is None:
+        raise ValueError(f"unknown style: {mode!r} (expected one of {', '.join(styles.names())})")
+    return style
+
+
+def continue_note(
+    note_text: str,
+    new_transcript: str,
+    *,
+    mode: str = config.DEFAULT_STYLE,
+    backend: str | None = None,
+    model: str | None = None,
+    instructions: str | None = None,
+) -> str:
+    """The *continuation* of an existing note from a new take — body text only.
+
+    The note is context the model may not touch: what comes back is appended under a
+    bare ``---``, so there is no TITLE line to parse and the note keeps its title.
+    Backend/model resolve exactly as in :func:`clean` (explicit > style > setting).
+    """
+    style = _style_or_die(mode)
+    raw = _complete(
+        backend or style.backend or config.backend(),
+        # A plain-output style already forbids the title line; a note-output one needs
+        # to be told, since its usual contract demands one.
+        _CONTINUE_SYSTEM if style.output != "plain" else _PLAIN_SYSTEM,
+        _build_continue_prompt(note_text, new_transcript, style, instructions),
+        model or style.model,
+    )
+    return _continuation_only(raw, new_transcript)
+
+
+def merge_note(
+    note_text: str,
+    new_transcript: str,
+    *,
+    mode: str = config.DEFAULT_STYLE,
+    backend: str | None = None,
+    model: str | None = None,
+    instructions: str | None = None,
+) -> CleanResult:
+    """Rewrite the whole note with a new take's transcript worked into it.
+
+    Same TITLE/--- contract as :func:`clean` (and the same plain-output exception),
+    because the result replaces the note rather than being appended to it.
+    """
+    style = _style_or_die(mode)
+    raw = _complete(
+        backend or style.backend or config.backend(),
+        _MERGE_SYSTEM if style.output != "plain" else _PLAIN_SYSTEM,
+        _build_merge_prompt(note_text, new_transcript, style, instructions),
+        model or style.model,
+    )
+    return _finish(raw, new_transcript, style)
+
+
+def revise(
+    note_text: str,
+    instructions: str,
+    *,
+    backend: str | None = None,
+    model: str | None = None,
+) -> CleanResult:
+    """Rework an existing note per a free-text instruction ("make it shorter").
+
+    Unlike clean(), the input is the finished Markdown note rather than the
+    transcript. A leading '# Title' heading is split off and handed back as the
+    title, so revising a note round-trips through the same CleanResult shape.
+    """
+    if not instructions or not instructions.strip():
+        raise ValueError("revise needs a non-empty instruction")
+    heading, body = _split_heading(note_text)
+    raw = _complete(
+        backend or config.backend(),
+        _REVISE_SYSTEM,
+        _build_revise_prompt(body, instructions.strip()),
+        model,
+    )
+    result = _parse_response(raw, heading or note_text)
+    if heading and result.title == _fallback_title(heading):
+        # The model dropped the TITLE: line — keep the note's own heading verbatim.
+        result = CleanResult(title=heading, body=result.body)
+    return result
+
+
+def _complete(backend: str, system: str, user: str, model: str | None) -> str:
+    """Run one prompt through the chosen backend; returns the raw model text."""
     if backend == "ollama":
-        default = dictation_model() if mode == "dictation" else ollama_model()
-        return _clean_ollama(transcript, mode, model or default, tone)
+        return _ollama_complete(system, user, model or ollama_model())
     if backend == "claude-code":
         # No default model: let the Claude Code CLI use whatever the user's own
         # setup selects, so vnote never pins their subscription to one model.
-        return _clean_claude_code(transcript, mode, model, tone)
-    if backend == "opencode":
-        # Same reasoning as claude-code: no default model, so opencode keeps
-        # using whichever provider/model the user already selected.
-        return _clean_opencode(transcript, mode, model or opencode_model(), tone)
+        return _claude_code_complete(system, user, model)
     if backend == "claude":
-        return _clean_claude(transcript, mode, model or CLAUDE_MODEL, tone)
+        return _claude_complete(system, user, model or str(config.get("claude_model")))
     raise ValueError(
         f"unknown backend: {backend!r} (expected 'ollama', 'claude-code', 'opencode' or 'claude')"
     )
@@ -171,9 +340,9 @@ def clean(
 
 def _ollama_get(path: str, timeout: float = 2.0) -> dict | None:
     try:
-        with urllib.request.urlopen(f"{OLLAMA_HOST}{path}", timeout=timeout) as r:
+        with urllib.request.urlopen(f"{config.get('ollama_host')}{path}", timeout=timeout) as r:
             return json.loads(r.read())
-    except (urllib.error.URLError, TimeoutError, ConnectionError):
+    except (urllib.error.URLError, TimeoutError, ConnectionError, ValueError):  # ValueError: bad URL/scheme
         return None
 
 
@@ -209,20 +378,56 @@ def _ensure_model_present(model: str) -> None:
     )
 
 
-def _clean_ollama(transcript: str, mode: str, model: str, tone: str | None = None) -> CleanResult:
+def _keep_alive() -> str | int:
+    """The ``keep_alive`` value in the form Ollama actually accepts.
+
+    A JSON *string* goes through Go's time.ParseDuration and must carry a unit
+    ("30m"); only a JSON *number* means seconds, with -1 = keep it loaded until
+    Ollama exits. Sending "-1" as a string is a 400 ("time: missing unit in
+    duration") — checked against Ollama 0.23.1, 2026-08-25.
+    """
+    value = str(config.get("ollama_keep_alive")).strip()
+    return int(value) if re.fullmatch(r"-?\d+", value) else value
+
+
+def preload_ollama(model: str) -> None:
+    """Load ``model`` into Ollama's memory so the first note doesn't pay for it.
+
+    An empty ``messages`` array is Ollama's documented way to load a model without
+    generating anything (API doc, read 2026-08-25). Raises on any failure — the
+    daemon's background warm decides what a failure means.
+    """
+    _ensure_ollama_running()
+    _ensure_model_present(model)
+    payload = {
+        "model": model,
+        "messages": [],
+        "keep_alive": _keep_alive(),
+    }
+    req = urllib.request.Request(
+        f"{config.get('ollama_host')}/api/chat",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=300):  # a cold pull of weights from disk is slow
+        pass
+
+
+def _ollama_complete(system: str, user: str, model: str) -> str:
     _ensure_ollama_running()
     _ensure_model_present(model)
     payload = {
         "model": model,
         "stream": False,
         "options": {"temperature": 0.3},
+        "keep_alive": _keep_alive(),  # keep it hot for the next note
         "messages": [
-            {"role": "system", "content": _system_for(mode)},
-            {"role": "user", "content": _build_user_prompt(transcript, mode, tone)},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
         ],
     }
     req = urllib.request.Request(
-        f"{OLLAMA_HOST}/api/chat",
+        f"{config.get('ollama_host')}/api/chat",
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
@@ -231,7 +436,7 @@ def _clean_ollama(transcript: str, mode: str, model: str, tone: str | None = Non
     content = (data.get("message") or {}).get("content", "")
     if not content.strip():
         raise RuntimeError(f"empty response from Ollama model {model!r}")
-    return _finish(content, transcript, mode)
+    return content
 
 
 # --- Claude Code CLI (subscription, no API key) ---
@@ -241,13 +446,11 @@ _CLAUDE_CODE_TIMEOUT_S = 600
 
 def claude_code_bin() -> str | None:
     """Path to the Claude Code executable, or None if it isn't installed."""
-    return shutil.which(CLAUDE_CODE_BIN)
+    return shutil.which(str(config.get("claude_code_bin")))
 
 
-def _clean_claude_code(
-    transcript: str, mode: str, model: str | None = None, tone: str | None = None
-) -> CleanResult:
-    """Clean up via the Claude Code CLI — bills your subscription, not an API key.
+def _claude_code_complete(system: str, user: str, model: str | None = None) -> str:
+    """Run a prompt through the Claude Code CLI — bills your subscription, not an API key.
 
     Tools are disabled: this is a pure text transform, so the model needs no
     filesystem, shell or network access. The prompt goes in on stdin rather than
@@ -256,19 +459,20 @@ def _clean_claude_code(
     exe = claude_code_bin()
     if exe is None:
         raise RuntimeError(
-            f"The claude-code backend needs the Claude Code CLI on PATH (looked for {CLAUDE_CODE_BIN!r}).\n"
+            f"The claude-code backend needs the Claude Code CLI on PATH "
+            f"(looked for {config.get('claude_code_bin')!r}).\n"
             "    Install it:              https://claude.com/product/claude-code\n"
             "    Or point vnote at it:    VNOTE_CLAUDE_CODE_BIN=/path/to/claude\n"
             "    Or use the local backend:  --backend ollama"
         )
 
-    cmd = [exe, "-p", "--allowed-tools", "", "--system-prompt", _system_for(mode)]
+    cmd = [exe, "-p", "--allowed-tools", "", "--system-prompt", system]
     if model:
         cmd += ["--model", model]
     try:
         proc = subprocess.run(
             cmd,
-            input=_build_user_prompt(transcript, mode, tone),
+            input=user,
             capture_output=True,
             text=True,
             timeout=_CLAUDE_CODE_TIMEOUT_S,
@@ -286,7 +490,7 @@ def _clean_claude_code(
         )
     if not proc.stdout.strip():
         raise RuntimeError("empty response from Claude Code")
-    return _finish(proc.stdout, transcript, mode)
+    return proc.stdout
 
 
 # --- opencode CLI (whatever provider/model opencode is configured with) ---
@@ -425,8 +629,8 @@ def _clean_opencode(
 # --- Claude (optional metered API backend) ---
 
 
-def _clean_claude(transcript: str, mode: str, model: str, tone: str | None = None) -> CleanResult:
-    """Clean up via the Anthropic API. Opt-in: needs the `claude` extra + a key.
+def _claude_complete(system: str, user: str, model: str) -> str:
+    """Run a prompt through the Anthropic API. Opt-in: needs the `claude` extra + a key.
 
     Reuses the same system prompt, user prompt and response parser as the local
     backend so the two produce the same TITLE/--- output shape.
@@ -456,8 +660,8 @@ def _clean_claude(transcript: str, mode: str, model: str, tone: str | None = Non
         resp = client.messages.create(
             model=model,
             max_tokens=8192,
-            system=_system_for(mode),
-            messages=[{"role": "user", "content": _build_user_prompt(transcript, mode, tone)}],
+            system=system,
+            messages=[{"role": "user", "content": user}],
         )
     except anthropic.APIError as exc:
         raise RuntimeError(f"Anthropic API error: {exc}") from exc
@@ -465,4 +669,4 @@ def _clean_claude(transcript: str, mode: str, model: str, tone: str | None = Non
     content = "".join(block.text for block in resp.content if getattr(block, "type", None) == "text")
     if not content.strip():
         raise RuntimeError(f"empty response from Claude model {model!r}")
-    return _finish(content, transcript, mode)
+    return content

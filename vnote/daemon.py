@@ -8,7 +8,6 @@ can call either interchangeably.
 
 from __future__ import annotations
 
-import base64
 import json
 import urllib.error
 import urllib.request
@@ -87,13 +86,33 @@ def transcribe_bytes(data: bytes, fmt: str = "wav", language: str | None = None)
 
 def clean(
     transcript: str,
-    mode: str = "edit",
-    backend: str = "ollama",
+    mode: str = config.DEFAULT_STYLE,   # a style name (styles.py); the field keeps its old name
+    backend: str | None = None,         # None = the style's backend, then the setting
     model: str | None = None,
     tone: str | None = None,
+    instructions: str | None = None,
 ) -> CleanResult:
-    payload = {"transcript": transcript, "mode": mode, "backend": backend, "model": model, "tone": tone}
+    payload = {
+        "transcript": transcript,
+        "mode": mode,
+        "backend": backend,
+        "model": model,
+        "tone": tone,
+        "instructions": instructions,
+    }
     d = _post("/clean", payload, timeout=600)
+    return CleanResult(title=d["title"], body=d["body"])
+
+
+def revise(
+    note_text: str,
+    instructions: str,
+    backend: str | None = None,
+    model: str | None = None,
+) -> CleanResult:
+    """Rework an existing note per a free-text instruction (see cleanup.revise)."""
+    payload = {"note": note_text, "instructions": instructions, "backend": backend, "model": model}
+    d = _post("/revise", payload, timeout=600)
     return CleanResult(title=d["title"], body=d["body"])
 
 
@@ -108,7 +127,7 @@ class StreamSession:
     def append(self, pcm_chunk: bytes) -> str:
         """Send new audio; returns the latest partial transcript ('' until the first pass).
 
-        Blocks while the daemon runs a partial pass — call from a pump thread.
+        Returns immediately: the daemon transcribes on its own worker and the partial lags a little.
         """
         req = urllib.request.Request(
             f"{_base()}/stream/append?sid={quote(self.sid)}",
@@ -121,28 +140,3 @@ class StreamSession:
         """Final transcript for everything appended. The session is gone afterwards."""
         d = _post(f"/stream/finish?sid={quote(self.sid)}", {}, timeout=600)
         return d["transcript"], d["meta"]
-
-
-def log_history(
-    wav: bytes | None,
-    raw: str | None,
-    clean: str | None,
-    seconds: float,
-    mode: str | None = None,
-    tone: str | None = None,
-) -> None:
-    """Save one flow take to the daemon's history store (voice-notes/flow/)."""
-    payload = {
-        "wav_b64": base64.b64encode(wav).decode() if wav else None,
-        "raw": raw,
-        "clean": clean,
-        "seconds": seconds,
-        "mode": mode,
-        "tone": tone,
-    }
-    _post("/history", payload, timeout=30)
-
-
-def promote(take: str = "last") -> str:
-    """Promote a logged flow take to its own note folder; returns the folder name."""
-    return _post("/promote", {"take": take}, timeout=30)["note"]

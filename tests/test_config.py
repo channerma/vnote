@@ -1,6 +1,7 @@
 """Tests for the .env loader, the config file, and setting resolution order."""
 
 import os
+from pathlib import Path
 
 from vnote import config
 
@@ -61,48 +62,188 @@ def test_ollama_model_resolution_order(tmp_path, monkeypatch):
     assert config.ollama_model() == "llama3.2:3b"
 
 
-def test_app_tone_matching(tmp_path, monkeypatch):
+# --- the settings registry ------------------------------------------------------
+
+
+def test_registry_keys_and_env_names_are_unique():
+    keys = [s.key for s in config.SETTINGS]
+    envs = [s.env for s in config.SETTINGS]
+    assert len(set(keys)) == len(keys)
+    assert len(set(envs)) == len(envs)
+
+
+def test_get_and_source_follow_env_over_file_over_default(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    assert config.app_tones() == {}  # no config file -> empty map
-    assert config.app_tone_for("anything") is None
-
-    config.save_config({"app_tones": {"slack": "casual", "outlook": "formal"}})
-    assert config.app_tone_for("#eng-general - Slack") == "casual"
-    assert config.app_tone_for("Inbox - Outlook") == "formal"
-    assert config.app_tone_for("Notepad") is None
-
-
-def test_env_on_defaults_on_and_honors_off_values(monkeypatch):
-    from vnote import config as cfg
-
-    monkeypatch.delenv("VNOTE_HISTORY_AUDIO", raising=False)
-    assert cfg._env_on("VNOTE_HISTORY_AUDIO") is True
-    for off in ("0", "false", "no", "off"):
-        monkeypatch.setenv("VNOTE_HISTORY_AUDIO", off)
-        assert cfg._env_on("VNOTE_HISTORY_AUDIO") is False
-    monkeypatch.setenv("VNOTE_HISTORY_AUDIO", "1")
-    assert cfg._env_on("VNOTE_HISTORY_AUDIO") is True
+    monkeypatch.delenv("VNOTE_STYLE", raising=False)
+    monkeypatch.delenv("VNOTE_MODE", raising=False)  # the retired name resolves too (see get())
+    assert config.get("default_style") == "edit"
+    assert config.source("default_style") == "default"
+    config.save_config({"default_style": "summary"})
+    assert config.get("default_style") == "summary"
+    assert config.source("default_style") == "file"
+    monkeypatch.setenv("VNOTE_STYLE", "light")
+    assert config.get("default_style") == "light"
+    assert config.source("default_style") == "env"
+    assert config.default_style() == "light"
 
 
-def test_default_notes_dir_uses_repo_root_in_a_source_checkout(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    (repo / "vnote").mkdir(parents=True)
-    (repo / "pyproject.toml").write_text("[project]\n")
-    monkeypatch.setattr(config, "__file__", str(repo / "vnote" / "config.py"))
+def test_the_retired_mode_names_still_select_the_style(tmp_path, monkeypatch):
+    """0.6.x wrote default_mode / VNOTE_MODE; both still pick the style, and are never written back."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("VNOTE_STYLE", raising=False)
+    monkeypatch.delenv("VNOTE_MODE", raising=False)
+    config.save_config({"default_mode": "summary"})
+    assert config.default_style() == "summary" and config.source("default_style") == "file"
+    config.save_config({"default_mode": "summary", "default_style": "light"})
+    assert config.default_style() == "light"  # the current name wins
+    monkeypatch.setenv("VNOTE_MODE", "dictation")
+    assert config.default_style() == "dictation" and config.source("default_style") == "env"
+    monkeypatch.setenv("VNOTE_STYLE", "email")
+    assert config.default_style() == "email"
 
-    assert config._default_notes_dir() == (repo / "voice-notes").resolve()
+
+def test_update_clears_the_retired_key_so_blank_really_means_default(tmp_path, monkeypatch):
+    """An upgraded config.json still holds default_mode; leaving it there would keep
+    winning after a write, and 'back to default' would silently do nothing."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("VNOTE_MODE", raising=False)
+    config.save_config({"default_mode": "summary", "language": "en"})
+
+    config.update({"default_style": "light"})
+    assert config.load_config() == {"default_style": "light", "language": "en"}
+    assert config.default_style() == "light"
+
+    config.save_config({"default_mode": "summary", "default_style": "light"})
+    config.update({"default_style": ""})  # blank = back to the built-in default
+    assert config.load_config() == {}
+    assert config.default_style() == config.DEFAULT_STYLE
+    assert config.source("default_style") == "default"
 
 
-def test_default_notes_dir_never_lands_in_site_packages(tmp_path, monkeypatch):
-    """Installed as a tool there is no pyproject.toml beside the package, and the
-    repo-relative path would resolve *inside* site-packages. Anchor to ~ instead."""
-    site = tmp_path / "site-packages"
-    (site / "vnote").mkdir(parents=True)  # deliberately no pyproject.toml
-    home = tmp_path / "home"
-    monkeypatch.setattr(config, "__file__", str(site / "vnote" / "config.py"))
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
+def test_update_refuses_a_write_the_retired_env_var_would_swallow(tmp_path, monkeypatch):
+    import pytest
 
-    notes = config._default_notes_dir()
-    assert notes == home / "voice-notes"
-    assert site.resolve() not in notes.parents
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("VNOTE_MODE", "dictation")
+    assert config.source("default_style") == "env"
+    with pytest.raises(ValueError, match="overridden by VNOTE_MODE"):
+        config.update({"default_style": "light"})
+    assert not config.config_file().exists()
+
+
+def test_update_validates_the_style_against_the_registry(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert config.update({"default_style": "summary"}) == ["default_style"]
+    with pytest.raises(ValueError, match="default_style must be one of"):
+        config.update({"default_style": "no-such-style"})
+
+
+def test_language_blank_means_auto(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("VNOTE_LANGUAGE", raising=False)
+    assert config.language() is None
+    config.save_config({"language": "en"})
+    assert config.language() == "en"
+
+
+def test_update_persists_editable_keys_and_blank_removes(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    for env in ("VNOTE_OLLAMA_MODEL", "VNOTE_LANGUAGE"):
+        monkeypatch.delenv(env, raising=False)
+    assert config.update({"ollama_model": "llama3.2:3b", "language": "en"}) == ["ollama_model", "language"]
+    assert config.load_config() == {"ollama_model": "llama3.2:3b", "language": "en"}
+    assert config.ollama_model() == "llama3.2:3b"
+    config.update({"language": ""})
+    assert config.load_config() == {"ollama_model": "llama3.2:3b"}
+
+
+def test_update_rejects_bad_requests(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    with pytest.raises(ValueError, match="unknown setting"):
+        config.update({"nope": "x"})
+    with pytest.raises(ValueError, match="restart"):
+        config.update({"whisper_model": "tiny"})
+    with pytest.raises(ValueError, match="must be one of"):
+        config.update({"backend": "gpt"})
+    monkeypatch.setenv("VNOTE_BACKEND", "claude")
+    with pytest.raises(ValueError, match="overridden by VNOTE_BACKEND"):
+        config.update({"backend": "ollama"})
+    assert not config.config_file().exists()  # nothing was written on any error path
+
+
+def test_describe_rows_carry_the_contract_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    rows = {row["key"]: row for row in config.describe()}
+    assert set(rows) == {s.key for s in config.SETTINGS}
+    for row in rows.values():
+        assert {"key", "env", "value", "default", "description", "kind", "source", "editable"} <= set(row)
+        assert row["source"] in ("env", "file", "default")
+    assert rows["backend"]["choices"] == ["ollama", "claude-code", "claude"]
+    # default_style has no fixed list: the choices are whatever the style files say
+    from vnote import styles
+
+    assert rows["default_style"]["choices"] == styles.names()
+    assert "edit" in rows["default_style"]["choices"]
+    assert rows["whisper_model"]["editable"] is False
+    assert rows["whisper_model"]["value"] == config.WHISPER_MODEL  # the live constant, not a re-read
+    assert rows["daemon_port"]["value"] == config.DAEMON_PORT
+
+
+def test_every_setting_env_var_is_documented():
+    root = Path(__file__).parent.parent
+    guide = (root / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
+    example = (root / ".env.example").read_text(encoding="utf-8")
+    for s in config.SETTINGS:
+        assert f"`{s.env}`" in guide, f"{s.env} missing from the User Guide env table"
+        assert s.env in example, f"{s.env} missing from .env.example"
+
+
+
+def test_update_blank_or_null_restores_the_default_for_any_kind():
+    config.save_config({"backend": "claude", "default_style": "summary", "language": "en"})
+    config.update({"backend": "", "default_style": None})
+    assert config.load_config() == {"language": "en"}
+    assert config.backend() == "ollama" and config.source("backend") == "default"
+
+
+def test_update_rejects_ollama_host_without_a_scheme():
+    import pytest
+
+    with pytest.raises(ValueError, match="http://"):
+        config.update({"ollama_host": "localhost:11434"})
+    assert config.update({"ollama_host": "http://gpu-box:11434"}) == ["ollama_host"]
+
+
+def test_update_checks_the_keep_alive_duration(tmp_path, monkeypatch):
+    """Ollama 400s on a unit-less duration string; a bare number is seconds (-1 = forever)."""
+    import pytest
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("VNOTE_OLLAMA_KEEP_ALIVE", raising=False)
+    for good in ("-1", "30m", "1h30m", "300s", "0"):
+        assert config.update({"ollama_keep_alive": good}) == ["ollama_keep_alive"]
+    for bad in ("forever", "30 minutes", "m30"):
+        with pytest.raises(ValueError, match="ollama_keep_alive must be a duration"):
+            config.update({"ollama_keep_alive": bad})
+
+
+def test_file_values_are_coerced_not_trusted():
+    config.save_config({"default_style": 5, "language": 7})
+    assert config.get("default_style") == "5"  # a string, so consumers can validate and name it
+    assert config.language() == "7"
+
+
+def test_daemon_port_env_garbage_does_not_kill_import(monkeypatch, capsys):
+    monkeypatch.setenv("VNOTE_DAEMON_PORT", "abc")
+    assert config._int_env("VNOTE_DAEMON_PORT", 8760) == 8760
+    assert "VNOTE_DAEMON_PORT" in capsys.readouterr().err
+
+
+def test_vocab_default_follows_xdg(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "elsewhere"))
+    row = next(r for r in config.describe() if r["key"] == "vocab")
+    assert row["default"] == row["value"] == str(tmp_path / "elsewhere" / "vnote" / "vocab.txt")

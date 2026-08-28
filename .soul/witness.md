@@ -118,3 +118,41 @@ CONSEQUENCE:  All fixed before commit; the migration now has a completion marker
               os.rename only. Cost ≈ one review cycle per build, unchanged.
 STATUS:       Open (pattern)
 ```
+
+ID:           VNOTE-011
+WHEN:         2026-08-27 / one day, review + merge + re-weave
+WHERE:        Process — mirror_of_greenwoods = merge of origin/main (greenwoodms06) PHASE8-10 web UI onto the fork's opencode-backend branch
+WHAT:         Upstream's 0.5.0-0.7.0 web UI (browser recording, live transcript, styles, takes, versions, warm start)
+              replaced flow mode; the almost-identical 0.4.0-vs-0.7.0 cleanup code meant adopting upstream was the
+              right call. All conflicts resolved toward upstream; the fork's opencode backend and macOS fixes were
+              re-woven on top (config, cleanup._complete, doctor, firstrun, cli, transcribe._cuda_plausible, record
+              pulse gate, per-device Whisper default).
+TYPE:         Council Note — verified with the full suite: 372 passed, ruff clean; origin's two pty/termios record
+              tests fail identically on pristine origin/main here (macOS quirk, not caused by the merge).
+CONSEQUENCE:  fork main is now stale 39d53e3 vs mirror_of_greenwoods 85739cf; pushing/merging the branch is the open gate.
+STATUS:       Open (branch pushed, not merged to main)
+
+ID:           VNOTE-012
+WHEN:         2026-08-27
+WHERE:        vnote/pipeline.py produce() + vnote/cleanup.py temperature plumbing; verified on the real MLX model
+WHAT:         Double-clean shipped: every saved note runs cleanup at temperature 0 (baseline, `<folder>_note.md`) and
+              at variant_temperature (default 0.3, `<folder>_note_variant_tN.md`); meta records cleanup_variant_temperature.
+              Verified end-to-end on a 12.7k-char transcript: two genuinely different, grounded drafts; no hallucinated
+              details (the old 0.4.0 note had a "250TB buckets" line absent from the transcript; the new one dropped it).
+TYPE:         Feature — the "old vs new version" comparison actually measured model sampling noise, so the real fix is
+              two stochastic generations with a deterministic baseline, now built in
+CONSEQUENCE:  377 tests pass; enabled in ~/.config/vnote/config.json (double_clean:1); opencode model now un-pinned so
+              opencode's own default applies.
+STATUS:       Closed (shipped, verified)
+
+ID:           VNOTE-013
+WHEN:         2026-08-27
+WHERE:        ~/Library/LaunchAgents/com.vnote.daemon.plist, launchd gui/501
+WHAT:         The vnote daemon now runs under launchd with RunAtLoad + KeepAlive; the plist sets an explicit PATH
+              (/opt/homebrew/bin, /Users/71z/.opencode/bin, ...) because launchd's minimal PATH hides the opencode CLI
+              that the cleanup backend shells out to. Verified: health reports 0.7.0 warm; a real /clean through the
+              launchd daemon reached opencode and returned a title.
+TYPE:         Operations — the minimal-PATH trap is the load-bearing config; VNOTE_DIR/VNOTE_BACKEND also pinned in env
+CONSEQUENCE:  Daemon survives login/logout and crashes; restart via `launchctl kickstart -k gui/$(id -u)/com.vnote.daemon`.
+              Stale ad-hoc-manual daemon pid 12755 was stopped first to free :8760.
+STATUS:       Closed (running); I-013 tracks shipping the plist as a repo template

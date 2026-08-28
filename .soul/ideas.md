@@ -15,3 +15,12 @@
   the page ignores it today (page review 2026-08-25).
 - I-011 `rootJoin()`'s one-take branch returns the PUT text verbatim; a takes/ note reduced to one take differs by
   whitespace from the daemon's join until reload. Copy-only, watch only (page review 2026-08-25).
+- I-012 [shipped 2026-08-27: double-clean] Save a second, varied cleanup beside every note: temp-0 baseline
+  `<folder>_note.md` + a `variant_temperature` pass `<folder>_note_variant_tN.md` (N encodes the temp: t3 = 0.3).
+  Env/config: VNOTE_DOUBLE_CLEAN, VNOTE_VARIANT_TEMPERATURE. Note: it runs in-process from pipeline.produce even
+  when a warm daemon is up (the daemon's /clean has no temperature knob) — see the comment in produce().
+- I-013 macOS LaunchAgent autostart is set up ad hoc at ~/Library/LaunchAgents/com.vnote.daemon.plist with an explicit
+  PATH (launchd's minimal PATH hides /Users/71z/.opencode/bin/opencode). Ship a template in scripts/ or a
+  `vnote --install-daemon` subcommand so reinstalls and other machines get it, PATH included.
+- I-014 Rewrite the double-clean checkpoint: today the variant filename encodes temperature as decimal digits only,
+  so a temp like 1.0 would collide with 10. "t3/t4" is fine for the 0.x range; re-check before allowing temps >= 1.

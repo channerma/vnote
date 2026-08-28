@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchAgent for the vnote warm-model daemon + web UI.
+
+  Install (after `uv tool install`, which puts vnote in ~/.local/bin):
+    mkdir -p ~/Library/LaunchAgents
+    cp scripts/com.vnote.daemon.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.vnote.daemon.plist
+
+  Verify:   launchctl print gui/$(id -u)/com.vnote.daemon
+  Health:   curl -s http://127.0.0.1:8760/health
+  Logs:     ~/.local/state/vnote-daemon.log
+  Restart:  launchctl kickstart -k gui/$(id -u)/com.vnote.daemon   (e.g. after reinstalling vnote)
+  Stop:     launchctl bootout gui/$(id -u)/com.vnote.daemon
+
+  IMPORTANT — edit the absolute paths for THIS machine before installing:
+    * ProgramArguments[0] must be the absolute path to your `vnote` binary.
+    * launchd runs with a minimal PATH, so PATH below must include:
+        - the cleanup backend CLIs (e.g. opencode, claude) that vnote shells out to,
+        - the dir containing the `vnote` binary itself.
+    * VNOTE_DIR must point at your real notes directory (or remove it).
+
+  RunAtLoad starts it at login; KeepAlive restarts it if it dies.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vnote.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/71z/.local/bin/vnote</string>
+        <string>--serve</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/Users/71z/.opencode/bin:/Users/71z/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>VNOTE_DIR</key>
+        <string>/Users/71z/voice-notes</string>
+        <key>VNOTE_BACKEND</key>
+        <string>opencode</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>/Users/71z</string>
+    <key>StandardOutPath</key>
+    <string>/Users/71z/.local/state/vnote-daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/71z/.local/state/vnote-daemon.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

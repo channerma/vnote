@@ -377,7 +377,17 @@ service. Cleanup runs daemon-side, so the backend's needs (Ollama, the `claude` 
 - **WSL2, at Windows logon:** Task Scheduler → new task → *Action:*
   `wsl.exe -d <YourDistro> -- ~/.local/bin/vnote --serve`, *Trigger:* at log on, tick
   **Hidden**. (Or just leave a terminal running `vnote --serve`.)
-- **macOS / native Windows:** leave a terminal running `vnote --serve`.
+- **macOS (LaunchAgent):**
+  ```bash
+  cp scripts/com.vnote.daemon.plist ~/Library/LaunchAgents/
+  # edit the absolute paths in ~/Library/LaunchAgents/com.vnote.daemon.plist first —
+  # launchd runs with a minimal PATH, so PATH must include the cleanup CLI (opencode,
+  # claude) and ~/.local/bin; set VNOTE_DIR to your notes dir
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.vnote.daemon.plist
+  ```
+  Runs at login, restarts on crash; logs to `~/.local/state/vnote-daemon.log`. Restart
+  it after reinstalling vnote: `launchctl kickstart -k gui/$(id -u)/com.vnote.daemon`.
+- **Native Windows:** leave a terminal running `vnote --serve`.
 
 ---
 

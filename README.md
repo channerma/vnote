@@ -68,9 +68,12 @@ That's all macOS needs installed — nothing else:
   CUDA on this platform — you never see "GPU init failed … not compiled with CUDA";
   `vnote --doctor`/`--config` just report CPU. (Off macOS the probe and its error
   still run, so a broken Linux CUDA stack stays loud.)
-- **Always-on is manual so far.** No launchd unit ships yet — run `vnote --serve`
-  yourself, or add your own LaunchAgent (absolute paths — launchd runs with a
-  minimal PATH), to keep the daemon + web UI at login.
+- **Always-on via LaunchAgent.** A ready-to-edit template ships at
+  `scripts/com.vnote.daemon.plist` (run at login, restart on crash) — follow its
+  header to set the absolute `PATH` (launchd runs with a minimal PATH, so the
+  cleanup CLI like `opencode` and `~/.local/bin` must be added) and install with
+  `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.vnote.daemon.plist`.
+  Till then, run `vnote --serve` yourself or leave a terminal running it.
 
 </details>
 

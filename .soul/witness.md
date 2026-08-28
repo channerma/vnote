@@ -156,3 +156,21 @@ TYPE:         Operations — the minimal-PATH trap is the load-bearing config; V
 CONSEQUENCE:  Daemon survives login/logout and crashes; restart via `launchctl kickstart -k gui/$(id -u)/com.vnote.daemon`.
               Stale ad-hoc-manual daemon pid 12755 was stopped first to free :8760.
 STATUS:       Closed (running); I-013 tracks shipping the plist as a repo template
+
+ID:           VNOTE-014
+WHEN:         2026-08-27 / step-away batch
+WHERE:        vnote/pipeline.py double-clean naming; scripts/com.vnote.daemon.plist; tests/test_record.py pty tests
+WHAT:         Three pieces of closure from the handoff gates: (a) the double-clean variant filename is now
+              dot-free with the integer part included (0.3 -> t0p3, 1.3 -> t1p3), fixing 0.3-vs-1.3 and
+              1.0 collisions (regression test added, verified live on the real MLX model); (b) macOS
+              autostart ships as scripts/com.vnote.daemon.plist and main = c2f1ae7 was merged + pushed to
+              the fork; (c) the two upstream pty tests finally explained instead of deselected — macOS's
+              tty driver latches PENDIN (0x20000000 in c_lflag) that restore cannot clear, and
+              tcsetattr(TCSAFLUSH) can deadlock against a concurrent pty-master write; the app never
+              writes to the master, so real recording is unaffected.
+TYPE:         Council Note — three findings, all verified against reality this session
+CONSEQUENCE:  Suite now 379 passed / 2 skipped with no deselects; no more 2-minute pty hangs on this Mac;
+              double-clean output naming is unambiguous for the whole allowed 0..2 range. Gotcha worth keeping:
+              `uv tool install --force` still served a cached wheel with the old code — `--reinstall` fixed it.
+STATUS:       Closed
+STATUS:       Closed

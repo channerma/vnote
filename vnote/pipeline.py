@@ -244,11 +244,13 @@ def make_note(
         if variant is not None:
             # The user's two named comparison files, alongside the app's canonical
             # note.md (which the web UI / versions / takes keep reading).
-            #   <folder>_note.md            = the deterministic (temp-0) baseline
-            #   <folder>_note_variant_tN.md = the varied pass; N encodes the temperature
-            temp_frac = str(variant["temperature"]).split(".")[-1] or "0"
+            #   <folder>_note.md                   = the deterministic (temp-0) baseline
+            #   <folder>_note_variant_t{tag}.md    = the varied pass; the temperature is spelled
+            #                                        dot-free (0.3 -> t0p3) so integer parts
+            #                                        can't collide (0.3 vs 1.3).
+            temp_tag = str(variant["temperature"]).replace(".", "p")
             (session_dir / f"{session_dir.name}_note.md").write_text(note_text, encoding="utf-8")
-            (session_dir / f"{session_dir.name}_note_variant_t{temp_frac}.md").write_text(
+            (session_dir / f"{session_dir.name}_note_variant_t{temp_tag}.md").write_text(
                 note_markdown(variant["title"], variant["body"], mode), encoding="utf-8"
             )
         elif config.double_clean():

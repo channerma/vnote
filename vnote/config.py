@@ -238,12 +238,12 @@ SETTINGS: tuple[Setting, ...] = (
         "double_clean", "VNOTE_DOUBLE_CLEAN", "0",
         "After cleaning a note, run a second, varied cleanup and keep both: the baseline at temperature 0 "
         "plus a varied pass at variant_temperature, written as <folder>_note.md and "
-        "<folder>_note_variant_tN.md next to the note. 0 = off, 1 = on.",
+        "<folder>_note_variant_t{tag}.md next to the note. 0 = off, 1 = on.",
     ),
     Setting(
         "variant_temperature", "VNOTE_VARIANT_TEMPERATURE", "0.3",
         "Sampling temperature for the second (varied) cleanup when double_clean is on; the variant file "
-        "name encodes it (t3 = 0.3, t4 = 0.4, ...).",
+        "name spells it dot-free, integer part included (0.3 -> t0p3, 1.3 -> t1p3).",
     ),
     # --- bound at startup: shown read-only; set the env var and restart the daemon ---
     Setting(

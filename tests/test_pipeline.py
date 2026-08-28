@@ -562,7 +562,7 @@ def test_double_clean_writes_named_baseline_and_variant(tmp_path, monkeypatch):
 
     folder = res.session_dir.name
     baseline = res.session_dir / f"{folder}_note.md"
-    variant = res.session_dir / f"{folder}_note_variant_t3.md"
+    variant = res.session_dir / f"{folder}_note_variant_t0p3.md"
     assert baseline.read_text() == "# Baseline Title\n\ndeterministic body\n"
     assert variant.read_text() == "# Variant Title\n\nvaried body at 0.3\n"
     # The app's canonical note.md is the baseline copy (web UI / versions keep reading it).
@@ -589,8 +589,32 @@ def test_double_clean_variant_filename_reflects_temperature(tmp_path, monkeypatc
         src, transcribe_fn=_transcriber("x"), clean_fn=_cleaner(),
         mode="edit", backend="ollama", source="file", source_path=str(src), rec_duration=1.0,
     )
-    assert (res.session_dir / f"{res.session_dir.name}_note_variant_t4.md").exists()
-    assert not (res.session_dir / f"{res.session_dir.name}_note_variant_t3.md").exists()
+    assert (res.session_dir / f"{res.session_dir.name}_note_variant_t0p4.md").exists()
+    assert not (res.session_dir / f"{res.session_dir.name}_note_variant_t0p3.md").exists()
+
+
+def test_double_clean_variant_tag_cannot_collide_above_temp_1(tmp_path, monkeypatch):
+    from vnote import cleanup as _inproc_mod
+
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    monkeypatch.setattr(output, "NOTES_DIR", notes)
+    monkeypatch.setattr(config, "double_clean", lambda: True)
+    calls: list = []
+    monkeypatch.setattr(_inproc_mod, "clean", _double_clean_runner(calls))
+
+    # 1.3 must NOT claim the same variant file as 0.3 did (the old decimal-only tag
+    # dropped the integer part and turned both into t3).
+    monkeypatch.setattr(config, "variant_temperature", lambda: 1.3)
+    src = _audio(tmp_path)
+    res = make_note(
+        src, transcribe_fn=_transcriber("x"), clean_fn=_cleaner(),
+        mode="edit", backend="ollama", source="file", source_path=str(src),
+        rec_duration=1.0,
+    )
+    assert (res.session_dir / f"{res.session_dir.name}_note_variant_t1p3.md").exists()
+    assert not (res.session_dir / f"{res.session_dir.name}_note_variant_t0p3.md").exists()
+    assert json.loads((res.session_dir / "meta.json").read_text())["cleanup_variant_temperature"] == 1.3
 
 
 def test_double_clean_variant_failure_keeps_the_baseline_note(tmp_path, monkeypatch):

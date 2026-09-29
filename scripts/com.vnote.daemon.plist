@@ -14,7 +14,7 @@
   Restart:  launchctl kickstart -k gui/$(id -u)/com.vnote.daemon   (e.g. after reinstalling vnote)
   Stop:     launchctl bootout gui/$(id -u)/com.vnote.daemon
 
-  IMPORTANT — edit the absolute paths for THIS machine before installing:
+  IMPORTANT: edit the absolute paths for THIS machine before installing:
     * ProgramArguments[0] must be the absolute path to your `vnote` binary.
     * launchd runs with a minimal PATH, so PATH below must include:
         - the cleanup backend CLIs (e.g. opencode, claude) that vnote shells out to,

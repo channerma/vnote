@@ -117,12 +117,13 @@ def test_parse_rejects_an_empty_body():
 # --- the shipped built-ins ----------------------------------------------------
 
 
-def test_the_six_built_ins_ship_and_parse():
+def test_the_seven_built_ins_ship_and_parse():
     reg = styles.load()
-    assert set(reg.names()) >= {"light", "edit", "summary", "dictation", "prompt", "email"}
+    assert set(reg.names()) >= {"light", "edit", "summary", "dictation", "prompt", "email", "meeting"}
     assert reg.problems == []
     assert reg.get("dictation").output == "plain"
     assert reg.get("edit").output == "note"
+    assert reg.get("meeting").output == "note"
     assert reg.get("prompt").backend == "claude-code"
     assert reg.get("light").source == "builtin"
 

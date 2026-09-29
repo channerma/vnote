@@ -320,13 +320,14 @@ Turn the spoken brief into a session prompt in the speaker's voice …
 
 Edits apply to the next note — no daemon restart.
 
-**The shipped six:**
+**The shipped seven:**
 
 | style | output | what it does |
 |---|---|---|
 | `light` | note | fixes fillers and grammar, keeps your wording and order |
 | `edit` | note | reorganizes into headings, lists, and tidy paragraphs (the built-in default) |
 | `summary` | note | condenses to the key points |
+| `meeting` | note | meeting minutes — topic sections with headings, bullets, Decisions / Action items; also written automatically as `minutes.md` next to every note (`meeting_notes`, on by default) |
 | `dictation` | plain | plain text, no title or structure — for pasting into something else; put a small fast model in its `model:` line if you use it a lot |
 | `prompt` | plain | turns a spoken brief into the opening prompt for a coding-agent session; runs on `claude-code` unless you pick another backend |
 | `email` | plain | an email draft — subject, greeting, body, sign-off |
@@ -430,6 +431,7 @@ default. A `.env` in the current directory is auto-loaded (see `.env.example`).
 | `opencode_model` | `VNOTE_OPENCODE_MODEL` | — | model for the `opencode` backend as `provider/model` (blank = opencode's own default; `opencode models` lists the ids) |
 | `double_clean` | `VNOTE_DOUBLE_CLEAN` | `0` | after cleaning, save a second varied cleanup alongside the baseline: `0` = off, `1` = on. Written next to the note as `<folder>_note.md` (temperature-0 baseline) and `<folder>_note_variant_tN.md` (varied pass) |
 | `variant_temperature` | `VNOTE_VARIANT_TEMPERATURE` | `0.3` | sampling temperature for the second (`double_clean`) pass; the variant file name encodes it (`t3` = 0.3, `t4` = 0.4, …) |
+| `meeting_notes` | `VNOTE_MEETING_NOTES` | `1` | also clean the transcript into the built-in `meeting` style and save it as `minutes.md` next to the note — one extra cleanup pass per recording; `0` turns it off |
 | `whisper_model` | `VNOTE_WHISPER_MODEL` | `small` (CPU) / `large-v3-turbo` (CUDA) | faster-whisper model loaded at daemon start (~1.6 GB on first use) — **restart to apply** |
 | `notes_dir` | `VNOTE_DIR` | `./voice-notes` | where note folders are written — **restart to apply** |
 | `daemon_host` | `VNOTE_DAEMON_HOST` | `127.0.0.1` | address the daemon binds (keep it on localhost — no auth) — **restart to apply** |

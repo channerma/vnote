@@ -17,6 +17,11 @@ from . import config, output, styles, takes, versions
 
 HOWS = ("continue", "append", "merge")  # what a new take does to the note it lands in
 
+# The companion document every cleaned note also gets (setting: meeting_notes):
+# the same transcript, minutes-formatted, written as minutes.md next to note.md.
+MEETING_STYLE = "meeting"
+MINUTES_FILE = "minutes.md"
+
 
 class EmptyTranscriptError(ValueError):
     """Raised when transcription produced no text (no speech detected?)."""
@@ -111,6 +116,23 @@ def _fallback_title(transcript: str) -> str:
     return " ".join(words[:6]) if words else "voice note"
 
 
+def _clean_minutes(transcript: str, *, explicit_backend: str | None, clean_fn):
+    """The meeting pass: (result, backend, error). Never raises — the note stands alone.
+
+    ``explicit_backend`` is the caller's explicit ``--backend`` pick (None if the
+    style/settings decide), so a run forced to one backend cleans both documents
+    with it; the meeting style's own backend line wins over the plain setting.
+    """
+    if not config.meeting_notes():
+        return None, None, None
+    backend = resolved_backend(MEETING_STYLE, explicit_backend)
+    try:
+        result = clean_fn(transcript, mode=MEETING_STYLE, backend=backend, model=None)
+    except Exception as exc:  # noqa: BLE001 - same non-fatal contract as the variant pass
+        return None, backend, str(exc)
+    return result, backend, None
+
+
 def make_note(
     audio_path: Path,
     *,
@@ -145,6 +167,7 @@ def make_note(
     """
     started = started or datetime.now()
     on_stage = on_stage or _no_stage
+    explicit_backend = backend  # the caller's --backend pick, before the style chain resolves it
 
     t0 = time.monotonic()
     try:
@@ -205,6 +228,25 @@ def make_note(
                 else:
                     variant = {"title": vres.title, "body": vres.body, "temperature": _variant_temp}
 
+    # The companion document: the same transcript, minutes-formatted. Its own cleanup
+    # pass, its own failure — a broken backend or a missing 'meeting' style never
+    # touches the note. Skipped for raw runs (no LLM at all) and when the style
+    # picked IS meeting (the note already is the minutes).
+    minutes: dict | None = None
+    minutes_error: str | None = None
+    minutes_s: float | None = None
+    if not raw and mode != MEETING_STYLE and config.meeting_notes():
+        on_stage("minutes_cleaning")
+        t0 = time.monotonic()
+        mres, _mb, merr = _clean_minutes(transcript, explicit_backend=explicit_backend, clean_fn=clean_fn)
+        if mres is None:
+            minutes_error = merr or "meeting cleanup produced nothing"
+            on_stage("minutes_failed", error=minutes_error)
+        else:
+            minutes_s = round(time.monotonic() - t0, 1)
+            minutes = {"title": mres.title, "body": mres.body}
+            on_stage("minutes_cleaned", seconds=minutes_s)
+
     session_dir = output.make_session_dir(title, when=started)
     meta = {
         "created": started.isoformat(timespec="seconds"),
@@ -218,6 +260,8 @@ def make_note(
         "cleanup_seconds": cleanup_s,
         "title": title,
         **({"cleanup_variant_temperature": variant["temperature"]} if variant else {}),
+        **({"minutes_style": MEETING_STYLE, "minutes_seconds": minutes_s} if minutes else {}),
+        **({"minutes_error": minutes_error} if minutes_error else {}),
         **tmeta,
     }
     if note_body is not None:
@@ -235,6 +279,12 @@ def make_note(
     )
 
     note_text = transcript if note_body is None else note_markdown(title, note_body, mode)
+    if minutes is not None:
+        minutes_path = session_dir / MINUTES_FILE
+        minutes_path.write_text(
+            note_markdown(minutes["title"], minutes["body"], MEETING_STYLE), encoding="utf-8"
+        )
+        written["minutes"] = minutes_path
     if note_body is not None:  # raw notes (and failed cleanups) have no note.md, so no history
         _, meta = versions.commit(
             session_dir, note_text, op="clean", title=title,
@@ -281,6 +331,8 @@ class RecleanResult:
     note_text: str
     transcript: str
     version: int | None = None  # the version this write created, when it went to a session folder
+    minutes: Path | None = None  # minutes.md when this regenerate also refreshed it
+    minutes_error: str | None = None  # why it didn't, when it tried and failed
 
 
 def resolve_redo(path: Path) -> tuple[str, Path | None]:
@@ -335,6 +387,7 @@ def reclean(
     if not transcript:
         raise EmptyTranscriptError("transcript is empty")
 
+    explicit_backend = backend  # the caller's pick, before the style chain resolves it
     backend = resolved_backend(mode, backend)  # the style's backend unless the caller picked one
     result = clean_fn(transcript, mode=mode, backend=backend, model=model, instructions=instructions)
     note_text = note_markdown(result.title, result.body, mode)
@@ -345,8 +398,19 @@ def reclean(
             backend=backend, model=resolved_model(backend, model, mode), instructions=instructions,
             extra={"takes": list(only_takes)} if only_takes is not None else None,
         )
+    # A regenerate re-derives the companion document too (same non-fatal contract).
+    minutes: Path | None = None
+    minutes_error: str | None = None
+    if session_dir is not None and mode != MEETING_STYLE and config.meeting_notes():
+        mres, _mb, merr = _clean_minutes(transcript, explicit_backend=explicit_backend, clean_fn=clean_fn)
+        if mres is None:
+            minutes_error = merr or "meeting cleanup produced nothing"
+        else:
+            minutes = session_dir / MINUTES_FILE
+            minutes.write_text(note_markdown(mres.title, mres.body, MEETING_STYLE), encoding="utf-8")
     return RecleanResult(session_dir=session_dir, title=result.title, note_text=note_text,
-                         transcript=transcript, version=version)
+                         transcript=transcript, version=version, minutes=minutes,
+                         minutes_error=minutes_error)
 
 
 # --- edit / revise / restore an existing note --------------------------------

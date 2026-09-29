@@ -643,3 +643,105 @@ def test_double_clean_variant_failure_keeps_the_baseline_note(tmp_path, monkeypa
     # No variant file, but the named baseline is still written.
     assert (res.session_dir / f"{res.session_dir.name}_note.md").exists()
     assert not any("_note_variant_" in p.name for p in res.session_dir.iterdir())
+
+
+# --- the meeting-minutes companion document (meeting_notes) ------------------
+
+
+def _minutes_cleaner(calls: list, *, fail=False):
+    from vnote.cleanup import CleanResult
+
+    def clean_fn(transcript, mode="edit", backend="ollama", model=None, instructions=None):
+        calls.append({"mode": mode, "backend": backend})
+        if mode != "meeting":
+            return CleanResult(title="Main Note", body="main body")
+        if fail:
+            raise RuntimeError("minutes blew up")
+        return CleanResult(title="Standup Minutes", body="## Launch\n\n- decision: ship")
+
+    return clean_fn
+
+
+def _minutes_note(tmp_path, monkeypatch, clean_fn, *, on=True, **kw):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    monkeypatch.setattr(output, "NOTES_DIR", notes)
+    monkeypatch.setenv("VNOTE_MEETING_NOTES", "1" if on else "0")
+    src = _audio(tmp_path)
+    return make_note(
+        src, transcribe_fn=_transcriber("we decided to ship ana will fix lint"),
+        clean_fn=clean_fn, mode=kw.pop("mode", "edit"), backend="ollama",
+        source="file", source_path=str(src), rec_duration=1.0, **kw,
+    )
+
+
+def test_minutes_written_alongside_the_note(tmp_path, monkeypatch):
+    calls = []
+    res = _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls))
+    assert (res.session_dir / "note.md").read_text() == "# Main Note\n\nmain body\n"
+    assert (res.session_dir / "minutes.md").read_text() == \
+        "# Standup Minutes\n\n## Launch\n\n- decision: ship\n"
+    assert res.written["minutes"] == res.session_dir / "minutes.md"
+    meta = json.loads((res.session_dir / "meta.json").read_text())
+    assert meta["minutes_style"] == "meeting"
+    assert isinstance(meta["minutes_seconds"], float)
+    assert [c["mode"] for c in calls] == ["edit", "meeting"]
+
+
+def test_minutes_off_leaves_no_trace(tmp_path, monkeypatch):
+    calls = []
+    res = _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls), on=False)
+    assert not (res.session_dir / "minutes.md").exists()
+    assert [c["mode"] for c in calls] == ["edit"]
+    assert "minutes_style" not in json.loads((res.session_dir / "meta.json").read_text())
+
+
+def test_minutes_honours_the_explicit_backend(tmp_path, monkeypatch):
+    calls = []
+    _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls))
+    assert calls[1] == {"mode": "meeting", "backend": "ollama"}
+
+
+def test_minutes_failure_keeps_the_note(tmp_path, monkeypatch):
+    calls = []
+    res = _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls, fail=True))
+    assert res.cleanup_error is None
+    assert (res.session_dir / "note.md").exists()
+    assert not (res.session_dir / "minutes.md").exists()
+    meta = json.loads((res.session_dir / "meta.json").read_text())
+    assert "minutes blew up" in meta["minutes_error"]
+    assert "minutes_style" not in meta
+
+
+def test_minutes_skipped_for_raw(tmp_path, monkeypatch):
+    calls = []
+    res = _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls), raw=True)
+    assert calls == []
+    assert not (res.session_dir / "minutes.md").exists()
+
+
+def test_minutes_skipped_when_the_note_itself_is_the_meeting_style(tmp_path, monkeypatch):
+    calls = []
+    res = _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls), mode="meeting")
+    assert [c["mode"] for c in calls] == ["meeting"]  # one pass, not two
+    assert not (res.session_dir / "minutes.md").exists()
+
+
+def test_reclean_refreshes_minutes(tmp_path, monkeypatch):
+    calls = []
+    res = _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls))
+    (res.session_dir / "minutes.md").write_text("# Old\n\nstale\n", encoding="utf-8")
+    r = reclean(res.session_dir, clean_fn=_minutes_cleaner(calls), mode="edit", backend="ollama")
+    assert r.minutes == res.session_dir / "minutes.md"
+    assert r.minutes_error is None
+    assert r.minutes.read_text().startswith("# Standup Minutes")
+
+
+def test_reclean_minutes_failure_keeps_the_note_version(tmp_path, monkeypatch):
+    calls = []
+    res = _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls))
+    r = reclean(res.session_dir, clean_fn=_minutes_cleaner(calls, fail=True),
+                mode="edit", backend="ollama")
+    assert r.version is not None  # the note regenerate committed
+    assert r.minutes is None
+    assert "minutes blew up" in r.minutes_error

@@ -128,6 +128,10 @@ def _report_stage(event: str, **info: object) -> None:
     elif event == "cleanup_failed":
         _say(f"\nCleanup unavailable: {info['error']}\n")
         _say("Keeping the raw transcript instead.")
+    elif event == "minutes_cleaned":
+        _say(f"Minutes: minutes.md in {info['seconds']}s.")
+    elif event == "minutes_failed":
+        _say(f"(Meeting minutes skipped: {info['error']})")
 
 
 def _pipeline(no_daemon: bool):
@@ -172,6 +176,10 @@ def _do_redo(args: argparse.Namespace, backend: str) -> int:
 
     if result.session_dir is not None:
         _say(f"📁 updated {result.session_dir / 'note.md'}")
+    if result.minutes is not None:
+        _say(f"📁 updated {result.minutes}")
+    elif result.minutes_error:
+        _say(f"(meeting minutes skipped: {result.minutes_error})")
 
     if not args.no_clipboard:
         from .output import copy_to_clipboard
@@ -292,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
     # 6. Report (to stderr; the note itself goes to stdout only with --stdout).
     _say("")
     _say(f"📁 {session_dir}")
-    for name in ("audio", "transcript", "note", "meta"):
+    for name in ("audio", "transcript", "note", "minutes", "meta"):
         if name in written:
             _say(f"   {name:10s} {written[name].name}")
     if clipped:

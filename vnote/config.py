@@ -245,6 +245,11 @@ SETTINGS: tuple[Setting, ...] = (
         "Sampling temperature for the second (varied) cleanup when double_clean is on; the variant file "
         "name spells it dot-free, integer part included (0.3 -> t0p3, 1.3 -> t1p3).",
     ),
+    Setting(
+        "meeting_notes", "VNOTE_MEETING_NOTES", "1",
+        "Also write the transcript as meeting minutes (the 'meeting' style) into minutes.md next to the "
+        "note — one extra cleanup pass per recording. 0 = off, 1 = on.",
+    ),
     # --- bound at startup: shown read-only; set the env var and restart the daemon ---
     Setting(
         "whisper_model", "VNOTE_WHISPER_MODEL", "small",
@@ -323,7 +328,8 @@ def _coerce(s: Setting, raw: object) -> object:
             raise ValueError(f"{s.key} must be one of {', '.join(choices)}; got {value!r}")
     if s.key == "ollama_host" and not value.startswith(("http://", "https://")):
         raise ValueError(f"ollama_host must start with http:// or https://; got {value!r}")
-    if s.key == "double_clean" and str(value).strip().lower() not in ("0", "1", "false", "true", "off", "on"):
+    if s.key in ("double_clean", "meeting_notes") and \
+            str(value).strip().lower() not in ("0", "1", "false", "true", "off", "on"):
         raise ValueError(f"{s.key} must be 0 or 1; got {value!r}")
     if s.key == "variant_temperature":
         try:
@@ -464,6 +470,11 @@ def opencode_model() -> str | None:
 def double_clean() -> bool:
     """Whether to save a second, varied cleanup alongside the baseline note."""
     return str(get("double_clean")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def meeting_notes() -> bool:
+    """Whether every cleaned note also gets a meeting-minutes minutes.md."""
+    return str(get("meeting_notes")).strip().lower() in ("1", "true", "yes", "on")
 
 
 def variant_temperature() -> float:

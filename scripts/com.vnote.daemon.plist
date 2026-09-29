@@ -13,6 +13,10 @@
   Logs:     ~/.local/state/vnote-daemon.log
   Restart:  launchctl kickstart -k gui/$(id -u)/com.vnote.daemon   (e.g. after reinstalling vnote)
   Stop:     launchctl bootout gui/$(id -u)/com.vnote.daemon
+  Reload:   after editing this plist (e.g. EnvironmentVariables), kickstart is NOT enough -
+            it does not re-read the file. bootout, then bootstrap; bootout returns before
+            teardown finishes, so an immediate bootstrap can fail with "5: Input/output
+            error" - retry it after a couple of seconds.
 
   IMPORTANT: edit the absolute paths for THIS machine before installing:
     * ProgramArguments[0] must be the absolute path to your `vnote` binary.
@@ -43,7 +47,7 @@
         <key>VNOTE_DIR</key>
         <string>/Users/71z/voice-notes</string>
         <key>VNOTE_BACKEND</key>
-        <string>opencode</string>
+        <string>claude-code</string>
     </dict>
     <key>WorkingDirectory</key>
     <string>/Users/71z</string>

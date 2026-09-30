@@ -9,6 +9,11 @@ authors = [{ name = "Scott Greenwood" }]
 keywords = ["whisper", "transcription", "dictation", "voice-notes", "ollama", "claude", "web-ui", "cli"]
 dependencies = [
     "faster-whisper>=1.1.0",
+    # PyAV 19 dropped av.open(metadata_errors=...), which faster-whisper 1.2.1's
+    # decode_audio still passes -> every transcription fails with a TypeError.
+    # `uv tool install` ignores uv.lock, so this cap is what actually protects
+    # installs. Lift it once faster-whisper stops passing that kwarg.
+    "av<19",
     "sounddevice>=0.4.6",
     "soundfile>=0.12.1",
     "numpy>=1.24",

@@ -47,3 +47,17 @@ def test_cuda_is_still_attempted_off_macos(monkeypatch):
     """A Linux box with a broken CUDA stack should still be told about it."""
     monkeypatch.setattr(transcribe.sys, "platform", "linux")
     assert transcribe._cuda_plausible() is True
+
+
+def test_faster_whisper_can_decode_audio_with_installed_av(tmp_path):
+    """Guards the `av<19` cap in pyproject.toml: PyAV 19 removed av.open(metadata_errors=...),
+    which faster-whisper's decode_audio still passes, so every transcription died with a
+    TypeError before the model ever ran. Decoding a tiny WAV exercises that exact call."""
+    import numpy as np
+    import soundfile as sf
+    from faster_whisper.audio import decode_audio
+
+    wav = tmp_path / "tone.wav"
+    sf.write(wav, np.zeros(1600, dtype="float32"), 16000)
+    audio = decode_audio(str(wav), sampling_rate=16000)
+    assert len(audio) == 1600

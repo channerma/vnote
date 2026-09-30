@@ -237,7 +237,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         "double_clean", "VNOTE_DOUBLE_CLEAN", "0",
         "After cleaning a note, run a second, varied cleanup and keep both: the baseline at temperature 0 "
-        "plus a varied pass at variant_temperature, written as <folder>_note.md and "
+        "plus a varied pass at variant_temperature, written as <folder>_note_baseline.md and "
         "<folder>_note_variant_t{tag}.md next to the note. 0 = off, 1 = on.",
     ),
     Setting(
@@ -247,7 +247,7 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting(
         "meeting_notes", "VNOTE_MEETING_NOTES", "1",
-        "Also write the transcript as meeting minutes (the 'meeting' style) into minutes.md next to the "
+        "Also write the transcript as meeting minutes (the 'meeting' style) into <folder>_minutes.md next to the "
         "note — one extra cleanup pass per recording. 0 = off, 1 = on.",
     ),
     # --- bound at startup: shown read-only; set the env var and restart the daemon ---
@@ -473,7 +473,7 @@ def double_clean() -> bool:
 
 
 def meeting_notes() -> bool:
-    """Whether every cleaned note also gets a meeting-minutes minutes.md."""
+    """Whether every cleaned note also gets a meeting-minutes <folder>_minutes.md."""
     return str(get("meeting_notes")).strip().lower() in ("1", "true", "yes", "on")
 
 

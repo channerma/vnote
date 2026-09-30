@@ -23,6 +23,7 @@ Two rules run through everything here (VNOTE-002/003):
 
 from __future__ import annotations
 
+import glob
 import os
 import re
 import shutil
@@ -30,7 +31,7 @@ import tempfile
 import wave
 from pathlib import Path
 
-from . import output, versions
+from . import names, output, versions
 
 _TAKE_RE = re.compile(r"\d+")
 _JOIN = "\n\n"  # takes are joined by a blank line, as the wire contract fixes it
@@ -66,11 +67,16 @@ def numbers(session_dir: Path) -> list[int]:
 
 
 def audio_file(directory: Path) -> Path | None:
-    """The first ``audio.*`` in a folder (a note root or a take), or None."""
-    for p in sorted(Path(directory).glob("audio.*")):
-        if p.is_file() and p.suffix.lower() in _AUDIO_SUFFIXES:
-            return p
-    return None
+    """The audio in a folder (a note root or a take), or None. Bare ``audio.*`` first (takes and
+    legacy roots), then ``<folder>_audio.*`` (roots since 2026-09-29), then a lone ``*_audio.*``
+    (a root renamed after creation) — same order and reasons as :mod:`names`."""
+    directory = Path(directory)
+    for pattern in ("audio.*", f"{glob.escape(names.audio_stem(directory))}.*"):
+        for p in sorted(directory.glob(pattern)):
+            if p.is_file() and p.suffix.lower() in _AUDIO_SUFFIXES:
+                return p
+    strays = [p for p in directory.glob("*_audio.*") if p.is_file() and p.suffix.lower() in _AUDIO_SUFFIXES]
+    return strays[0] if len(strays) == 1 else None
 
 
 def take_audio(session_dir: Path, n: int) -> Path | None:
@@ -155,8 +161,8 @@ def ensure_takes(session_dir: Path) -> None:
         first = take_dir(session_dir, 1)
         first.mkdir(parents=True, exist_ok=True)
         audio = audio_file(session_dir)
-        if audio is not None and not (first / audio.name).exists():
-            os.replace(audio, first / audio.name)
+        if audio is not None and not (first / f"audio{audio.suffix}").exists():
+            os.replace(audio, first / f"audio{audio.suffix}")  # takes keep the bare name
         original = session_dir / "transcript.original.txt"
         if original.is_file() and not (first / "transcript.original.txt").exists():
             os.replace(original, first / "transcript.original.txt")

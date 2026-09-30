@@ -1,4 +1,4 @@
-"""Linear version history for a note's ``note.md``.
+"""Linear version history for a note's note file (``<folder>_note.md``; bare ``note.md`` in legacy folders).
 
 Every version of the processed note — including the current one — lives in
 ``versions/note-<n>.md`` (n from 1); ``note.md`` is always a copy of the newest
@@ -24,6 +24,8 @@ import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
+
+from . import names
 
 OPS = ("clean", "regenerate", "revise", "edit", "restore", "continue", "merge")
 
@@ -182,7 +184,7 @@ def ensure_history(session_dir: Path) -> None:
     session_dir = Path(session_dir)
     with _commit_lock:
         meta = read_meta_strict(session_dir)
-        if isinstance(meta.get("versions"), list) or not (session_dir / "note.md").is_file():
+        if isinstance(meta.get("versions"), list) or not names.note_path(session_dir).is_file():
             return
         if _existing_version_files(session_dir):
             return  # version files without a log: keep the files, let commit number past them
@@ -190,7 +192,7 @@ def ensure_history(session_dir: Path) -> None:
 
 
 def _migrate(session_dir: Path, meta: dict) -> None:
-    text = normalized((session_dir / "note.md").read_text(encoding="utf-8"))
+    text = normalized(names.note_path(session_dir).read_text(encoding="utf-8"))
     path = _version_path(session_dir, 1)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -252,7 +254,7 @@ def commit(
         path = _version_path(session_dir, n)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-        (session_dir / "note.md").write_text(text, encoding="utf-8")
+        names.note_path(session_dir).write_text(text, encoding="utf-8")
 
         log.append({
             "n": n,

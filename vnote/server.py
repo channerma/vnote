@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import __version__, config, output, stream, styles, takes, versions
+from . import __version__, config, names, output, stream, styles, takes, versions
 from .audio import BYTES_PER_S, wav_bytes
 
 _infer_lock = threading.Lock()
@@ -297,7 +297,7 @@ def _summary(session: Path) -> dict:
         "mode": meta.get("cleanup_mode") or meta.get("mode"),
         "backend": meta.get("cleanup_backend"),
         "has_audio": _audio_file(session) is not None,
-        "has_note": (session / "note.md").is_file(),
+        "has_note": names.note_path(session).is_file(),
     }
 
 
@@ -323,7 +323,7 @@ def _note_detail(session: Path) -> dict:
         # the style this note was made with was deleted or renamed: the page says so
         # in the Regenerate select and falls back to the default style
         "style_missing": bool(mode) and styles.get(mode) is None,
-        "note": _read_text(session / "note.md"),
+        "note": _read_text(names.note_path(session)),
         "transcript": _read_text(session / "transcript.txt") or "",
         # the kept copy of Whisper's output is the whole record of an edit: no meta flag
         "transcript_edited": (session / "transcript.original.txt").is_file(),

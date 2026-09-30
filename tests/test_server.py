@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from vnote import cleanup, config, daemon, output, server, transcribe
+from vnote import cleanup, config, daemon, names, output, server, takes, transcribe
 from vnote.audio import BYTES_PER_S as server_BYTES_PER_S
 from vnote.cleanup import CleanResult
 
@@ -276,8 +276,8 @@ def test_stream_finish_writes_the_note_from_the_daemon_held_audio(notes_dir):
     assert data["meta"]["versions"]  # the note folder starts its version history like any other
 
     folder = notes_dir / data["name"]
-    assert _wav_frames((folder / "audio.wav").read_bytes()) == 8_000  # no second upload on stop
-    assert (folder / "note.md").exists() and (folder / "transcript.txt").exists()
+    assert _wav_frames(takes.audio_file(folder).read_bytes()) == 8_000  # no second upload on stop
+    assert names.note_path(folder).exists() and (folder / "transcript.txt").exists()
     assert not _seen["path"].exists()  # the temp WAV is gone; the folder holds its own copy
     assert sess.sid not in server._registry.sessions
 
@@ -453,7 +453,7 @@ def _make_session(root: Path, name: str, *, meta=None, note="# T\n\nbody\n", tra
     if meta is not None:
         (d / "meta.json").write_text(meta if isinstance(meta, str) else _json.dumps(meta), encoding="utf-8")
     if note is not None:
-        (d / "note.md").write_text(note, encoding="utf-8")
+        names.note_path(d).write_text(note, encoding="utf-8")
     if transcript is not None:
         (d / "transcript.txt").write_text(transcript + "\n", encoding="utf-8")
     if audio is not None:
@@ -545,8 +545,8 @@ def test_api_note_end_to_end(notes_dir):
     assert data["transcript"] == "fake transcript" and data["cleanup_error"] is None
     assert data["meta"]["source"] == "web" and data["meta"]["cleanup_mode"] == "summary"
     folder = notes_dir / data["name"]
-    assert (folder / "audio.webm").read_bytes() == b"WEBMDATA"
-    assert (folder / "note.md").read_text(encoding="utf-8") == "# Fake Title\n\nFake body.\n"
+    assert (folder / f"{folder.name}_audio.webm").read_bytes() == b"WEBMDATA"
+    assert names.note_path(folder).read_text(encoding="utf-8") == "# Fake Title\n\nFake body.\n"
     assert (folder / "transcript.txt").exists() and (folder / "meta.json").exists()
     assert _seen["clean"][1:3] == ("summary", "ollama") and _seen["language"] == "en"
     assert not _seen["path"].exists()  # the temp upload is gone; the folder holds its own copy
@@ -558,7 +558,7 @@ def test_api_note_raw_skips_cleanup(notes_dir):
     assert status == 200, body
     data = _json.loads(body)
     assert data["note"] == "fake transcript" and "clean" not in _seen
-    assert not (notes_dir / data["name"] / "note.md").exists()
+    assert not names.note_path(notes_dir / data["name"]).exists()
 
 
 def test_api_note_rejects_bad_requests(notes_dir):
@@ -578,7 +578,7 @@ def test_reclean_rewrites_the_note(notes_dir):
     status, data = _send_json("POST", "/api/notes/2026-08-06-1300-reclean/reclean", {"mode": "light"})
     assert status == 200, data
     assert data["title"] == "Fake Title" and data["note"] == "# Fake Title\n\nFake body.\n"
-    assert (d / "note.md").read_text(encoding="utf-8") == "# Fake Title\n\nFake body.\n"
+    assert names.note_path(d).read_text(encoding="utf-8") == "# Fake Title\n\nFake body.\n"
     meta = _json.loads((d / "meta.json").read_text(encoding="utf-8"))
     assert meta["recleaned"] is True and meta["cleanup_mode"] == "light"
     assert _seen["clean"][0] == "raw words"
@@ -810,7 +810,7 @@ def test_api_note_cleanup_http_failure_keeps_the_transcript(notes_dir, monkeypat
     data = _json.loads(body)
     assert data["note"] == "fake transcript" and "cudaMalloc" in data["cleanup_error"]
     assert (notes_dir / data["name"] / "transcript.txt").exists()
-    assert not (notes_dir / data["name"] / "note.md").exists()
+    assert not names.note_path(notes_dir / data["name"]).exists()
 
 
 def test_raw_recording_ignores_a_bad_default_style(notes_dir, monkeypatch):
@@ -877,7 +877,7 @@ def test_put_note_saves_an_edit_as_a_new_version(notes_dir):
                               {"text": "# Typed\n\nI wrote this by hand."})
     assert status == 200, data
     assert data == {"version": 2, "title": "Typed", "note": "# Typed\n\nI wrote this by hand.\n"}
-    assert (d / "note.md").read_text(encoding="utf-8") == "# Typed\n\nI wrote this by hand.\n"
+    assert names.note_path(d).read_text(encoding="utf-8") == "# Typed\n\nI wrote this by hand.\n"
     assert (d / "versions" / "note-2.md").read_text(encoding="utf-8") == "# Typed\n\nI wrote this by hand.\n"
     assert (d / "versions" / "note-1.md").read_text(encoding="utf-8") == "# T\n\nbody\n"
 
@@ -899,7 +899,7 @@ def test_transcript_edit_feeds_the_next_regenerate(notes_dir):
     status, data = _get_json(f"/api/notes/{name}")
     assert status == 200
     assert data["note"] is None and data["meta"]["cleanup_mode"] is None  # nothing failed: no LLM ran
-    assert data["transcript_edited"] is False and not (folder / "note.md").exists()
+    assert data["transcript_edited"] is False and not names.note_path(folder).exists()
 
     status, data = _send_json("PUT", f"/api/notes/{name}/transcript", {"text": "the words I meant"})
     assert status == 200, data
@@ -918,7 +918,7 @@ def test_transcript_edit_feeds_the_next_regenerate(notes_dir):
     status, data = _send_json("POST", f"/api/notes/{name}/reclean", {"mode": "light"})
     assert status == 200, data
     assert _seen["clean"][0] == "second thoughts"  # the edit is what the model saw, not Whisper's output
-    assert (folder / "note.md").read_text(encoding="utf-8") == "# Fake Title\n\nFake body.\n"
+    assert names.note_path(folder).read_text(encoding="utf-8") == "# Fake Title\n\nFake body.\n"
     entries = _json.loads((folder / "meta.json").read_text(encoding="utf-8"))["versions"]
     assert [e["op"] for e in entries] == ["regenerate"] and data["version"] == 1
 
@@ -968,7 +968,7 @@ def test_revise_rewrites_the_current_note(notes_dir):
     assert data == {"title": "Revised", "note": "# Revised\n\nShorter body.\n", "version": 2}
     # the reviser sees the note, not the transcript
     assert _seen["revise"] == ("# Hand Edited\n\nthe note as it stands\n", "shorter", "ollama", "m")
-    assert (d / "note.md").read_text(encoding="utf-8") == "# Revised\n\nShorter body.\n"
+    assert names.note_path(d).read_text(encoding="utf-8") == "# Revised\n\nShorter body.\n"
     entries = _json.loads((d / "meta.json").read_text(encoding="utf-8"))["versions"]
     assert entries[1]["op"] == "revise" and entries[1]["instructions"] == "shorter"
 
@@ -1008,7 +1008,7 @@ def test_get_and_restore_a_version(notes_dir):
     status, data = _send_json("POST", "/api/notes/2026-08-10-0905-versions/restore", {"n": 1})
     assert status == 200, data
     assert data == {"title": "T", "note": "# T\n\nbody\n", "version": 3}
-    assert (d / "note.md").read_text(encoding="utf-8") == "# T\n\nbody\n"
+    assert names.note_path(d).read_text(encoding="utf-8") == "# T\n\nbody\n"
     entries = _json.loads((d / "meta.json").read_text(encoding="utf-8"))["versions"]
     assert entries[2]["op"] == "restore" and entries[2]["restored_from"] == 1
 
@@ -1141,7 +1141,7 @@ def test_cross_site_revise_is_refused(notes_dir):
     status, _, _ = _request("PUT", "/api/notes/2026-08-10-0909-xsite/note", b'{"text": "# X\\n\\ny"}',
                             {"Content-Type": "application/json", "Origin": "https://evil.example"})
     assert status == 403
-    assert (notes_dir / "2026-08-10-0909-xsite" / "note.md").read_text(encoding="utf-8") == "# T\n\nbody\n"
+    assert names.note_path(notes_dir / "2026-08-10-0909-xsite").read_text(encoding="utf-8") == "# T\n\nbody\n"
 
 
 def test_opening_a_pre_versions_note_migrates_it(notes_dir):
@@ -1229,7 +1229,7 @@ def test_continue_through_the_live_stream_adds_take_2_and_a_version(notes_dir):
     assert (d / "takes" / "1" / "audio.wav").is_file() and (d / "takes" / "2" / "audio.wav").is_file()
     assert not (d / "audio.wav").exists()  # the flat note migrated on the way in
     assert (d / "transcript.txt").read_text(encoding="utf-8") == "first words\n\nfake transcript\n"
-    assert (d / "note.md").read_text(encoding="utf-8") == "# Old\n\nfirst body\n\n---\n\nContinued body.\n"
+    assert names.note_path(d).read_text(encoding="utf-8") == "# Old\n\nfirst body\n\n---\n\nContinued body.\n"
     entry = _versions_of(d)[-1]
     assert (entry["op"], entry["how"], entry["take"]) == ("continue", "continue", 2)
     # the model saw the note as context and only the new take's transcript, in the note's own style
@@ -1269,7 +1269,7 @@ def test_continuing_a_raw_note_keeps_the_take_and_writes_no_version(notes_dir):
     assert data["take"] == 2 and data["versions"] == [] and data["note"] is None
     assert "continue" not in _seen and "clean" not in _seen  # nothing was cleaned
     assert (d / "takes" / "2" / "transcript.txt").read_text(encoding="utf-8") == "fake transcript\n"
-    assert not (d / "note.md").exists()
+    assert not names.note_path(d).exists()
 
 
 def test_continue_with_raw_1_leaves_the_note_alone(notes_dir):
@@ -1278,7 +1278,7 @@ def test_continue_with_raw_1_leaves_the_note_alone(notes_dir):
     status, data = _record_and_finish(data["session_id"], "continue=2026-08-25-1604-rawflag&raw=1")
     assert status == 200, data
     assert data["take"] == 2 and "continue" not in _seen
-    assert (d / "note.md").read_text(encoding="utf-8") == "# Old\n\nfirst body\n"  # untouched
+    assert names.note_path(d).read_text(encoding="utf-8") == "# Old\n\nfirst body\n"  # untouched
     assert [e["op"] for e in _versions_of(d)] == ["clean"]  # only the migration's v1
 
 
@@ -1312,7 +1312,7 @@ def test_a_cleanup_failure_after_the_take_answers_500_with_the_take(notes_dir, m
     assert _wav_frames((take / "audio.wav").read_bytes()) == 16_000  # the recording is safe
     assert (take / "transcript.txt").read_text(encoding="utf-8") == "fake transcript\n"
     assert data["audio_kept"] == str(take / "audio.wav")  # ... and the reply says where
-    assert (d / "note.md").read_text(encoding="utf-8") == "# Old\n\nfirst body\n"  # the note is untouched
+    assert names.note_path(d).read_text(encoding="utf-8") == "# Old\n\nfirst body\n"  # the note is untouched
     assert not spill.exists()  # the take holds the audio: no second copy in failed/
     assert not (notes_dir / "failed").exists()
 
@@ -1511,7 +1511,7 @@ def test_delete_a_take_moves_it_to_trash(notes_dir):
     assert _wav_frames((trashed / "audio.wav").read_bytes()) == 16_000  # moved, not unlinked
     assert not (d / "takes" / "2").exists()
     assert (d / "transcript.txt").read_text(encoding="utf-8") == "first words\n"
-    assert (d / "note.md").exists()  # untouched by design: the Body regenerates or edits
+    assert names.note_path(d).exists()  # untouched by design: the Body regenerates or edits
     status, detail = _get_json("/api/notes/2026-08-25-1640-deltake")
     assert [t["n"] for t in detail["takes"]] == [1]
     assert detail["duration_s"] == 3.0 and detail["has_audio"] is True  # the sum, rebuilt
@@ -1529,7 +1529,7 @@ def test_delete_a_note_moves_the_folder_and_drops_it_from_the_list(notes_dir):
     assert status == 200, data
     trashed = Path(data["trashed"])
     assert trashed == notes_dir / "trash" / "2026-08-25-1641-delnote"
-    assert (trashed / "note.md").is_file() and (trashed / "audio.wav").is_file()
+    assert names.note_path(trashed).is_file() and (trashed / "audio.wav").is_file()
     assert not d.exists()
 
     status, listing = _get_json("/api/notes")
@@ -1605,7 +1605,7 @@ def test_a_stop_whose_note_vanished_saves_a_note_of_its_own(notes_dir):
     assert status == 200, payload
     assert "take" not in payload and server._SESSION_RE.fullmatch(payload["name"])
     assert payload["name"] != "2026-08-25-1651-vanished"  # a note of its own, not a 404
-    assert (notes_dir / payload["name"] / "note.md").is_file()
+    assert names.note_path(notes_dir / payload["name"]).is_file()
 
 
 def test_a_takes_subset_is_deduplicated_and_ordered(notes_dir):

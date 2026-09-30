@@ -5,7 +5,7 @@ import json
 import pytest
 
 import vnote.output as output
-from vnote import config, pipeline, versions
+from vnote import config, names, pipeline, versions
 from vnote.cleanup import CleanResult
 from vnote.pipeline import EmptyTranscriptError, make_note, reclean, resolved_model
 
@@ -52,9 +52,12 @@ def test_make_note_writes_full_session(tmp_path, monkeypatch):
     )
 
     assert res.session_dir.parent == notes
-    assert (res.session_dir / "audio.m4a").exists()
+    folder = res.session_dir.name  # since 2026-09-29 every file is prefixed with its folder
+    assert (res.session_dir / f"{folder}_audio.m4a").exists()
+    assert names.note_path(res.session_dir).name == f"{folder}_note.md"
+    assert names.minutes_path(res.session_dir).name == f"{folder}_minutes.md"
     assert (res.session_dir / "transcript.txt").read_text().strip() == "hello there this is a voice note"
-    assert (res.session_dir / "note.md").read_text() == "# A Tidy Title\n\nthe cleaned body\n"
+    assert names.note_path(res.session_dir).read_text() == "# A Tidy Title\n\nthe cleaned body\n"
     assert res.note_text == "# A Tidy Title\n\nthe cleaned body\n"
     assert res.title == "A Tidy Title"
     assert res.cleanup_error is None
@@ -89,7 +92,7 @@ def test_make_note_raw_skips_cleanup(tmp_path, monkeypatch):
         raw=True,
     )
 
-    assert not (res.session_dir / "note.md").exists()
+    assert not names.note_path(res.session_dir).exists()
     assert res.title == "one two three four five six"
     assert res.note_body is None
     assert res.note_text == transcript
@@ -116,7 +119,7 @@ def test_make_note_keeps_transcript_when_cleanup_fails(tmp_path, monkeypatch):
     assert res.note_body is None
     assert res.cleanup_error == "ollama is not running"
     assert res.title == "alpha bravo charlie delta echo foxtrot"
-    assert not (res.session_dir / "note.md").exists()
+    assert not names.note_path(res.session_dir).exists()
     assert (res.session_dir / "transcript.txt").read_text().strip() == transcript
     assert res.note_text == transcript
     assert res.meta["cleanup_backend"] is None
@@ -153,7 +156,7 @@ def test_reclean_session_dir_rewrites_note_and_meta(tmp_path):
     assert res.title == "Redone"
     assert res.transcript == "the raw transcript text"
     assert res.note_text == "# Redone\n\nredone body\n"
-    assert (d / "note.md").read_text() == "# Redone\n\nredone body\n"
+    assert names.note_path(d).read_text() == "# Redone\n\nredone body\n"
 
     meta = json.loads((d / "meta.json").read_text())
     assert meta["title"] == "Redone"  # the new version's title becomes the note's title
@@ -208,7 +211,7 @@ def test_dictation_note_is_plain_text_without_heading(tmp_path, monkeypatch):
         clean_fn=clean, mode="dictation", backend="ollama",
     )
     assert result.note_text == "Hello there, this is a test.\n"  # no '# title' line to paste by accident
-    assert (result.session_dir / "note.md").read_text(encoding="utf-8") == "Hello there, this is a test.\n"
+    assert names.note_path(result.session_dir).read_text(encoding="utf-8") == "Hello there, this is a test.\n"
     assert result.meta["title"] == "hello there this is a"  # the title still lives in meta.json
 
 
@@ -254,7 +257,7 @@ def test_make_note_commits_the_first_version(tmp_path, monkeypatch):
     )
 
     assert (res.session_dir / "versions" / "note-1.md").read_text() == "# A Tidy Title\n\nthe cleaned body\n"
-    assert (res.session_dir / "note.md").read_text() == "# A Tidy Title\n\nthe cleaned body\n"
+    assert names.note_path(res.session_dir).read_text() == "# A Tidy Title\n\nthe cleaned body\n"
     entries = res.meta["versions"]  # the /api/note reply carries the history
     assert len(entries) == 1
     assert entries[0]["op"] == "clean" and entries[0]["n"] == 1
@@ -304,7 +307,7 @@ def test_note_history_over_a_full_edit_cycle(tmp_path, monkeypatch):
     edited = pipeline.save_edit(d, "# Hand Edited\n\nI typed this myself.")
     assert edited.version == 3 and edited.title == "Hand Edited"
     assert edited.note_text == "# Hand Edited\n\nI typed this myself.\n"
-    assert (d / "note.md").read_text() == "# Hand Edited\n\nI typed this myself.\n"
+    assert names.note_path(d).read_text() == "# Hand Edited\n\nI typed this myself.\n"
     assert versions.read_meta(d)["title"] == "Hand Edited"
     assert versions.entries(d)[2]["op"] == "edit"
 
@@ -326,7 +329,7 @@ def test_note_history_over_a_full_edit_cycle(tmp_path, monkeypatch):
     # v5 — restore v2
     back = pipeline.restore(d, 2)
     assert back.version == 5 and back.title == "Two"
-    assert (d / "note.md").read_text() == versions.read(d, 2) == "# Two\n\nsecond body\n"
+    assert names.note_path(d).read_text() == versions.read(d, 2) == "# Two\n\nsecond body\n"
     assert versions.entries(d)[4] == {
         "n": 5, "created": versions.entries(d)[4]["created"], "op": "restore", "mode": None,
         "backend": None, "model": None, "instructions": None, "restored_from": 2,
@@ -337,7 +340,7 @@ def test_note_history_over_a_full_edit_cycle(tmp_path, monkeypatch):
 
 def test_save_edit_rejects_blank_text_and_falls_back_to_the_meta_title(tmp_path):
     d = _session(tmp_path)
-    (d / "note.md").write_text("# Some Note\n\nbody\n", encoding="utf-8")
+    names.note_path(d).write_text("# Some Note\n\nbody\n", encoding="utf-8")
     for blank in ("", "   \n\n"):
         with pytest.raises(ValueError):
             pipeline.save_edit(d, blank)
@@ -354,14 +357,14 @@ def test_revise_needs_a_note_and_instructions(tmp_path):
 
     with pytest.raises(ValueError, match="no note to revise"):
         pipeline.revise(d, revise_fn=_reviser, instructions="shorter", backend="ollama")
-    (d / "note.md").write_text("# Some Note\n\nbody\n", encoding="utf-8")
+    names.note_path(d).write_text("# Some Note\n\nbody\n", encoding="utf-8")
     with pytest.raises(ValueError):
         pipeline.revise(d, revise_fn=_reviser, instructions="  ", backend="ollama")
 
 
 def test_restore_unknown_version_raises(tmp_path):
     d = _session(tmp_path)
-    (d / "note.md").write_text("# Some Note\n\nbody\n", encoding="utf-8")
+    names.note_path(d).write_text("# Some Note\n\nbody\n", encoding="utf-8")
     with pytest.raises(ValueError, match="no version 3"):
         pipeline.restore(d, 3)
 
@@ -437,7 +440,7 @@ def test_revise_of_a_plain_note_whose_style_is_gone_keeps_it_plain(tmp_path, mon
     session.mkdir()
     (session / "meta.json").write_text(
         json.dumps({"title": "Plain", "cleanup_mode": "retired-style", "versions": []}), encoding="utf-8")
-    (session / "note.md").write_text("just the body, no heading\n", encoding="utf-8")
+    names.note_path(session).write_text("just the body, no heading\n", encoding="utf-8")
     (session / "transcript.txt").write_text("raw words\n", encoding="utf-8")
 
     def fake_revise(note_text, instructions, backend=None, model=None):
@@ -445,10 +448,10 @@ def test_revise_of_a_plain_note_whose_style_is_gone_keeps_it_plain(tmp_path, mon
 
     result = pipeline.revise(session, revise_fn=fake_revise, instructions="shorter", backend="ollama")
     assert result.note_text == "a shorter body\n"  # no "# Plain" grew out of the missing style
-    assert versions.heading_title((session / "note.md").read_text(encoding="utf-8")) is None
+    assert versions.heading_title(names.note_path(session).read_text(encoding="utf-8")) is None
 
     # ... and a note that does carry one keeps it
-    (session / "note.md").write_text("# Plain\n\nbody\n", encoding="utf-8")
+    names.note_path(session).write_text("# Plain\n\nbody\n", encoding="utf-8")
     result = pipeline.revise(session, revise_fn=fake_revise, instructions="shorter", backend="ollama")
     assert result.note_text.startswith("# Plain\n\n")
 
@@ -459,7 +462,7 @@ def test_revise_of_a_plain_note_whose_style_is_gone_keeps_it_plain(tmp_path, mon
 def _take_session(tmp_path, *, note="# Deploy Notes\n\nStep one.\n", mode="light"):
     d = tmp_path / "2026-08-25-0900-takes"
     d.mkdir(parents=True)
-    (d / "note.md").write_text(note, encoding="utf-8")
+    names.note_path(d).write_text(note, encoding="utf-8")
     (d / "transcript.txt").write_text("first words\n", encoding="utf-8")
     (d / "meta.json").write_text(json.dumps({"title": "Deploy Notes", "cleanup_mode": mode}),
                                  encoding="utf-8")
@@ -486,7 +489,7 @@ def test_a_plain_style_merge_keeps_the_notes_own_title(tmp_path, monkeypatch):
 
     assert result["title"] == "Deploy Notes"  # the meta title, not the model's fallback
     assert versions.read_meta(d)["title"] == "Deploy Notes"
-    assert (d / "note.md").read_text(encoding="utf-8") == "the merged note\n"  # still headless
+    assert names.note_path(d).read_text(encoding="utf-8") == "the merged note\n"  # still headless
 
 
 def test_a_note_style_merge_takes_the_models_title(tmp_path, monkeypatch):
@@ -497,7 +500,7 @@ def test_a_note_style_merge_takes_the_models_title(tmp_path, monkeypatch):
         merge_fn=_merger("A Better Title"), how="merge", mode="light",
     )
     assert result["title"] == "A Better Title"
-    assert (d / "note.md").read_text(encoding="utf-8") == "# A Better Title\n\nthe merged note\n"
+    assert names.note_path(d).read_text(encoding="utf-8") == "# A Better Title\n\nthe merged note\n"
 
 
 def test_an_append_does_not_stack_a_second_rule(tmp_path, monkeypatch):
@@ -561,12 +564,15 @@ def test_double_clean_writes_named_baseline_and_variant(tmp_path, monkeypatch):
     assert all(c["backend"] == "ollama" for c in calls)
 
     folder = res.session_dir.name
-    baseline = res.session_dir / f"{folder}_note.md"
+    baseline = res.session_dir / f"{folder}_note_baseline.md"
     variant = res.session_dir / f"{folder}_note_variant_t0p3.md"
     assert baseline.read_text() == "# Baseline Title\n\ndeterministic body\n"
     assert variant.read_text() == "# Variant Title\n\nvaried body at 0.3\n"
-    # The app's canonical note.md is the baseline copy (web UI / versions keep reading it).
-    assert (res.session_dir / "note.md").read_text() == baseline.read_text()
+    # The live note starts as the baseline copy, but the baseline file stays FROZEN afterwards.
+    assert names.note_path(res.session_dir).read_text() == baseline.read_text()
+    versions.commit(res.session_dir, "# Edited\n\nlater edit\n", op="edit", title="Edited")
+    assert baseline.read_text() == "# Baseline Title\n\ndeterministic body\n"
+    assert names.note_path(res.session_dir).read_text() == "# Edited\n\nlater edit\n"
     assert res.note_text == baseline.read_text()
 
     meta = json.loads((res.session_dir / "meta.json").read_text())
@@ -639,9 +645,9 @@ def test_double_clean_variant_failure_keeps_the_baseline_note(tmp_path, monkeypa
         mode="edit", backend="ollama", source="file", source_path=str(src), rec_duration=1.0,
     )
     assert res.cleanup_error is None  # the note itself never fails
-    assert (res.session_dir / "note.md").read_text().startswith("# Keep This")
-    # No variant file, but the named baseline is still written.
-    assert (res.session_dir / f"{res.session_dir.name}_note.md").exists()
+    assert names.note_path(res.session_dir).read_text().startswith("# Keep This")
+    # No variant file, but the frozen baseline is still written.
+    assert (res.session_dir / f"{res.session_dir.name}_note_baseline.md").read_text().startswith("# Keep This")
     assert not any("_note_variant_" in p.name for p in res.session_dir.iterdir())
 
 
@@ -678,10 +684,10 @@ def _minutes_note(tmp_path, monkeypatch, clean_fn, *, on=True, **kw):
 def test_minutes_written_alongside_the_note(tmp_path, monkeypatch):
     calls = []
     res = _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls))
-    assert (res.session_dir / "note.md").read_text() == "# Main Note\n\nmain body\n"
-    assert (res.session_dir / "minutes.md").read_text() == \
+    assert names.note_path(res.session_dir).read_text() == "# Main Note\n\nmain body\n"
+    assert names.minutes_path(res.session_dir).read_text() == \
         "# Standup Minutes\n\n## Launch\n\n- decision: ship\n"
-    assert res.written["minutes"] == res.session_dir / "minutes.md"
+    assert res.written["minutes"] == names.minutes_path(res.session_dir)
     meta = json.loads((res.session_dir / "meta.json").read_text())
     assert meta["minutes_style"] == "meeting"
     assert isinstance(meta["minutes_seconds"], float)
@@ -691,7 +697,7 @@ def test_minutes_written_alongside_the_note(tmp_path, monkeypatch):
 def test_minutes_off_leaves_no_trace(tmp_path, monkeypatch):
     calls = []
     res = _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls), on=False)
-    assert not (res.session_dir / "minutes.md").exists()
+    assert not names.minutes_path(res.session_dir).exists()
     assert [c["mode"] for c in calls] == ["edit"]
     assert "minutes_style" not in json.loads((res.session_dir / "meta.json").read_text())
 
@@ -706,8 +712,8 @@ def test_minutes_failure_keeps_the_note(tmp_path, monkeypatch):
     calls = []
     res = _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls, fail=True))
     assert res.cleanup_error is None
-    assert (res.session_dir / "note.md").exists()
-    assert not (res.session_dir / "minutes.md").exists()
+    assert names.note_path(res.session_dir).exists()
+    assert not names.minutes_path(res.session_dir).exists()
     meta = json.loads((res.session_dir / "meta.json").read_text())
     assert "minutes blew up" in meta["minutes_error"]
     assert "minutes_style" not in meta
@@ -717,22 +723,22 @@ def test_minutes_skipped_for_raw(tmp_path, monkeypatch):
     calls = []
     res = _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls), raw=True)
     assert calls == []
-    assert not (res.session_dir / "minutes.md").exists()
+    assert not names.minutes_path(res.session_dir).exists()
 
 
 def test_minutes_skipped_when_the_note_itself_is_the_meeting_style(tmp_path, monkeypatch):
     calls = []
     res = _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls), mode="meeting")
     assert [c["mode"] for c in calls] == ["meeting"]  # one pass, not two
-    assert not (res.session_dir / "minutes.md").exists()
+    assert not names.minutes_path(res.session_dir).exists()
 
 
 def test_reclean_refreshes_minutes(tmp_path, monkeypatch):
     calls = []
     res = _minutes_note(tmp_path, monkeypatch, _minutes_cleaner(calls))
-    (res.session_dir / "minutes.md").write_text("# Old\n\nstale\n", encoding="utf-8")
+    names.minutes_path(res.session_dir).write_text("# Old\n\nstale\n", encoding="utf-8")
     r = reclean(res.session_dir, clean_fn=_minutes_cleaner(calls), mode="edit", backend="ollama")
-    assert r.minutes == res.session_dir / "minutes.md"
+    assert r.minutes == names.minutes_path(res.session_dir)
     assert r.minutes_error is None
     assert r.minutes.read_text().startswith("# Standup Minutes")
 

@@ -24,7 +24,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__, config, firstrun, pipeline, styles
+from . import __version__, config, firstrun, names, pipeline, styles
 from .pipeline import EmptyTranscriptError, TranscriptionError
 from .pipeline import resolve_redo as _resolve_redo  # noqa: F401  (kept for tests/back-compat)
 from .pipeline import resolved_model as _resolved_model  # noqa: F401  (kept for tests/back-compat)
@@ -129,7 +129,7 @@ def _report_stage(event: str, **info: object) -> None:
         _say(f"\nCleanup unavailable: {info['error']}\n")
         _say("Keeping the raw transcript instead.")
     elif event == "minutes_cleaned":
-        _say(f"Minutes: minutes.md in {info['seconds']}s.")
+        _say(f"Minutes written in {info['seconds']}s.")
     elif event == "minutes_failed":
         _say(f"(Meeting minutes skipped: {info['error']})")
 
@@ -175,7 +175,7 @@ def _do_redo(args: argparse.Namespace, backend: str) -> int:
         return 1
 
     if result.session_dir is not None:
-        _say(f"📁 updated {result.session_dir / 'note.md'}")
+        _say(f"📁 updated {names.note_path(result.session_dir)}")
     if result.minutes is not None:
         _say(f"📁 updated {result.minutes}")
     elif result.minutes_error:
@@ -189,7 +189,7 @@ def _do_redo(args: argparse.Namespace, backend: str) -> int:
     if args.to_stdout:
         sys.stdout.write(result.note_text)
     if args.open_editor and result.session_dir is not None:
-        _open_in_editor(result.session_dir / "note.md")
+        _open_in_editor(names.note_path(result.session_dir))
     return 0
 
 

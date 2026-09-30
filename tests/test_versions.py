@@ -5,14 +5,14 @@ from datetime import datetime
 
 import pytest
 
-from vnote import versions
+from vnote import names, versions
 
 
 def _session(tmp_path, *, note="# One\n\nfirst body\n", meta=None):
     d = tmp_path / "2026-08-20-0900-a-note"
     d.mkdir()
     if note is not None:
-        (d / "note.md").write_text(note, encoding="utf-8")
+        names.note_path(d).write_text(note, encoding="utf-8")
     if meta is not None:
         (d / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     return d
@@ -26,7 +26,7 @@ def test_commit_sequence_writes_files_note_md_and_entries(tmp_path):
                               when=datetime(2026, 8, 20, 9, 0, 0))
     assert n == 1
     assert (d / "versions" / "note-1.md").read_text(encoding="utf-8") == "# One\n\nfirst body\n"
-    assert (d / "note.md").read_text(encoding="utf-8") == "# One\n\nfirst body\n"
+    assert names.note_path(d).read_text(encoding="utf-8") == "# One\n\nfirst body\n"
     assert meta["title"] == "One"
     assert (meta["cleanup_mode"], meta["cleanup_backend"], meta["cleanup_model"]) == \
         ("edit", "ollama", "llama3.2:3b")
@@ -41,7 +41,7 @@ def test_commit_sequence_writes_files_note_md_and_entries(tmp_path):
                               instructions="make it shorter")
     assert n == 2
     assert (d / "versions" / "note-2.md").read_text(encoding="utf-8") == "# Two\n\nsecond body\n"  # normalized
-    assert (d / "note.md").read_text(encoding="utf-8") == "# Two\n\nsecond body\n"
+    assert names.note_path(d).read_text(encoding="utf-8") == "# Two\n\nsecond body\n"
     assert (d / "versions" / "note-1.md").read_text(encoding="utf-8") == "# One\n\nfirst body\n"  # untouched
     assert meta["recleaned"] is True and meta["cleanup_mode"] == "summary"
     assert meta["title"] == "Two"
@@ -69,7 +69,7 @@ def test_restore_entry_records_its_source(tmp_path):
     n, meta = versions.commit(d, versions.read(d, 1), op="restore", restored_from=1)
     assert n == 3
     assert meta["versions"][2]["restored_from"] == 1
-    assert (d / "note.md").read_text(encoding="utf-8") == "v1\n"
+    assert names.note_path(d).read_text(encoding="utf-8") == "v1\n"
 
 
 def test_ensure_history_migrates_a_0_5_0_folder(tmp_path):
@@ -207,7 +207,7 @@ def test_write_meta_is_atomic(tmp_path):
 def test_commit_normalizes_crlf(tmp_path):
     d = _session(tmp_path, note=None, meta={})
     versions.commit(d, "# Win\r\n\r\nline one\rline two\r\n\r\n", op="edit")
-    assert (d / "note.md").read_text(encoding="utf-8") == "# Win\n\nline one\nline two\n"
+    assert names.note_path(d).read_text(encoding="utf-8") == "# Win\n\nline one\nline two\n"
     assert versions.read(d, 1) == "# Win\n\nline one\nline two\n"
 
 
@@ -251,7 +251,7 @@ def test_concurrent_commits_keep_a_dense_history(tmp_path):
     log = versions.entries(d)
     assert [e["n"] for e in log] == list(range(1, total + 1))
     last = max(done)[1]
-    assert (d / "note.md").read_text(encoding="utf-8") == last
+    assert names.note_path(d).read_text(encoding="utf-8") == last
     assert versions.read(d, total) == last
     meta = versions.read_meta(d)
     assert (meta["title"], meta["created"], meta["source"]) == ("Start", "2026-08-20T09:00:00", "mic")

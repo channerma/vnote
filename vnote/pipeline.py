@@ -13,14 +13,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import config, output, styles, takes, versions
+from . import config, names, output, styles, takes, versions
 
 HOWS = ("continue", "append", "merge")  # what a new take does to the note it lands in
 
 # The companion document every cleaned note also gets (setting: meeting_notes):
 # the same transcript, minutes-formatted, written as minutes.md next to note.md.
 MEETING_STYLE = "meeting"
-MINUTES_FILE = "minutes.md"
 
 
 class EmptyTranscriptError(ValueError):
@@ -280,7 +279,7 @@ def make_note(
 
     note_text = transcript if note_body is None else note_markdown(title, note_body, mode)
     if minutes is not None:
-        minutes_path = session_dir / MINUTES_FILE
+        minutes_path = names.minutes_path(session_dir)
         minutes_path.write_text(
             note_markdown(minutes["title"], minutes["body"], MEETING_STYLE), encoding="utf-8"
         )
@@ -294,19 +293,20 @@ def make_note(
         if variant is not None:
             # The user's two named comparison files, alongside the app's canonical
             # note.md (which the web UI / versions / takes keep reading).
-            #   <folder>_note.md                   = the deterministic (temp-0) baseline
+            #   <folder>_note_baseline.md          = the deterministic (temp-0) baseline, FROZEN
+            #                                        (<folder>_note.md is now the live, editable note,
+            #                                        so it can no longer serve as the comparison file)
             #   <folder>_note_variant_t{tag}.md    = the varied pass; the temperature is spelled
             #                                        dot-free (0.3 -> t0p3) so integer parts
             #                                        can't collide (0.3 vs 1.3).
             temp_tag = str(variant["temperature"]).replace(".", "p")
-            (session_dir / f"{session_dir.name}_note.md").write_text(note_text, encoding="utf-8")
+            (session_dir / f"{session_dir.name}_note_baseline.md").write_text(note_text, encoding="utf-8")
             (session_dir / f"{session_dir.name}_note_variant_t{temp_tag}.md").write_text(
                 note_markdown(variant["title"], variant["body"], mode), encoding="utf-8"
             )
         elif config.double_clean():
-            # The varied pass failed — the deterministic baseline alone still gets its
-            # named file, so the pair layout stays predictable.
-            (session_dir / f"{session_dir.name}_note.md").write_text(note_text, encoding="utf-8")
+            # The varied pass failed — the frozen baseline alone still gets its named file.
+            (session_dir / f"{session_dir.name}_note_baseline.md").write_text(note_text, encoding="utf-8")
     return NoteResult(
         session_dir=session_dir,
         title=title,
@@ -406,7 +406,7 @@ def reclean(
         if mres is None:
             minutes_error = merr or "meeting cleanup produced nothing"
         else:
-            minutes = session_dir / MINUTES_FILE
+            minutes = names.minutes_path(session_dir)
             minutes.write_text(note_markdown(mres.title, mres.body, MEETING_STYLE), encoding="utf-8")
     return RecleanResult(session_dir=session_dir, title=result.title, note_text=note_text,
                          transcript=transcript, version=version, minutes=minutes,
@@ -461,7 +461,7 @@ def revise(
     the transcript. ``revise_fn(note_text, instructions, backend=, model=) -> CleanResult``.
     """
     session_dir = Path(session_dir)
-    note_path = session_dir / "note.md"
+    note_path = names.note_path(session_dir)
     if not note_path.is_file():
         raise ValueError("no note to revise")
     if not instructions or not instructions.strip():
@@ -533,7 +533,7 @@ def _apply_take(
     happens here may take it — or the note — with it.
     """
     session_dir = Path(session_dir)
-    current = (session_dir / "note.md").read_text(encoding="utf-8")
+    current = names.note_path(session_dir).read_text(encoding="utf-8")
     meta = versions.read_meta(session_dir)
     backend = resolved_backend(mode, backend)  # the style's backend unless the caller picked one
     try:
@@ -622,7 +622,7 @@ def continue_take(
     take = takes.add_take(session_dir, audio_tmp, transcript,
                           started.isoformat(timespec="seconds"), duration)
 
-    if raw or not (session_dir / "note.md").is_file():
+    if raw or not names.note_path(session_dir).is_file():
         return _take_result(session_dir, take, None)  # a raw note grows by takes alone
     result = _apply_take(session_dir, transcript, take=take, how=how, mode=mode, backend=backend,
                          model=model, instructions=instructions, clean_fn=clean_fn,
@@ -651,7 +651,7 @@ def rerun_take(
     session_dir = Path(session_dir)
     if how not in HOWS:
         raise ValueError(f"bad how: {how!r} (expected one of {', '.join(HOWS)})")
-    if not (session_dir / "note.md").is_file():
+    if not names.note_path(session_dir).is_file():
         raise ValueError("this note has never been cleaned; regenerate it instead")
     transcript = takes.take_transcript(session_dir, n)  # FileNotFoundError when there is no take n
     if not transcript.strip():

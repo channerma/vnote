@@ -1,6 +1,7 @@
 """Tests for slugging, session-dir creation, and clipboard backend selection."""
 
 import vnote.output as output
+from vnote import names
 from vnote.output import _slugify, make_session_dir, write_session
 
 
@@ -39,7 +40,7 @@ def test_write_session_writes_expected_files(tmp_path):
         meta={"k": "v"},
     )
     assert (tmp_path / "transcript.txt").read_text().strip() == "raw transcript"
-    assert (tmp_path / "note.md").read_text().startswith("# A Title")
+    assert names.note_path(tmp_path).read_text().startswith("# A Title")
     assert "k" in (tmp_path / "meta.json").read_text()
     assert set(out) >= {"transcript", "note", "meta"}
 

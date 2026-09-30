@@ -9,6 +9,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from . import names
 from .config import NOTES_DIR
 
 
@@ -44,7 +45,7 @@ def write_session(
     written: dict[str, Path] = {}
 
     if audio_src is not None:
-        audio_dst = session_dir / ("audio" + audio_src.suffix.lower())
+        audio_dst = session_dir / (names.audio_stem(session_dir) + audio_src.suffix.lower())
         if audio_src.resolve() != audio_dst.resolve():
             shutil.copy2(audio_src, audio_dst)
         written["audio"] = audio_dst
@@ -54,7 +55,7 @@ def write_session(
     written["transcript"] = transcript_path
 
     if note_md is not None:
-        note_path = session_dir / "note.md"
+        note_path = names.note_path(session_dir)
         head = f"# {title}\n\n" if heading else ""  # a plain-output style: no title line
         note_path.write_text(f"{head}{note_md.strip()}\n", encoding="utf-8")
         written["note"] = note_path

@@ -145,3 +145,16 @@ def test_no_daemon_forces_in_process_without_probing(monkeypatch):
     transcribe_fn, clean_fn = cli._pipeline(no_daemon=True)
     assert transcribe_fn is transcribe
     assert clean_fn is clean
+
+
+def test_transcribe_timeout_covers_long_recordings(monkeypatch):
+    # Regression: a 600 s read timeout killed 39-minute recordings on CPU.
+    seen = {}
+
+    def fake_post(path, payload, timeout):
+        seen["timeout"] = timeout
+        return {"transcript": "x", "meta": {}}
+
+    monkeypatch.setattr(daemon, "_post", fake_post)
+    daemon.transcribe(Path("a.wav"))
+    assert seen["timeout"] >= 2 * 3600

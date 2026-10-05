@@ -18,6 +18,14 @@ from . import config
 from .cleanup import CleanResult  # light: cleanup.py has no heavy top-level imports
 
 
+# The daemon sends nothing until transcription finishes, so this idle-read timeout IS
+# the whole transcription budget. It was 600 s, which killed any recording longer than
+# ~25 min on CPU ("transcription failed: timed out" on a 39-min meeting) while the
+# in-process path (--no-daemon) handled it fine. Generous on purpose: a genuinely dead
+# daemon surfaces as a refused connection, not a slow read.
+TRANSCRIBE_TIMEOUT_S = 4 * 3600
+
+
 def _base() -> str:
     host, port = config.daemon_addr()
     return f"http://{host}:{port}"
@@ -68,7 +76,7 @@ def transcribe(audio_path: Path, language: str | None = None) -> tuple[str, dict
     # which is wherever `vnote --serve` was started — usually not the caller's. A
     # relative path failed with a bare "no such file" from anywhere else.
     # (Clients that don't share the daemon's filesystem use transcribe_bytes().)
-    d = _post("/transcribe", {"audio_path": str(Path(audio_path).resolve()), "language": language}, timeout=600)
+    d = _post("/transcribe", {"audio_path": str(Path(audio_path).resolve()), "language": language}, timeout=TRANSCRIBE_TIMEOUT_S)
     return d["transcript"], d["meta"]
 
 
@@ -80,7 +88,7 @@ def transcribe_bytes(data: bytes, fmt: str = "wav", language: str | None = None)
         data=data,
         headers={"Content-Type": "application/octet-stream"},
     )
-    d = _request(req, timeout=600)
+    d = _request(req, timeout=TRANSCRIBE_TIMEOUT_S)
     return d["transcript"], d["meta"]
 
 
